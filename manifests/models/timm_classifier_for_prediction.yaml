@@ -1,0 +1,31 @@
+description: "TimmClassifierModel variant that emits per-sample dict output for marainer Evaluator's predictions_sink."
+use_case: "Use under marainer.evaluator.Evaluator when you want each prediction routed through a sink (e.g. waivefront's ClassificationPredictionsSink for top-k JSON). Same model architecture as TimmClassifierModel; only the forward output shape changes."
+category: "Classification"
+flux_type: "Model"
+task: "image_classification"
+class_path: "sonair.timm_classifier.TimmClassifierForPrediction"
+params:
+  model_name:
+    type: "str"
+    default: "efficientvit_b0"
+    description: "timm model identifier."
+  num_classes:
+    type: "int"
+    required: true
+    description: "Output class count."
+  pretrained:
+    type: "bool"
+    default: true
+    description: "Load timm-pretrained backbone."
+  in_chans:
+    type: "int"
+    default: 3
+    description: "Number of input channels."
+  checkpoint_path:
+    type: "str | null"
+    default: null
+    description: "Optional Lightning .ckpt path."
+  checkpoint_strict:
+    type: "bool"
+    default: false
+    description: "Forwarded to load_state_dict(strict=...)."

@@ -1,0 +1,7 @@
+description: "Per-batch collate that stacks image tensors and preserves per-sample metadata."
+use_case: "Pass to torch.utils.data.DataLoader.collate_fn for any sonair classification pipeline. Outputs Sample(input=stacked images, target=stacked labels, metadata=per_sample list)."
+category: "Classification"
+flux_type: "Callable"
+task: "image_classification"
+class_path: "sonair.classification.classification_collate_fn"
+params: {}

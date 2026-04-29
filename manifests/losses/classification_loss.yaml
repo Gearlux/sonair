@@ -1,0 +1,19 @@
+description: "Classification loss: CrossEntropy + optional label_smoothing + optional per-class weights."
+use_case: "Default classification loss for sonair. Wraps torch.nn.CrossEntropyLoss with the two knobs that matter for imbalanced datasets — label_smoothing (regularization) and class_weights (rebalance). Use class_weights for skewed RFUAV-like distributions."
+category: "Classification"
+flux_type: "Loss"
+task: "image_classification"
+class_path: "sonair.classification.ClassificationLoss"
+params:
+  label_smoothing:
+    type: "float"
+    default: 0.0
+    description: "Label-smoothing epsilon (0 = no smoothing; 0.1 is conventional for ImageNet-scale)."
+  class_weights:
+    type: "List[float] | null"
+    default: null
+    description: "Optional per-class weight tensor (length = num_classes). Rebalances imbalanced datasets."
+  ignore_index:
+    type: "int"
+    default: -100
+    description: "Target value to skip in the loss computation."

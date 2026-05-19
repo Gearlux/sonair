@@ -66,6 +66,23 @@ def test_num_classes_picked_up_from_features(fake_dataset: _FakeHFDataset) -> No
     assert ds.num_classes == 3
 
 
+def test_label_names_is_public_attribute(fake_dataset: _FakeHFDataset) -> None:
+    """``label_names`` is part of the dataset's public interface — the marainer
+    Trainer / Evaluator reads it via duck-typing to persist class_names.json
+    and to label confusion-matrix axes."""
+    ds = _build(fake_dataset)
+    assert ds.label_names == ("red_drone", "green_drone", "blue_drone")
+
+
+def test_label_names_empty_when_feature_has_no_names() -> None:
+    """No ClassLabel feature → ``label_names`` is an empty tuple, not missing."""
+    fake = _FakeHFDataset(items=[{"image": Image.new("RGB", (16, 16)), "label": 0}], class_names=[])
+    fake.features = {}
+    ds = _build(fake)
+    assert ds.label_names == ()
+    assert ds.num_classes == 0
+
+
 def test_getitem_returns_correctly_shaped_sample(fake_dataset: _FakeHFDataset) -> None:
     ds = _build(fake_dataset, image_size=224)
     sample = ds[0]

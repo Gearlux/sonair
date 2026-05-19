@@ -47,6 +47,14 @@ class HuggingFaceClassificationDataset(Dataset[Sample]):
     * ``metadata`` — ``{"label_idx": int, "label_name": str, "split": str,
       "repo_id": str, "index": int}``.
 
+    Public attributes (informal protocol consumed by marainer Trainer /
+    Evaluator):
+
+    * ``label_names: Tuple[str, ...]`` — human-readable class names in
+      class-id order, sourced from the HF feature's ``names`` list. Empty
+      tuple when the dataset has no labeled feature.
+    * ``num_classes: int`` — ``len(label_names)``.
+
     Args:
         repo_id: HuggingFace dataset identifier (e.g. ``"kitofrank/RFUAV"``).
         split: Which split to load (``"train"``, ``"validation"``, ``"test"``,
@@ -91,8 +99,8 @@ class HuggingFaceClassificationDataset(Dataset[Sample]):
         # Cache the human-readable label names (when present) for metadata.
         feature = getattr(self._ds, "features", {}).get(label_field) if hasattr(self._ds, "features") else None
         names = getattr(feature, "names", None)
-        self._label_names: Tuple[str, ...] = tuple(names) if names else ()
-        self.num_classes = len(self._label_names) if self._label_names else 0
+        self.label_names: Tuple[str, ...] = tuple(names) if names else ()
+        self.num_classes = len(self.label_names) if self.label_names else 0
 
         logger.info(
             f"HuggingFaceClassificationDataset: loaded {repo_id}@{split} — "
@@ -120,7 +128,7 @@ class HuggingFaceClassificationDataset(Dataset[Sample]):
         tensor = torch.from_numpy(arr).permute(2, 0, 1).contiguous().to(torch.float32) / 255.0
 
         label_idx = int(item[self.label_field])
-        label_name = self._label_names[label_idx] if 0 <= label_idx < len(self._label_names) else str(label_idx)
+        label_name = self.label_names[label_idx] if 0 <= label_idx < len(self.label_names) else str(label_idx)
 
         return Sample(
             input=tensor,

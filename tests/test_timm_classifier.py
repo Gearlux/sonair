@@ -124,13 +124,17 @@ def test_checkpoint_strips_lightning_model_prefix(tmp_path: Path) -> None:
         assert torch.equal(src_state[k], dst.state_dict()[k])
 
 
-def test_missing_checkpoint_raises() -> None:
+def test_missing_checkpoint_raises(tmp_path: Path) -> None:
+    # Use tmp_path so the path is guaranteed not to exist (and not under
+    # a non-traversable parent like `/nonexistent` which can exist on
+    # some hosts and surface as PermissionError instead of FileNotFoundError).
+    missing = tmp_path / "does_not_exist.ckpt"
     with pytest.raises(FileNotFoundError):
         TimmClassifierModel(
             model_name=TEST_MODEL,
             num_classes=4,
             pretrained=False,
-            checkpoint_path="/nonexistent/path/model.ckpt",
+            checkpoint_path=str(missing),
         )
 
 

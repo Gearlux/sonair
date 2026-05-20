@@ -4,7 +4,7 @@ Wraps a HuggingFace ``imagefolder``-style dataset (one ``image`` field of
 PIL images, one ``label`` field of int class ids) into a
 :class:`torch.utils.data.Dataset` whose items are
 :class:`dataflux.sample.Sample` records — exactly what
-:class:`marainer.trainer.Trainer` and
+:class:`marainer.trainer.LightningTrainer` and
 :func:`sonair.classification.classification_collate_fn` expect.
 
 The first concrete user is ``kitofrank/RFUAV``: a 37-class drone-type

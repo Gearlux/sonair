@@ -2,7 +2,7 @@
 
 Wraps :func:`timm.create_model` into a plain :class:`torch.nn.Module` whose
 ``forward(images) -> logits`` signature plugs straight into the **unchanged**
-base :class:`marainer.trainer.Trainer`. Marainer already calls
+base :class:`marainer.trainer.LightningTrainer`. Marainer already calls
 ``preds = self(batch.input)`` and ``loss = self.loss_fn(preds, batch.target)``
 — for classification that's all the glue we need. No bundled batch type, no
 step-output dict, no per-mode forward divergence.
@@ -176,7 +176,7 @@ class TimmClassifierModel(nn.Module):
 class TimmClassifierForPrediction(TimmClassifierModel):
     """:class:`TimmClassifierModel` variant that emits per-sample dicts.
 
-    Use this class **only** in :class:`marainer.evaluator.Evaluator`'s
+    Use this class **only** in :class:`marainer.evaluator.LightningEvaluator`'s
     ``predict_*.yaml`` configs where the ``predictions_sink`` expects
     per-sample :class:`~marainer.outputs.ClassificationOutput` dispatch.
     For ``train_*.yaml`` and ``evaluate_*.yaml`` configs where torchmetrics

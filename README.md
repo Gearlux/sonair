@@ -5,7 +5,7 @@ Image-classification models and adapters for the [Marainer](https://github.com/G
 Sonair provides a thin, Confluid-configurable wrapper around
 [`timm`](https://github.com/huggingface/pytorch-image-models)
 so any of timm's ~1000 pretrained backbones plug into the **unchanged** base
-`marainer.trainer.Trainer` — no subclassing, no overridden step functions, no
+`marainer.trainer.LightningTrainer` — no subclassing, no overridden step functions, no
 custom Lightning module. The Trainer's standard
 `preds = self(batch.input); loss = self.loss_fn(preds, batch.target)` flow
 fits classification natively.
@@ -50,7 +50,7 @@ train_loader: !class:torch.utils.data.DataLoader
   shuffle: true
   collate_fn: !ref:sonair.classification.classification_collate_fn
 
-trainer: !class:marainer.trainer.Trainer
+trainer: !class:marainer.trainer.LightningTrainer
   experiment_name: my_classification
   run_name: efficientvit_b0
   model: !ref:model
@@ -107,7 +107,7 @@ See `timm.list_models()` for the full catalogue.
 |--------|---------|
 | `ClassificationLoss` | `nn.CrossEntropyLoss` wrapped for Confluid configuration; supports `class_weights`, `label_smoothing`, and `ignore_index`. |
 | `classification_collate_fn` | DataLoader collate that stacks per-sample image tensors and scalar class-id targets, preserves per-sample metadata as a list (the default collate crashes on string-valued metadata). |
-| `load_lightning_checkpoint` | Strip Lightning's `"model."` prefix when loading a `.ckpt` saved through `marainer.trainer.Trainer`. |
+| `load_lightning_checkpoint` | Strip Lightning's `"model."` prefix when loading a `.ckpt` saved through `marainer.trainer.LightningTrainer`. |
 
 Most torchmetrics classification metrics
 (`MulticlassAccuracy`, `MulticlassF1Score`, `MulticlassAUROC`, ...) accept

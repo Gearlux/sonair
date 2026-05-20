@@ -1,5 +1,5 @@
 description: "TimmClassifierModel variant that emits per-sample dict output for marainer Evaluator's predictions_sink."
-use_case: "Use under marainer.evaluator.Evaluator when you want each prediction routed through a sink (e.g. waivefront's ClassificationPredictionsSink for top-k JSON). Same model architecture as TimmClassifierModel; only the forward output shape changes."
+use_case: "Use under marainer.evaluator.LightningEvaluator when you want each prediction routed through a sink (e.g. waivefront's ClassificationPredictionsSink for top-k JSON). Same model architecture as TimmClassifierModel; only the forward output shape changes."
 category: "Classification"
 flux_type: "Model"
 task: "image_classification"

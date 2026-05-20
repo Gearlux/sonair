@@ -1,5 +1,5 @@
 """Generic image-classification adapters that plug into Marainer's
-:class:`~marainer.trainer.Trainer`.
+:class:`~marainer.trainer.LightningTrainer`.
 
 Classification is the simplest fit for the base Trainer: a classifier takes
 ``[N, 3, H, W]`` images and emits ``[N, C]`` logits, and the loss / metric

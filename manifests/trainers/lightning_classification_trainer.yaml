@@ -1,0 +1,70 @@
+description: "LightningClassificationTrainer: specialised image-classification trainer with baked-in ClassificationLoss, classification_collate_fn, and accuracy/F1 metrics."
+use_case: "Drop-in replacement for LightningTrainer when training image classifiers. Only requires model, train_set, num_classes — loss, collate, and metrics are wired automatically. Invoke via `sonair train` or `marainer classification train`."
+category: "Classification"
+flux_type: "LightningClassificationTrainer"
+class_path: "sonair.trainer.LightningClassificationTrainer"
+params:
+  model:
+    type: "torch.nn.Module"
+    required: true
+    description: "Classification model that emits [N, num_classes] logits. Use TimmClassifierModel for timm backbones."
+  train_set:
+    type: "Any"
+    required: true
+    description: "Training dataset or Flux pipeline."
+  num_classes:
+    type: "int"
+    required: true
+    description: "Number of output classes. Drives automatic metric construction."
+  val_set:
+    type: "Any | null"
+    default: null
+    description: "Validation dataset or Flux pipeline."
+  test_set:
+    type: "Any | null"
+    default: null
+    description: "Held-out test dataset. When set, lightning.test() runs after fit()."
+  optimizer:
+    type: "Lazy[torch.optim.Optimizer]"
+    default: "Class(torch.optim.AdamW, lr=1e-4, weight_decay=0.05)"
+    description: "Optimizer (deferred). Default: AdamW with learning rate 1e-4."
+  train_loader:
+    type: "Lazy[DataLoader]"
+    default: "Class(DataLoader, collate_fn=classification_collate_fn)"
+    description: "DataLoader config for training data. classification_collate_fn is baked in."
+  val_loader:
+    type: "Lazy[DataLoader]"
+    default: "Class(DataLoader, collate_fn=classification_collate_fn)"
+    description: "DataLoader config for validation data."
+  test_loader:
+    type: "Lazy[DataLoader]"
+    default: "Class(DataLoader, collate_fn=classification_collate_fn)"
+    description: "DataLoader config for test data."
+  lightning:
+    type: "Lazy[pytorch_lightning.Trainer]"
+    default: "Class(L.Trainer)"
+    description: "PyTorch Lightning Trainer config."
+  experiment_name:
+    type: "str"
+    default: "sonair_classification"
+    description: "MLflow experiment name."
+  run_name:
+    type: "str"
+    default: "train"
+    description: "MLflow run name."
+  loss_fn:
+    type: "Callable | null"
+    default: "ClassificationLoss()"
+    description: "Loss function (post-construction). Default: ClassificationLoss. Can be overridden via YAML."
+  train_metrics:
+    type: "torchmetrics.MetricCollection | null"
+    default: "auto (top-1 accuracy + macro F1, +top-5 when num_classes >= 5)"
+    description: "Train MetricCollection. Auto-built from num_classes; override via YAML if needed."
+  val_metrics:
+    type: "torchmetrics.MetricCollection | null"
+    default: "auto (same as train_metrics with val/ prefix)"
+    description: "Validation MetricCollection."
+  test_metrics:
+    type: "torchmetrics.MetricCollection | null"
+    default: "auto (same as train_metrics with test/ prefix)"
+    description: "Test MetricCollection."

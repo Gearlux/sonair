@@ -2,8 +2,8 @@
 
 Lightning saves the wrapping :class:`pytorch_lightning.LightningModule`'s full
 state — including the ``model.`` prefix that comes from
-``self.model = model`` inside :class:`marainer.trainer.Trainer` /
-:class:`marainer.evaluator.Evaluator`. This helper hides that detail so each
+``self.model = model`` inside :class:`marainer.trainer.LightningTrainer` /
+:class:`marainer.evaluator.LightningEvaluator`. This helper hides that detail so each
 classification-model class can load its own weights directly in ``__init__``,
 without dragging Marainer into the picture.
 

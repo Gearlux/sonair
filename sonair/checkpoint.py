@@ -12,6 +12,7 @@ also tolerated — the helper looks for a top-level ``state_dict`` key first
 and otherwise treats the loaded object as the state dict itself.
 """
 
+import os
 from typing import Any, Mapping
 
 import torch
@@ -42,6 +43,14 @@ def load_lightning_checkpoint(model: nn.Module, path: str, strict: bool = False)
         FileNotFoundError: ``path`` doesn't exist.
         RuntimeError: ``strict=True`` and any keys mismatch.
     """
+    # Explicit existence check: torch.load delegates straight to open() and
+    # surfaces whatever errno the OS returns. On Linux that's a PermissionError
+    # when the user can't traverse a parent of a non-existent path (e.g.
+    # `/nonexistent/...`), which obscures the real cause. os.path.exists()
+    # (unlike Path.exists() in 3.12+) returns False on any os.stat() failure,
+    # so it normalises both ENOENT and EACCES into the documented contract.
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Checkpoint file not found: {path}")
     logger.info(f"{type(model).__name__}: loading checkpoint from {path}")
     raw: Any = torch.load(path, map_location="cpu", weights_only=False)
     state_dict: Mapping[str, Any]

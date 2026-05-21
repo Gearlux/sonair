@@ -17,7 +17,6 @@ from typing import Any, Mapping
 
 import torch
 import torch.nn as nn
-
 from logflow import get_logger
 
 logger = get_logger(__name__)
@@ -25,9 +24,7 @@ logger = get_logger(__name__)
 _LIGHTNING_PREFIX = "model."
 
 
-def load_lightning_checkpoint(
-    model: nn.Module, path: str, strict: bool = False
-) -> None:
+def load_lightning_checkpoint(model: nn.Module, path: str, strict: bool = False) -> None:
     """Load a Lightning-wrapped ``state_dict`` into ``model`` in place.
 
     Strips the ``"model."`` prefix Lightning's wrapper adds. Tolerates
@@ -63,14 +60,11 @@ def load_lightning_checkpoint(
         state_dict = raw
 
     stripped = {
-        (k[len(_LIGHTNING_PREFIX) :] if k.startswith(_LIGHTNING_PREFIX) else k): v
-        for k, v in state_dict.items()
+        (k[len(_LIGHTNING_PREFIX) :] if k.startswith(_LIGHTNING_PREFIX) else k): v for k, v in state_dict.items()
     }
     missing, unexpected = model.load_state_dict(stripped, strict=strict)
     if missing:
-        logger.info(
-            f"{type(model).__name__}: checkpoint missing {len(missing)} key(s) (e.g. {missing[:3]})"
-        )
+        logger.info(f"{type(model).__name__}: checkpoint missing {len(missing)} key(s) (e.g. {missing[:3]})")
     if unexpected:
         logger.info(
             f"{type(model).__name__}: checkpoint had {len(unexpected)} unexpected key(s) (e.g. {unexpected[:3]})"

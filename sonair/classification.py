@@ -41,11 +41,10 @@ from typing import Any, Dict, List, Optional, cast
 
 import torch
 import torch.nn as nn
-from torch import Tensor
-
 from confluid import configurable
 from dataflux.sample import Sample
 from logflow import get_logger
+from torch import Tensor
 
 logger = get_logger(__name__)
 
@@ -108,9 +107,7 @@ class ClassificationLoss(nn.Module):
 
     def forward(self, logits: Tensor, target: Tensor) -> Tensor:
         if logits.dim() != 2:
-            raise ValueError(
-                f"ClassificationLoss expects logits [N,C], got shape {tuple(logits.shape)}."
-            )
+            raise ValueError(f"ClassificationLoss expects logits [N,C], got shape {tuple(logits.shape)}.")
         if target.dim() != 1:
             raise ValueError(
                 f"ClassificationLoss expects target [N] int64 (class ids), got shape {tuple(target.shape)}."

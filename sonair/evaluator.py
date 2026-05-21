@@ -28,11 +28,11 @@ Minimal YAML example::
 from typing import Any, Optional
 
 import pytorch_lightning as L
+from confluid import Class, Lazy, configurable
+from marainer.evaluator import LightningEvaluator
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 
-from confluid import Class, Lazy, configurable
-from marainer.evaluator import LightningEvaluator
 from sonair.classification import classification_collate_fn
 from sonair.trainer import _build_classification_metrics
 
@@ -70,9 +70,7 @@ class LightningClassificationEvaluator(LightningEvaluator):
         run_name: str = "evaluate",
         metrics_sidecar_path: Optional[str] = None,
     ) -> None:
-        metrics: MetricCollection = _build_classification_metrics(num_classes).clone(
-            prefix="test/"
-        )
+        metrics: MetricCollection = _build_classification_metrics(num_classes).clone(prefix="test/")
         super().__init__(
             model=model,
             dataset=dataset,

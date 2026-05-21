@@ -47,7 +47,9 @@ def fake_dataset() -> _FakeHFDataset:
     return _FakeHFDataset(items, class_names=["red_drone", "green_drone", "blue_drone"])
 
 
-def _build(fake_dataset: _FakeHFDataset, **kwargs: Any) -> HuggingFaceClassificationDataset:
+def _build(
+    fake_dataset: _FakeHFDataset, **kwargs: Any
+) -> HuggingFaceClassificationDataset:
     """Bypass HF Hub: patch load_dataset to return our fake dataset."""
     with patch("datasets.load_dataset", return_value=fake_dataset):
         return HuggingFaceClassificationDataset(repo_id="fake/RFUAV", **kwargs)
@@ -76,7 +78,9 @@ def test_label_names_is_public_attribute(fake_dataset: _FakeHFDataset) -> None:
 
 def test_label_names_empty_when_feature_has_no_names() -> None:
     """No ClassLabel feature → ``label_names`` is an empty tuple, not missing."""
-    fake = _FakeHFDataset(items=[{"image": Image.new("RGB", (16, 16)), "label": 0}], class_names=[])
+    fake = _FakeHFDataset(
+        items=[{"image": Image.new("RGB", (16, 16)), "label": 0}], class_names=[]
+    )
     fake.features = {}
     ds = _build(fake)
     assert ds.label_names == ()
@@ -114,7 +118,9 @@ def test_resize_changes_spatial_dims(fake_dataset: _FakeHFDataset) -> None:
 def test_no_resize_when_image_already_correct_size() -> None:
     """If the source image already matches image_size, the resize is a no-op."""
     fake = _FakeHFDataset(
-        items=[{"image": Image.new("RGB", (32, 32), color=(128, 128, 128)), "label": 0}],
+        items=[
+            {"image": Image.new("RGB", (32, 32), color=(128, 128, 128)), "label": 0}
+        ],
         class_names=["only_class"],
     )
     ds = _build(fake, image_size=32)

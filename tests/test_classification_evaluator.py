@@ -6,12 +6,12 @@ from typing import Any, Dict, List
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
-from confluid import Class
-from dataflux.core import Flux
-from dataflux.sample import Sample
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 
+from confluid import Class
+from dataflux.core import Flux
+from dataflux.sample import Sample
 from sonair.classification import classification_collate_fn
 from sonair.evaluator import LightningClassificationEvaluator
 
@@ -75,7 +75,9 @@ def test_metrics_have_test_prefix() -> None:
         num_classes=3,
     )
     keys = list(ev.metrics.keys())  # type: ignore[union-attr]
-    assert all(k.startswith("test/") for k in keys), f"Expected test/ prefix, got: {keys}"
+    assert all(
+        k.startswith("test/") for k in keys
+    ), f"Expected test/ prefix, got: {keys}"
 
 
 def test_no_top5_for_small_num_classes() -> None:

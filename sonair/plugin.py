@@ -10,7 +10,6 @@ exposing:
 """
 
 from liquifai import LiquifyApp
-
 from sonair.cli import evaluate, train
 
 

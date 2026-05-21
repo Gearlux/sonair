@@ -33,12 +33,12 @@ from typing import Any, Optional
 
 import pytorch_lightning as L
 import torch
-from confluid import Class, Lazy, configurable
-from marainer.trainer import LightningTrainer
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
 
+from confluid import Class, Lazy, configurable
+from marainer.trainer import LightningTrainer
 from sonair.classification import ClassificationLoss, classification_collate_fn
 
 
@@ -79,9 +79,13 @@ class LightningClassificationTrainer(LightningTrainer):
         val_set: Any = None,
         test_set: Any = None,
         optimizer: Lazy[Any] = Class(torch.optim.AdamW, lr=1e-4, weight_decay=0.05),
-        train_loader: Lazy[Any] = Class(DataLoader, collate_fn=classification_collate_fn),
+        train_loader: Lazy[Any] = Class(
+            DataLoader, collate_fn=classification_collate_fn
+        ),
         val_loader: Lazy[Any] = Class(DataLoader, collate_fn=classification_collate_fn),
-        test_loader: Lazy[Any] = Class(DataLoader, collate_fn=classification_collate_fn),
+        test_loader: Lazy[Any] = Class(
+            DataLoader, collate_fn=classification_collate_fn
+        ),
         lightning: Any = Class(L.Trainer),
         experiment_name: str = "sonair_classification",
         run_name: str = "train",

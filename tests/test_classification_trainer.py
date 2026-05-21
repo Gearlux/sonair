@@ -2,9 +2,9 @@
 
 import torch
 import torch.nn as nn
-from dataflux.sample import Sample
 from torchmetrics import MetricCollection
 
+from dataflux.sample import Sample
 from sonair.classification import ClassificationLoss
 from sonair.trainer import LightningClassificationTrainer, _build_classification_metrics
 
@@ -30,8 +30,13 @@ def _make_batch(n: int = 8, num_classes: int = 3, input_size: int = 4) -> Sample
     )
 
 
-def _make_samples(n: int = 16, num_classes: int = 3, input_size: int = 4) -> list[Sample]:
-    return [Sample(input=torch.randn(input_size), target=i % num_classes, metadata={}) for i in range(n)]
+def _make_samples(
+    n: int = 16, num_classes: int = 3, input_size: int = 4
+) -> list[Sample]:
+    return [
+        Sample(input=torch.randn(input_size), target=i % num_classes, metadata={})
+        for i in range(n)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -85,9 +90,15 @@ def test_metrics_are_wired_with_correct_prefixes() -> None:
     val_keys = [str(k) for k in trainer.val_metrics.keys()]
     test_keys = [str(k) for k in trainer.test_metrics.keys()]
 
-    assert all(k.startswith("train/") for k in train_keys), f"Expected train/ prefix, got: {train_keys}"
-    assert all(k.startswith("val/") for k in val_keys), f"Expected val/ prefix, got: {val_keys}"
-    assert all(k.startswith("test/") for k in test_keys), f"Expected test/ prefix, got: {test_keys}"
+    assert all(
+        k.startswith("train/") for k in train_keys
+    ), f"Expected train/ prefix, got: {train_keys}"
+    assert all(
+        k.startswith("val/") for k in val_keys
+    ), f"Expected val/ prefix, got: {val_keys}"
+    assert all(
+        k.startswith("test/") for k in test_keys
+    ), f"Expected test/ prefix, got: {test_keys}"
 
 
 def test_no_top5_for_small_num_classes() -> None:
@@ -98,7 +109,9 @@ def test_no_top5_for_small_num_classes() -> None:
     )
     assert trainer.train_metrics is not None
     keys = [str(k) for k in trainer.train_metrics.keys()]
-    assert not any("top5" in k for k in keys), f"top5 should not appear for 2 classes, got: {keys}"
+    assert not any(
+        "top5" in k for k in keys
+    ), f"top5 should not appear for 2 classes, got: {keys}"
 
 
 def test_top5_added_for_large_num_classes() -> None:
@@ -109,7 +122,9 @@ def test_top5_added_for_large_num_classes() -> None:
     )
     assert trainer.train_metrics is not None
     keys = [str(k) for k in trainer.train_metrics.keys()]
-    assert any("top5" in k for k in keys), f"top5 should appear for 10 classes, got: {keys}"
+    assert any(
+        "top5" in k for k in keys
+    ), f"top5 should appear for 10 classes, got: {keys}"
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +177,6 @@ def test_metrics_update_on_training_step() -> None:
 
 def test_default_loader_uses_classification_collate_fn() -> None:
     from confluid.fluid import Class as ConfluidClass
-
     from sonair.classification import classification_collate_fn
 
     trainer = LightningClassificationTrainer(

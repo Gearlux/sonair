@@ -40,11 +40,11 @@ from typing import List, Optional, cast
 import timm
 import torch
 import torch.nn as nn
+from torch import Tensor
+
 from confluid import configurable
 from logflow import get_logger
 from marainer.outputs import ClassificationOutput, classification_output
-from torch import Tensor
-
 from sonair.checkpoint import load_lightning_checkpoint
 
 logger = get_logger(__name__)
@@ -147,11 +147,14 @@ class TimmClassifierModel(nn.Module):
             ``[N, num_classes]`` raw logits.
         """
         if images.dim() != 4:
-            raise ValueError(f"TimmClassifierModel expects 4D [N,C,H,W] images, got shape {tuple(images.shape)}.")
+            raise ValueError(
+                f"TimmClassifierModel expects 4D [N,C,H,W] images, got shape {tuple(images.shape)}."
+            )
         n, c, _, _ = images.shape
         if c != self.in_channels:
             raise ValueError(
-                f"TimmClassifierModel was built for in_channels={self.in_channels}, " f"got images with {c} channels."
+                f"TimmClassifierModel was built for in_channels={self.in_channels}, "
+                f"got images with {c} channels."
             )
 
         logits = cast(Tensor, self.classifier(images))

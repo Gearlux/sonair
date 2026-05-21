@@ -94,9 +94,7 @@ def test_checkpoint_round_trip_via_init(tmp_path: Path) -> None:
         pretrained=False,
         checkpoint_path=str(ckpt_path),
     )
-    for (k_src, v_src), (k_dst, v_dst) in zip(
-        src.state_dict().items(), dst.state_dict().items()
-    ):
+    for (k_src, v_src), (k_dst, v_dst) in zip(src.state_dict().items(), dst.state_dict().items()):
         assert k_src == k_dst
         assert torch.equal(v_src, v_dst)
 
@@ -154,9 +152,7 @@ def test_logits_are_differentiable() -> None:
     logits = model(images)
     loss = logits.sum()
     loss.backward()
-    assert any(
-        p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters()
-    )
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters())
 
 
 # --- TimmClassifierForPrediction -------------------------------------------

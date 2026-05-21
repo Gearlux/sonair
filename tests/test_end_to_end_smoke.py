@@ -27,9 +27,7 @@ class _FakeFeature:
 
 
 class _FakeHFDataset:
-    def __init__(
-        self, n_per_class: int = 4, n_classes: int = 3, image_size: int = 64
-    ) -> None:
+    def __init__(self, n_per_class: int = 4, n_classes: int = 3, image_size: int = 64) -> None:
         self._items = []
         for cls_id in range(n_classes):
             for _ in range(n_per_class):
@@ -39,15 +37,11 @@ class _FakeHFDataset:
                 color = ((cls_id * 80) % 255, (cls_id * 50) % 255, (cls_id * 30) % 255)
                 self._items.append(
                     {
-                        "image": Image.new(
-                            "RGB", (image_size, image_size), color=color
-                        ),
+                        "image": Image.new("RGB", (image_size, image_size), color=color),
                         "label": cls_id,
                     }
                 )
-        self.features = {
-            "label": _FakeFeature([f"class_{i}" for i in range(n_classes)])
-        }
+        self.features = {"label": _FakeFeature([f"class_{i}" for i in range(n_classes)])}
 
     def __len__(self) -> int:
         return len(self._items)
@@ -98,9 +92,7 @@ def test_full_train_step_runs_end_to_end() -> None:
     optimizer.zero_grad()
     loss.backward()
     # At least one parameter accumulated a non-zero grad.
-    assert any(
-        p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters()
-    )
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters())
     optimizer.step()
 
 
@@ -108,12 +100,8 @@ def test_prediction_class_emits_per_sample_dicts_for_full_batch() -> None:
     """The predict YAML's path: TimmClassifierForPrediction yields a list of dicts."""
     fake = _FakeHFDataset(n_per_class=2, n_classes=3, image_size=64)
     with patch("datasets.load_dataset", return_value=fake):
-        ds = HuggingFaceClassificationDataset(
-            repo_id="fake/RFUAV", split="train", image_size=64
-        )
-    loader = DataLoader(
-        ds, batch_size=4, num_workers=0, collate_fn=classification_collate_fn
-    )
+        ds = HuggingFaceClassificationDataset(repo_id="fake/RFUAV", split="train", image_size=64)
+    loader = DataLoader(ds, batch_size=4, num_workers=0, collate_fn=classification_collate_fn)
 
     model = TimmClassifierForPrediction(
         model_name="resnet18",
@@ -135,12 +123,8 @@ def test_metadata_per_sample_survives_collation() -> None:
     """Per-sample metadata (label_name, repo_id, etc.) must round-trip through collate."""
     fake = _FakeHFDataset(n_per_class=2, n_classes=3, image_size=32)
     with patch("datasets.load_dataset", return_value=fake):
-        ds = HuggingFaceClassificationDataset(
-            repo_id="fake/RFUAV", split="train", image_size=32
-        )
-    loader = DataLoader(
-        ds, batch_size=4, num_workers=0, collate_fn=classification_collate_fn
-    )
+        ds = HuggingFaceClassificationDataset(repo_id="fake/RFUAV", split="train", image_size=32)
+    loader = DataLoader(ds, batch_size=4, num_workers=0, collate_fn=classification_collate_fn)
     batch = next(iter(loader))
     metas = batch.metadata["per_sample"]
     assert isinstance(metas, list)

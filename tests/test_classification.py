@@ -5,8 +5,8 @@ from typing import List
 
 import pytest
 import torch
-
 from dataflux.sample import Sample
+
 from sonair.classification import ClassificationLoss, classification_collate_fn
 
 
@@ -64,9 +64,7 @@ def test_class_weights_change_loss_value() -> None:
     target = torch.ones(2, dtype=torch.int64)
 
     base = ClassificationLoss(reduction="sum")(logits, target)
-    weighted = ClassificationLoss(class_weights=[1.0, 5.0], reduction="sum")(
-        logits, target
-    )
+    weighted = ClassificationLoss(class_weights=[1.0, 5.0], reduction="sum")(logits, target)
     assert float(weighted) == pytest.approx(5.0 * float(base))
 
 

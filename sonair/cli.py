@@ -6,8 +6,6 @@ to ``marainer classification train`` / ``marainer classification evaluate``
 (which are registered via the marainer plugin in :mod:`sonair.plugin`).
 """
 
-import sys
-
 from liquifai import LiquifyApp
 from logflow import get_logger
 
@@ -15,9 +13,6 @@ from sonair.evaluator import LightningClassificationEvaluator
 from sonair.trainer import LightningClassificationTrainer
 
 logger = get_logger(__name__)
-
-if "." not in sys.path:
-    sys.path.insert(0, ".")
 
 app = LiquifyApp(name="sonair", description="Sonair image-classification commands")
 

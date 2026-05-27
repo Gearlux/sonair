@@ -34,6 +34,9 @@ sonair = "sonair.cli:main"
 [project.entry-points."marainer.commands"]
 sonair = "sonair.plugin:register"
 
+[project.entry-points."confluid.configurables"]
+sonair = "sonair"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["sonair*"]

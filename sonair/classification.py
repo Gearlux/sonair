@@ -54,7 +54,7 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-@configurable
+@configurable(category="classification_loss")
 class ClassificationLoss(nn.Module):
     """:class:`torch.nn.CrossEntropyLoss` wrapped for Confluid configuration.
 

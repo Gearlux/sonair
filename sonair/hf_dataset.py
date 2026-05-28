@@ -36,7 +36,7 @@ from torch.utils.data import Dataset
 logger = get_logger(__name__)
 
 
-@configurable
+@configurable(category="classification_dataset")
 class HuggingFaceClassificationDataset(Dataset[Sample]):
     """Wrap a HuggingFace imagefolder dataset as a torch Dataset of Samples.
 

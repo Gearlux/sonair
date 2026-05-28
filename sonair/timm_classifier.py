@@ -50,7 +50,7 @@ from sonair.checkpoint import load_lightning_checkpoint
 logger = get_logger(__name__)
 
 
-@configurable
+@configurable(category="classification_model")
 class TimmClassifierModel(nn.Module):
     """timm-backed image-classification model wrapped for the Marainer Trainer flow.
 

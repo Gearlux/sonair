@@ -101,6 +101,11 @@ Recommended backbones for spectrogram classification:
 
 See `timm.list_models()` for the full catalogue.
 
+`TimmClassifierModel` is tagged `@configurable(category="classification_model")` (and `ClassificationLoss` /
+`HuggingFaceClassificationDataset` carry `classification_loss` / `classification_dataset`), so navigaitor's
+`list_configurable_classes(category=...)` and the visual-editor form-spec offer them — and any future
+classification model/loss/dataset — as task-scoped options.
+
 ## Adapters
 
 | Symbol | Purpose |

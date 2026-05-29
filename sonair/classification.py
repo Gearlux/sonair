@@ -8,11 +8,16 @@ type, no step-output dict, no per-mode forward divergence — the Trainer's
 standard ``preds = self(batch.input)`` /
 ``loss = self.loss_fn(preds, batch.target)`` flow works unchanged.
 
+Loss: there is **no sonair loss wrapper** — :class:`torch.nn.CrossEntropyLoss`
+is the classification loss, registered here as a confluid configurable
+(``task="classification", role="loss"``) so it's discoverable / pickable via
+navigaitor's task surfaces and usable straight from YAML
+(``label_smoothing`` / ``ignore_index`` / ``reduction`` all work; per-class
+``weight`` needs a tensor and isn't expressible in YAML). It consumes raw
+logits ``[N, C]`` + int64 targets ``[N]`` directly.
+
 This module provides:
 
-* :class:`ClassificationLoss` — a :class:`torch.nn.CrossEntropyLoss` wrapper
-  exposed for Confluid configuration (so per-class weights, label smoothing,
-  and ignore_index can be set from YAML without writing a Python class).
 * :func:`classification_collate_fn` — a DataLoader collate that stacks
   per-sample ``input`` images and ``target`` scalar class ids into batched
   tensors and keeps per-sample metadata as a list (the default collate would
@@ -26,9 +31,8 @@ they can be wired into ``val_metrics`` straight from YAML.
 
 Typical wiring (YAML)::
 
-    loss_fn: !class:sonair.classification.ClassificationLoss
+    loss_fn: !class:torch.nn.CrossEntropyLoss
       label_smoothing: 0.1            # timm's modern-classifier default
-      # class_weights: [...]          # optional — per-class re-weighting
 
     val_metrics: !class:torchmetrics.classification.MulticlassAccuracy
       num_classes: 37
@@ -37,88 +41,22 @@ Typical wiring (YAML)::
       collate_fn: !ref:sonair.classification.classification_collate_fn
 """
 
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List
 
 import torch
 import torch.nn as nn
-from confluid import configurable
+from confluid import register
 from dataflux.sample import Sample
 from logflow import get_logger
 from torch import Tensor
 
 logger = get_logger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Loss adapter
-# ---------------------------------------------------------------------------
-
-
-@configurable(category="classification_loss")
-class ClassificationLoss(nn.Module):
-    """:class:`torch.nn.CrossEntropyLoss` wrapped for Confluid configuration.
-
-    The base Trainer calls ``loss_fn(preds, target)`` where ``preds`` are
-    raw logits ``[N, C]`` and ``target`` is an int64 class-id tensor ``[N]``.
-    PyTorch's CrossEntropyLoss handles softmax + NLL internally, so we
-    forward raw logits straight through.
-
-    Args:
-        class_weights: Optional per-class loss multipliers, length
-            ``num_classes``. Useful when class frequencies are skewed.
-        label_smoothing: Smoothing factor in ``[0.0, 1.0)``. ``0.0`` (default)
-            is plain cross-entropy; ``0.1`` is timm's standard recipe for
-            ViT-family fine-tuning.
-        ignore_index: Class id in ``target`` that contributes zero loss.
-            Defaults to ``-100`` (the PyTorch default).
-        reduction: ``"mean"`` | ``"sum"`` | ``"none"``. Defaults to ``"mean"``
-            — averages over the batch and returns a single scalar that
-            Lightning's logger can consume directly.
-    """
-
-    def __init__(
-        self,
-        class_weights: Optional[List[float]] = None,
-        label_smoothing: float = 0.0,
-        ignore_index: int = -100,
-        reduction: str = "mean",
-    ) -> None:
-        super().__init__()
-        weight: Optional[Tensor] = None
-        if class_weights is not None:
-            if len(class_weights) == 0:
-                raise ValueError("class_weights must contain at least one entry.")
-            weight = torch.tensor(class_weights, dtype=torch.float32)
-        self.class_weights = list(class_weights) if class_weights is not None else None
-        self.label_smoothing = float(label_smoothing)
-        self.ignore_index = int(ignore_index)
-        self.reduction = reduction
-        # Register as a buffer (when present) so .to(device) moves it
-        # automatically. When absent, no buffer is registered — CrossEntropyLoss
-        # then defaults to unweighted, which is exactly what we want.
-        if weight is not None:
-            self.register_buffer("_weight_buf", weight, persistent=False)
-        self._ce = nn.CrossEntropyLoss(
-            weight=weight,
-            label_smoothing=self.label_smoothing,
-            ignore_index=self.ignore_index,
-            reduction=self.reduction,
-        )
-
-    def forward(self, logits: Tensor, target: Tensor) -> Tensor:
-        if logits.dim() != 2:
-            raise ValueError(f"ClassificationLoss expects logits [N,C], got shape {tuple(logits.shape)}.")
-        if target.dim() != 1:
-            raise ValueError(
-                f"ClassificationLoss expects target [N] int64 (class ids), got shape {tuple(target.shape)}."
-            )
-        if target.dtype != torch.int64:
-            target = target.long()
-        # Re-bind weight from buffer in case the module was moved to another
-        # device — CrossEntropyLoss captures the weight reference at
-        # construction time and won't pick up the buffer's moved state.
-        self._ce.weight = getattr(self, "_weight_buf", None)
-        return cast(Tensor, self._ce(logits, target))
+# The classification loss IS ``torch.nn.CrossEntropyLoss`` — register it (no
+# wrapper class) so it's a pickable ``task="classification", role="loss"`` option
+# and surfaces in navigaitor's form-spec / generated configs. ``register`` tags
+# the third-party class without modifying its behaviour.
+register(nn.CrossEntropyLoss, task="classification", role="loss")
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +124,5 @@ def classification_collate_fn(batch: List[Sample]) -> Sample:
 
 
 __all__ = [
-    "ClassificationLoss",
     "classification_collate_fn",
 ]

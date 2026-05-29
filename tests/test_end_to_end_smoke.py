@@ -1,4 +1,4 @@
-"""End-to-end smoke test: TimmClassifierModel + ClassificationLoss +
+"""End-to-end smoke test: TimmClassifierModel + torch.nn.CrossEntropyLoss +
 classification_collate_fn + a fake HuggingFaceClassificationDataset
 threaded through one full forward+backward step.
 
@@ -13,10 +13,11 @@ from typing import List
 from unittest.mock import patch
 
 import torch
+import torch.nn as nn
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from sonair.classification import ClassificationLoss, classification_collate_fn
+from sonair.classification import classification_collate_fn
 from sonair.hf_dataset import HuggingFaceClassificationDataset
 from sonair.timm_classifier import TimmClassifierForPrediction, TimmClassifierModel
 
@@ -74,7 +75,7 @@ def test_full_train_step_runs_end_to_end() -> None:
         num_classes=3,
         pretrained=False,
     )
-    loss_fn = ClassificationLoss(label_smoothing=0.1)
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
     batch = next(iter(loader))

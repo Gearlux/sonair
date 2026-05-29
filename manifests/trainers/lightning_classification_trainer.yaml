@@ -1,4 +1,4 @@
-description: "LightningClassificationTrainer: specialised image-classification trainer with baked-in ClassificationLoss, classification_collate_fn, and accuracy/F1 metrics."
+description: "LightningClassificationTrainer: specialised image-classification trainer with baked-in torch.nn.CrossEntropyLoss, classification_collate_fn, and accuracy/F1 metrics."
 use_case: "Drop-in replacement for LightningTrainer when training image classifiers. Only requires model, train_set, num_classes — loss, collate, and metrics are wired automatically. Invoke via `sonair train` or `marainer classification train`."
 category: "Classification"
 flux_type: "LightningClassificationTrainer"
@@ -54,8 +54,8 @@ params:
     description: "MLflow run name."
   loss_fn:
     type: "Callable | null"
-    default: "ClassificationLoss()"
-    description: "Loss function (post-construction). Default: ClassificationLoss. Can be overridden via YAML."
+    default: "torch.nn.CrossEntropyLoss()"
+    description: "Loss function (post-construction). Default: torch.nn.CrossEntropyLoss. Can be overridden via YAML."
   train_metrics:
     type: "torchmetrics.MetricCollection | null"
     default: "auto (top-1 accuracy + macro F1, +top-5 when num_classes >= 5)"

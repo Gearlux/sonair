@@ -29,7 +29,7 @@ Typical wiring (YAML)::
       model_name: efficientvit_b0
       num_classes: 37
       pretrained: true
-    loss_fn: !class:sonair.classification.ClassificationLoss
+    loss_fn: !class:torch.nn.CrossEntropyLoss
       label_smoothing: 0.1
     val_metrics: !class:torchmetrics.classification.MulticlassAccuracy
       num_classes: 37
@@ -50,7 +50,7 @@ from sonair.checkpoint import load_lightning_checkpoint
 logger = get_logger(__name__)
 
 
-@configurable(category="classification_model")
+@configurable(task="classification", role="model")
 class TimmClassifierModel(nn.Module):
     """timm-backed image-classification model wrapped for the Marainer Trainer flow.
 
@@ -68,7 +68,13 @@ class TimmClassifierModel(nn.Module):
         num_classes: Output class count. timm replaces the original ImageNet
             head with a fresh linear layer of this size whenever
             ``num_classes`` differs from the pretrained checkpoint's class
-            count. Defaults to ``1000`` (ImageNet-1k passthrough).
+            count. Defaults to ``1000`` (ImageNet-1k passthrough). In a
+            marainer training run you may **omit** this in the config: the
+            trainer derives the count from the dataset
+            (:meth:`sonair.hf_dataset.HuggingFaceClassificationDataset.num_classes`,
+            which walks the targets) and injects it when the model is
+            lazily constructed. Set it explicitly to override the derived
+            value.
         pretrained: Download timm's pretrained weights for ``model_name`` on
             first use. Defaults to ``True``. Pass ``False`` for offline CI or
             from-scratch training (parallel to deltaid's

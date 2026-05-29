@@ -32,7 +32,12 @@ class _FakeHFDataset:
     def __len__(self) -> int:
         return len(self._items)
 
-    def __getitem__(self, idx: int) -> dict:
+    def __getitem__(self, idx: Any) -> Any:
+        # HuggingFace datasets support both row access (``ds[i]`` → dict) and
+        # column access (``ds["label"]`` → list). The target-only projection
+        # relies on column access to read labels without decoding images.
+        if isinstance(idx, str):
+            return [item[idx] for item in self._items]
         return self._items[idx]
 
 
@@ -61,9 +66,50 @@ def test_len_matches_underlying_dataset(fake_dataset: _FakeHFDataset) -> None:
     assert len(ds) == 3
 
 
-def test_num_classes_picked_up_from_features(fake_dataset: _FakeHFDataset) -> None:
+def test_num_classes_walks_targets(fake_dataset: _FakeHFDataset) -> None:
+    """``num_classes()`` is a lazy method that walks the targets (max id + 1)."""
     ds = _build(fake_dataset)
-    assert ds.num_classes == 3
+    assert ds.num_classes() == 3
+
+
+def test_num_classes_is_max_id_plus_one(fake_dataset: _FakeHFDataset) -> None:
+    """A class id absent from the split still counts toward the head size."""
+    fake = _FakeHFDataset(
+        items=[
+            {"image": Image.new("RGB", (16, 16)), "label": 0},
+            {"image": Image.new("RGB", (16, 16)), "label": 2},  # id 1 absent
+        ],
+        class_names=["a", "b", "c"],
+    )
+    ds = _build(fake)
+    assert ds.num_classes() == 3
+
+
+def test_derived_dimensions(fake_dataset: _FakeHFDataset) -> None:
+    """The generic dims hook marainer forwards into lazily-flowed model/metrics."""
+    ds = _build(fake_dataset)
+    assert ds.derived_dimensions() == {"num_classes": 3}
+
+
+def test_target_only_projection_skips_image_decode() -> None:
+    """Walking targets must not decode images — it reads the label column only."""
+
+    class _ExplodingImage:
+        """Any attribute access (mode/convert/resize) blows up — proves no decode."""
+
+        def __getattr__(self, name: str) -> Any:
+            raise AssertionError(f"image was touched ({name}) during a target-only walk")
+
+    fake = _FakeHFDataset(
+        items=[{"image": _ExplodingImage(), "label": k} for k in (0, 1, 2, 1)],
+        class_names=["a", "b", "c"],
+    )
+    ds = _build(fake)
+    # num_classes() and a target-only projection must not touch the images.
+    assert ds.num_classes() == 3
+    targets = [int(s.target) for s in ds.project(("target",))]
+    assert targets == [0, 1, 2, 1]
+    assert all(s.input is None for s in ds.project(("target",)))
 
 
 def test_label_names_is_public_attribute(fake_dataset: _FakeHFDataset) -> None:
@@ -80,7 +126,9 @@ def test_label_names_empty_when_feature_has_no_names() -> None:
     fake.features = {}
     ds = _build(fake)
     assert ds.label_names == ()
-    assert ds.num_classes == 0
+    # No ClassLabel names, but num_classes() still derives from the data:
+    # the single sample has label 0, so the head size is 1.
+    assert ds.num_classes() == 1
 
 
 def test_getitem_returns_correctly_shaped_sample(fake_dataset: _FakeHFDataset) -> None:

@@ -7,7 +7,8 @@ collate, or metrics required.
 
 Baked-in defaults (all overridable via YAML ``@configurable`` attributes):
 
-* ``loss_fn`` — :class:`~sonair.classification.ClassificationLoss`
+* ``loss_fn`` — :class:`torch.nn.CrossEntropyLoss` (override via the ``loss_fn``
+  slot; any ``task="classification", role="loss"`` class is offered)
 * ``train/val/test_loader`` ``collate_fn`` — :func:`~sonair.classification.classification_collate_fn`
 * ``optimizer`` — ``AdamW(lr=1e-4, weight_decay=0.05)``
 * Metrics — :class:`~torchmetrics.classification.MulticlassAccuracy` (top-1)
@@ -33,13 +34,15 @@ from typing import Any, Optional
 
 import pytorch_lightning as L
 import torch
+import torch.nn as nn
 from confluid import Class, Lazy, configurable
+from confluid.fluid import Lazy as _LazyFluid  # the deferred-Fluid class (not the Lazy[T] annotation)
 from marainer.trainer import LightningTrainer
 from torch.utils.data import DataLoader
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
 
-from sonair.classification import ClassificationLoss, classification_collate_fn
+from sonair.classification import classification_collate_fn
 
 
 def _build_classification_metrics(num_classes: int) -> MetricCollection:
@@ -52,7 +55,24 @@ def _build_classification_metrics(num_classes: int) -> MetricCollection:
     return MetricCollection(metrics)
 
 
-@configurable
+def _deferred_classification_metrics(prefix: str) -> Any:
+    """A deferred ``MetricCollection`` whose ``num_classes`` is injected from the
+    dataset at run time (``marainer.dimensions`` flows it and broadcasts the
+    count into the nested metrics). Used when ``num_classes`` is omitted. top-5
+    is intentionally dropped here — it depends on ``num_classes >= 5``, unknown
+    until derivation; provide ``num_classes`` to get the eager metric set.
+    """
+    return _LazyFluid(
+        MetricCollection,
+        metrics={
+            "accuracy_top1": Class(MulticlassAccuracy, top_k=1),
+            "f1_macro": Class(MulticlassF1Score, average="macro"),
+        },
+        prefix=prefix,
+    )
+
+
+@configurable(task="classification", role="trainer")
 class LightningClassificationTrainer(LightningTrainer):
     """Specialised image-classification trainer with baked-in defaults.
 
@@ -60,8 +80,13 @@ class LightningClassificationTrainer(LightningTrainer):
         model: Classification model that emits ``[N, num_classes]`` logits.
         train_set: Training dataset or Flux pipeline.
         num_classes: Number of output classes; drives metric construction.
+            Optional — omit it to derive the count from the dataset at run time
+            (the metrics are then built deferred and ``num_classes`` is injected
+            by ``marainer.dimensions``); provide it to build metrics eagerly.
         val_set: Validation dataset or Flux pipeline.
         test_set: Held-out test dataset (triggers ``lightning.test()`` after fit).
+        loss_fn: Loss slot. Defaults to ``torch.nn.CrossEntropyLoss``; override
+            with any registered ``task="classification", role="loss"`` class.
         optimizer: Deferred optimizer (default: AdamW lr=1e-4, wd=0.05).
         train_loader: Deferred DataLoader (default includes ``classification_collate_fn``).
         val_loader: Deferred DataLoader (default includes ``classification_collate_fn``).
@@ -75,9 +100,10 @@ class LightningClassificationTrainer(LightningTrainer):
         self,
         model: Any,
         train_set: Any,
-        num_classes: int,
+        num_classes: Optional[int] = None,
         val_set: Any = None,
         test_set: Any = None,
+        loss_fn: Any = None,
         optimizer: Lazy[Any] = Class(torch.optim.AdamW, lr=1e-4, weight_decay=0.05),
         train_loader: Lazy[Any] = Class(DataLoader, collate_fn=classification_collate_fn),
         val_loader: Lazy[Any] = Class(DataLoader, collate_fn=classification_collate_fn),
@@ -99,8 +125,19 @@ class LightningClassificationTrainer(LightningTrainer):
             experiment_name=experiment_name,
             run_name=run_name,
         )
-        self.loss_fn = ClassificationLoss()
-        base = _build_classification_metrics(num_classes)
-        self.train_metrics: Optional[MetricCollection] = base.clone(prefix="train/")
-        self.val_metrics: Optional[MetricCollection] = base.clone(prefix="val/")
-        self.test_metrics: Optional[MetricCollection] = base.clone(prefix="test/")
+        # Loss slot: defaults to a live CrossEntropyLoss; a config may override
+        # with any task="classification" role="loss" class (deferred Fluids are
+        # materialised by the base trainer's run()).
+        self.loss_fn = loss_fn if loss_fn is not None else nn.CrossEntropyLoss()
+        if num_classes is not None:
+            base = _build_classification_metrics(num_classes)
+            self.train_metrics: Any = base.clone(prefix="train/")
+            self.val_metrics: Any = base.clone(prefix="val/")
+            self.test_metrics: Any = base.clone(prefix="test/")
+        else:
+            # num_classes omitted -> derived from the dataset at run time; the
+            # base trainer's run() flows these deferred collections, injecting
+            # the derived count (marainer.dimensions).
+            self.train_metrics = _deferred_classification_metrics("train/")
+            self.val_metrics = _deferred_classification_metrics("val/")
+            self.test_metrics = _deferred_classification_metrics("test/")

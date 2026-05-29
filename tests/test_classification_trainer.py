@@ -5,7 +5,6 @@ import torch.nn as nn
 from dataflux.sample import Sample
 from torchmetrics import MetricCollection
 
-from sonair.classification import ClassificationLoss
 from sonair.trainer import LightningClassificationTrainer, _build_classification_metrics
 
 # ---------------------------------------------------------------------------
@@ -59,13 +58,13 @@ def test_build_metrics_produces_metric_collection() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_loss_fn_is_classification_loss() -> None:
+def test_loss_fn_defaults_to_cross_entropy() -> None:
     trainer = LightningClassificationTrainer(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16),
         num_classes=3,
     )
-    assert isinstance(trainer.loss_fn, ClassificationLoss)
+    assert isinstance(trainer.loss_fn, nn.CrossEntropyLoss)
 
 
 def test_metrics_are_wired_with_correct_prefixes() -> None:
@@ -158,6 +157,73 @@ def test_metrics_update_on_training_step() -> None:
 # ---------------------------------------------------------------------------
 # Default loader collate is baked in
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Omitted num_classes -> deferred metrics, derived from the dataset at run time
+# ---------------------------------------------------------------------------
+
+
+class _DimsDataset:
+    """Map-style dataset exposing the derived_dimensions() hook (like sonair's)."""
+
+    def __init__(self, n: int, num_classes: int, input_size: int = 4) -> None:
+        self._s = [
+            Sample(input=torch.randn(input_size), target=torch.tensor(i % num_classes, dtype=torch.int64), metadata={})
+            for i in range(n)
+        ]
+        self._nc = num_classes
+
+    def __len__(self) -> int:
+        return len(self._s)
+
+    def __getitem__(self, i: int) -> Sample:
+        return self._s[i]
+
+    def derived_dimensions(self) -> dict:
+        return {"num_classes": self._nc}
+
+
+def test_omitted_num_classes_defers_metrics() -> None:
+    """With num_classes omitted, metrics are deferred (a Lazy fluid), not eager."""
+    from confluid.fluid import Lazy
+
+    trainer = LightningClassificationTrainer(
+        model=_TinyClassifier(num_classes=4),
+        train_set=_make_samples(16, num_classes=4),
+    )
+    assert isinstance(trainer.val_metrics, Lazy)
+    assert isinstance(trainer.train_metrics, Lazy)
+
+
+def test_omitted_num_classes_derived_and_built_at_run(tmp_path: object) -> None:
+    import pytorch_lightning as L
+    from confluid.fluid import Class as ConfluidClass
+    from torch.utils.data import DataLoader
+
+    from sonair.classification import classification_collate_fn
+
+    trainer = LightningClassificationTrainer(
+        model=_TinyClassifier(num_classes=4),
+        train_set=_DimsDataset(16, num_classes=4),
+        # num_classes omitted -> derived from the dataset
+        optimizer=ConfluidClass(torch.optim.SGD, lr=0.01),
+        train_loader=ConfluidClass(DataLoader, batch_size=8, collate_fn=classification_collate_fn),
+        lightning=ConfluidClass(
+            L.Trainer,
+            max_epochs=1,
+            accelerator="cpu",
+            enable_progress_bar=False,
+            enable_model_summary=False,
+            logger=False,
+            limit_train_batches=1,
+            default_root_dir=str(tmp_path),
+        ),
+    )
+    trainer.run()
+    assert isinstance(trainer.val_metrics, MetricCollection)
+    sized = [m for m in trainer.val_metrics.values() if hasattr(m, "num_classes")]
+    assert sized and all(m.num_classes == 4 for m in sized)
 
 
 def test_default_loader_uses_classification_collate_fn() -> None:

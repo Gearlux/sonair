@@ -37,7 +37,7 @@ from sonair.classification import classification_collate_fn
 from sonair.trainer import _build_classification_metrics
 
 
-@configurable
+@configurable(task="classification", role="evaluator")
 class LightningClassificationEvaluator(LightningEvaluator):
     """Specialised image-classification evaluator with baked-in defaults.
 

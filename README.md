@@ -38,9 +38,8 @@ model: !class:sonair.timm_classifier.TimmClassifierModel
   num_classes: 37
   pretrained: true
 
-loss_fn: !class:sonair.classification.ClassificationLoss
+loss_fn: !class:torch.nn.CrossEntropyLoss   # the classification loss (no sonair wrapper)
   label_smoothing: 0.1            # timm's modern-classifier default
-  # class_weights: [...]          # optional — per-class re-weighting
 
 val_metrics: !class:torchmetrics.classification.MulticlassAccuracy
   num_classes: 37
@@ -71,7 +70,7 @@ pipeline:
    reads `metadata["drone"]` and writes a scalar int64 class id.
 4. `sonair.timm_classifier.TimmClassifierModel` consumes the image and
    emits per-image class logits.
-5. `sonair.classification.ClassificationLoss` (CrossEntropyLoss) trains it.
+5. `torch.nn.CrossEntropyLoss` (registered as the classification loss) trains it.
 
 Run:
 
@@ -101,16 +100,43 @@ Recommended backbones for spectrogram classification:
 
 See `timm.list_models()` for the full catalogue.
 
-`TimmClassifierModel` is tagged `@configurable(category="classification_model")` (and `ClassificationLoss` /
-`HuggingFaceClassificationDataset` carry `classification_loss` / `classification_dataset`), so navigaitor's
-`list_configurable_classes(category=...)` and the visual-editor form-spec offer them — and any future
-classification model/loss/dataset — as task-scoped options.
+`TimmClassifierModel` is tagged `@configurable(task="classification", role="model")` (and
+`HuggingFaceClassificationDataset` carries `role="dataset"`, the trainer/evaluator `role="trainer"`/`"evaluator"`,
+and `torch.nn.CrossEntropyLoss` is `register`-ed as `role="loss"`), so navigaitor's
+`list_classes(task=…, role=…)` scan + the visual-editor form-spec offer them — and any future
+classification model/dataset/loss — as task-scoped options.
+
+## Class count: omit `num_classes`, it's derived from the dataset
+
+`HuggingFaceClassificationDataset.num_classes()` is a **lazy method** (not an
+`__init__` attribute): it walks the targets — target-only via dataflux's
+projection, so no image is decoded — and returns `max(class_id) + 1`.
+`derived_dimensions()` returns `{"num_classes": …}`. marainer reads this hook at
+run time and injects the count when it lazily constructs the model + metrics, so
+a training config may **omit `num_classes` entirely**:
+
+```yaml
+# num_classes omitted at the top level → derived from the dataset.
+image_size: 224
+train_set: !class:sonair.hf_dataset.HuggingFaceClassificationDataset
+  repo_id: ylecun/mnist
+  split: train
+model: !lazy:sonair.timm_classifier.TimmClassifierModel   # !lazy: so the count can be injected
+  model_name: efficientvit_b0
+val_metrics: !lazy:torchmetrics.MetricCollection
+  metrics:
+    top1: !class:torchmetrics.classification.MulticlassAccuracy { top_k: 1 }
+```
+
+Set `num_classes` explicitly (top-level or on the model) to fix the head size
+and skip the walk. The visual editor / `train_classification` MCP tool emit the
+`!lazy:` form automatically when you leave `num_classes` blank.
 
 ## Adapters
 
 | Symbol | Purpose |
 |--------|---------|
-| `ClassificationLoss` | `nn.CrossEntropyLoss` wrapped for Confluid configuration; supports `class_weights`, `label_smoothing`, and `ignore_index`. |
+| `torch.nn.CrossEntropyLoss` | The classification loss — registered (no sonair wrapper) as `task="classification", role="loss"`; set `label_smoothing` / `ignore_index` / `reduction` from YAML. |
 | `classification_collate_fn` | DataLoader collate that stacks per-sample image tensors and scalar class-id targets, preserves per-sample metadata as a list (the default collate crashes on string-valued metadata). |
 | `load_lightning_checkpoint` | Strip Lightning's `"model."` prefix when loading a `.ckpt` saved through `marainer.trainer.LightningTrainer`. |
 

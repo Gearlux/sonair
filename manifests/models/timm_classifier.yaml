@@ -1,5 +1,5 @@
 description: "timm-backed image-classification model wrapped for the Marainer Trainer flow."
-use_case: "Default classification model for any image task. Forward returns raw logits — pair with ClassificationLoss (CE + label_smoothing + class_weights) and torchmetrics.classification.* metrics. timm replaces the original ImageNet head with a fresh linear layer of num_classes."
+use_case: "Default classification model for any image task. Forward returns raw logits — pair with torch.nn.CrossEntropyLoss (CE + label_smoothing + class_weights) and torchmetrics.classification.* metrics. timm replaces the original ImageNet head with a fresh linear layer of num_classes."
 category: "Classification"
 flux_type: "Model"
 task: "image_classification"

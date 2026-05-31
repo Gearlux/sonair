@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from dataflux.projection import TARGET
 from PIL import Image
 
 from sonair.hf_dataset import HuggingFaceClassificationDataset
@@ -107,9 +108,9 @@ def test_target_only_projection_skips_image_decode() -> None:
     ds = _build(fake)
     # num_classes() and a target-only projection must not touch the images.
     assert ds.num_classes() == 3
-    targets = [int(s.target) for s in ds.project(("target",))]
+    targets = [int(s.target) for s in ds.project((TARGET,))]
     assert targets == [0, 1, 2, 1]
-    assert all(s.input is None for s in ds.project(("target",)))
+    assert all(s.input is None for s in ds.project((TARGET,)))
 
 
 def test_label_names_is_public_attribute(fake_dataset: _FakeHFDataset) -> None:

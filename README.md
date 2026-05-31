@@ -66,8 +66,12 @@ pipeline:
 
 1. `RegionsJsonSource` reads per-window annotations.
 2. Waivefront ops render the IQ → spectrogram → image tensor.
-3. `waivefront.classification_ops.MetadataLabelToClassificationTargetOp`
-   reads `metadata["drone"]` and writes a scalar int64 class id.
+3. For a raw-spectrogram pipeline, `dataflux.ops.torch.ToTensorOp` tensorizes
+   the image and `dataflux.ops.target.MetadataToTargetOp` → `EncodeTargetOp`
+   turn the metadata label into a scalar int64 class id (the declarative
+   scikit-`LabelEncoder` analogue — there is no sonair/waivefront target op).
+   The `HuggingFaceClassificationDataset` path skips step 3 entirely: HF's
+   `ClassLabel` feature already yields an integer label.
 4. `sonair.timm_classifier.TimmClassifierModel` consumes the image and
    emits per-image class logits.
 5. `torch.nn.CrossEntropyLoss` (registered as the classification loss) trains it.

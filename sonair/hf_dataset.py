@@ -49,6 +49,7 @@ from typing import Any, Collection, Dict, Iterator, Optional, Tuple
 import numpy as np
 import torch
 from confluid import configurable
+from dataflux.projection import ProjectionField
 from dataflux.projection import num_classes as _derive_num_classes
 from dataflux.sample import Sample
 from logflow import get_logger
@@ -185,7 +186,7 @@ class HuggingFaceClassificationDataset(Dataset[Sample]):
     # dataflux SupportsProjection + class-count derivation
     # ------------------------------------------------------------------ #
 
-    def project(self, fields: Collection[str]) -> Iterator[Sample]:
+    def project(self, fields: Collection[ProjectionField]) -> Iterator[Sample]:
         """Yield Samples carrying only ``fields`` — skipping image decode when possible.
 
         Implements :class:`dataflux.projection.SupportsProjection`. When the

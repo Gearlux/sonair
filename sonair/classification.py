@@ -70,8 +70,11 @@ def classification_collate_fn(batch: List[Sample]) -> Sample:
     Each input ``Sample`` is expected to carry:
 
     * ``sample.input`` — ``[3, H, W]`` float tensor (e.g. produced by
-      :class:`waivefront.classification_ops.MetadataLabelToClassificationTargetOp`).
-    * ``sample.target`` — int64 scalar tensor (single class id) or 0-D tensor.
+      :class:`dataflux.ops.torch.ToTensorOp` after
+      :class:`dataflux.ops.image.ConvertToImageOp`, or directly by
+      :class:`sonair.hf_dataset.HuggingFaceClassificationDataset`).
+    * ``sample.target`` — int64 scalar tensor (single class id) or 0-D tensor
+      (e.g. via the dataflux ``MetadataToTargetOp`` → ``EncodeTargetOp`` chain).
 
     The returned :class:`~dataflux.sample.Sample` has:
 
@@ -84,7 +87,7 @@ def classification_collate_fn(batch: List[Sample]) -> Sample:
 
     All per-sample image tensors must already share the same spatial dims;
     mixed sizes must be resized upstream (e.g. via Waivefront's
-    :class:`~waivefront.visualizers.RenderSpectrogramImageOp`).
+    :class:`~dataflux.ops.image.ConvertToImageOp`).
     """
     if not batch:
         raise ValueError("classification_collate_fn received an empty batch.")

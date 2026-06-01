@@ -27,7 +27,7 @@ def _make_batch(n: int = 8, num_classes: int = 3, input_size: int = 4) -> Sample
     return Sample(
         input=torch.randn(n, input_size),
         target=torch.randint(0, num_classes, (n,)),
-        metadata={"per_sample": [{"idx": i} for i in range(n)]},
+        metadata=[{"idx": i} for i in range(n)],
     )
 
 

@@ -149,7 +149,7 @@ def test_test_step_updates_metrics() -> None:
     batch = Sample(
         input=torch.randn(8, 4),
         target=torch.randint(0, 3, (8,)),
-        metadata={"per_sample": [{"idx": i} for i in range(8)]},
+        metadata=[{"idx": i} for i in range(8)],
     )
     ev.test_step(batch, 0)
     assert ev.metrics is not None

@@ -36,10 +36,10 @@ def test_collate_stacks_inputs_and_targets() -> None:
 
 
 def test_collate_preserves_string_metadata_as_list() -> None:
-    """Strings can't be torch.stack'd — they MUST end up in a per_sample list."""
+    """Strings can't be torch.stack'd — they MUST end up in a metadata list."""
     batch = [_make_sample(0), _make_sample(1)]
     result = classification_collate_fn(batch)
-    metas = result.metadata["per_sample"]
+    metas = result.metadata
     assert isinstance(metas, list)
     assert len(metas) == 2
     assert metas[0]["pack_id"] == "pack0"

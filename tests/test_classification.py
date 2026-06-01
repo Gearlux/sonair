@@ -63,7 +63,7 @@ def test_collate_handles_empty_metadata_dict() -> None:
         metadata={},
     )
     result = classification_collate_fn([s])
-    assert result.metadata["per_sample"] == [{}]
+    assert result.metadata == [{}]
 
 
 def test_collate_rejects_empty_batch() -> None:

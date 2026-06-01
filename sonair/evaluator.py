@@ -49,7 +49,7 @@ class LightningClassificationEvaluator(LightningEvaluator):
         num_classes: Number of output classes; drives metric construction.
         loader: Deferred DataLoader (default includes ``classification_collate_fn``).
         predictions_sink: Optional sink with ``.write(prediction, metadata)`` and
-            ``.close()``. Use :class:`~waivefront.sinks.ClassificationPredictionsSink`
+            ``.close()``. Use :class:`~marainer.sinks.ClassificationPredictionsSink`
             for per-sample JSON output.
         lightning: PyTorch Lightning Trainer config.
         experiment_name: MLflow experiment name.

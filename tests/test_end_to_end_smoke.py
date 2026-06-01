@@ -1,6 +1,6 @@
-"""End-to-end smoke test: TimmClassifierModel + torch.nn.CrossEntropyLoss +
-classification_collate_fn + a fake HuggingFaceClassificationDataset
-threaded through one full forward+backward step.
+"""End-to-end smoke test: TimmModel + torch.nn.CrossEntropyLoss +
+classification_collate_fn + a fake dataset threaded through one full
+forward+backward step.
 
 This proves the wiring contract that the YAML configs in
 ``waivefront-rfuav/config/`` exercise — the actual RFUAV training flow
@@ -10,16 +10,15 @@ or unreachable.
 """
 
 from typing import List
-from unittest.mock import patch
 
 import torch
 import torch.nn as nn
+from dataflux.sample import Sample
 from PIL import Image
 from torch.utils.data import DataLoader
 
 from sonair.classification import classification_collate_fn
-from sonair.hf_dataset import HuggingFaceClassificationDataset
-from sonair.timm_classifier import TimmClassifierForPrediction, TimmClassifierModel
+from sonair.timm_classifier import TimmModel
 
 
 class _FakeFeature:
@@ -28,8 +27,11 @@ class _FakeFeature:
 
 
 class _FakeHFDataset:
+    """Fake HF dataset that returns dataflux Samples (same interface as HuggingFaceSource)."""
+
     def __init__(self, n_per_class: int = 4, n_classes: int = 3, image_size: int = 64) -> None:
         self._items = []
+        self.image_size = image_size
         for cls_id in range(n_classes):
             for _ in range(n_per_class):
                 # Each class gets a distinct base color so the model has
@@ -47,22 +49,30 @@ class _FakeHFDataset:
     def __len__(self) -> int:
         return len(self._items)
 
-    def __getitem__(self, idx: int) -> dict:
-        return self._items[idx]
+    def __getitem__(self, idx: int) -> Sample:
+        item = self._items[idx]
+        image = item["image"].resize((self.image_size, self.image_size))
+        # Convert PIL image to [3, H, W] float32 tensor in [0, 1]
+        img_array = torch.tensor(list(image.getdata()), dtype=torch.float32) / 255.0
+        img_tensor = img_array.view(self.image_size, self.image_size, 3).permute(2, 0, 1)
+
+        return Sample(
+            input=img_tensor,
+            target=torch.tensor(item["label"], dtype=torch.int64),
+            metadata={
+                "label_idx": item["label"],
+                "label_name": f"class_{item['label']}",
+            },
+        )
 
 
 def test_full_train_step_runs_end_to_end() -> None:
     """One full training iteration: dataset → loader → model → loss → backward."""
-    fake = _FakeHFDataset(n_per_class=4, n_classes=3, image_size=64)
-    with patch("datasets.load_dataset", return_value=fake):
-        ds = HuggingFaceClassificationDataset(
-            repo_id="fake/RFUAV",
-            split="train",
-            image_size=64,
-        )
+    # Use the fake dataset directly — HuggingFaceSource would wrap it similarly.
+    fake_ds = _FakeHFDataset(n_per_class=4, n_classes=3, image_size=64)
 
     loader = DataLoader(
-        ds,
+        fake_ds,
         batch_size=4,
         shuffle=True,
         num_workers=0,
@@ -70,12 +80,15 @@ def test_full_train_step_runs_end_to_end() -> None:
     )
     # resnet18 is small and runs in a few hundred ms; use 64x64 input so
     # this whole test stays under one second wall-clock.
-    model = TimmClassifierModel(
+    model = TimmModel(
         model_name="resnet18",
         num_classes=3,
         pretrained=False,
     )
     loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+    # Realize the lazy model so optimizer can see parameters.
+    model.realize()
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
     batch = next(iter(loader))
@@ -97,40 +110,13 @@ def test_full_train_step_runs_end_to_end() -> None:
     optimizer.step()
 
 
-def test_prediction_class_emits_per_sample_dicts_for_full_batch() -> None:
-    """The predict YAML's path: TimmClassifierForPrediction yields a list of dicts."""
-    fake = _FakeHFDataset(n_per_class=2, n_classes=3, image_size=64)
-    with patch("datasets.load_dataset", return_value=fake):
-        ds = HuggingFaceClassificationDataset(repo_id="fake/RFUAV", split="train", image_size=64)
-    loader = DataLoader(ds, batch_size=4, num_workers=0, collate_fn=classification_collate_fn)
-
-    model = TimmClassifierForPrediction(
-        model_name="resnet18",
-        num_classes=3,
-        pretrained=False,
-    ).eval()
-
-    batch = next(iter(loader))
-    outputs = model(batch.input)
-    assert isinstance(outputs, list)
-    assert len(outputs) == batch.input.shape[0]
-    for out in outputs:
-        assert set(out.keys()) == {"logits", "probs", "class_idx"}
-        assert out["logits"].shape == (1, 3)
-        assert torch.isfinite(out["logits"]).all()
-
-
 def test_metadata_per_sample_survives_collation() -> None:
-    """Per-sample metadata (label_name, repo_id, etc.) must round-trip through collate."""
-    fake = _FakeHFDataset(n_per_class=2, n_classes=3, image_size=32)
-    with patch("datasets.load_dataset", return_value=fake):
-        ds = HuggingFaceClassificationDataset(repo_id="fake/RFUAV", split="train", image_size=32)
-    loader = DataLoader(ds, batch_size=4, num_workers=0, collate_fn=classification_collate_fn)
+    """Per-sample metadata must round-trip through collate."""
+    fake_ds = _FakeHFDataset(n_per_class=2, n_classes=3, image_size=32)
+    loader = DataLoader(fake_ds, batch_size=4, num_workers=0, collate_fn=classification_collate_fn)
     batch = next(iter(loader))
     metas = batch.metadata["per_sample"]
     assert isinstance(metas, list)
     assert len(metas) == 4
     for m in metas:
-        assert m["repo_id"] == "fake/RFUAV"
-        assert m["split"] == "train"
         assert m["label_name"].startswith("class_")

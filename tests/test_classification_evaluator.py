@@ -15,6 +15,29 @@ from torchmetrics import MetricCollection
 from sonair.classification import classification_collate_fn
 from sonair.evaluator import LightningClassificationEvaluator
 
+
+def _make_evaluator(**overrides: Any) -> LightningClassificationEvaluator:
+    """Build a LightningClassificationEvaluator, applying overrides as post-construction attributes.
+
+    Mirrors the minimal-ctor pattern: only 'model', 'dataset', 'num_classes', 'experiment_name', 'run_name' are
+    constructor params; deferred slots (``loader`` / ``lightning`` / ``metrics`` /
+    ``predictions_sink`` / ``metrics_sidecar_path`` / ``class_names``) are set on
+    the instance after construction.
+    """
+    _ctor_keys = (
+        "model",
+        "dataset",
+        "num_classes",
+        "experiment_name",
+        "run_name",
+    )
+    ctor = {k: overrides.pop(k) for k in _ctor_keys if k in overrides}
+    ev = LightningClassificationEvaluator(**ctor)
+    for _k, _v in overrides.items():
+        setattr(ev, _k, _v)
+    return ev
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -59,7 +82,7 @@ class _RecordingSink:
 
 
 def test_metrics_are_wired_on_construction() -> None:
-    ev = LightningClassificationEvaluator(
+    ev = _make_evaluator(
         model=_TinyClassifier(num_classes=3),
         dataset=_make_flux(8),
         num_classes=3,
@@ -69,7 +92,7 @@ def test_metrics_are_wired_on_construction() -> None:
 
 
 def test_metrics_have_test_prefix() -> None:
-    ev = LightningClassificationEvaluator(
+    ev = _make_evaluator(
         model=_TinyClassifier(num_classes=3),
         dataset=_make_flux(8),
         num_classes=3,
@@ -79,7 +102,7 @@ def test_metrics_have_test_prefix() -> None:
 
 
 def test_no_top5_for_small_num_classes() -> None:
-    ev = LightningClassificationEvaluator(
+    ev = _make_evaluator(
         model=_TinyClassifier(num_classes=2),
         dataset=_make_flux(8, num_classes=2),
         num_classes=2,
@@ -90,7 +113,7 @@ def test_no_top5_for_small_num_classes() -> None:
 
 
 def test_top5_present_for_large_num_classes() -> None:
-    ev = LightningClassificationEvaluator(
+    ev = _make_evaluator(
         model=_TinyClassifier(num_classes=10),
         dataset=_make_flux(16, num_classes=10),
         num_classes=10,
@@ -103,7 +126,7 @@ def test_top5_present_for_large_num_classes() -> None:
 def test_default_loader_uses_classification_collate_fn() -> None:
     from confluid.fluid import Class as ConfluidClass
 
-    ev = LightningClassificationEvaluator(
+    ev = _make_evaluator(
         model=_TinyClassifier(num_classes=3),
         dataset=_make_flux(8),
         num_classes=3,
@@ -118,7 +141,7 @@ def test_default_loader_uses_classification_collate_fn() -> None:
 
 
 def test_test_step_updates_metrics() -> None:
-    ev = LightningClassificationEvaluator(
+    ev = _make_evaluator(
         model=_TinyClassifier(num_classes=3),
         dataset=_make_flux(8),
         num_classes=3,
@@ -141,7 +164,7 @@ def test_test_step_updates_metrics() -> None:
 
 def test_evaluator_run_writes_metrics_sidecar(tmp_path: Any) -> None:
     sidecar = tmp_path / "eval_metrics.json"
-    ev = LightningClassificationEvaluator(
+    ev = _make_evaluator(
         model=_TinyClassifier(num_classes=3),
         dataset=_make_flux(8),
         num_classes=3,

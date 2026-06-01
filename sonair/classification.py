@@ -1,4 +1,4 @@
-"""Generic image-classification adapters that plug into Marainer's
+"""Image-classification adapters that plug into Marainer's
 :class:`~marainer.trainer.LightningTrainer`.
 
 Classification is the simplest fit for the base Trainer: a classifier takes
@@ -16,12 +16,13 @@ navigaitor's task surfaces and usable straight from YAML
 ``weight`` needs a tensor and isn't expressible in YAML). It consumes raw
 logits ``[N, C]`` + int64 targets ``[N]`` directly.
 
-This module provides:
-
-* :func:`classification_collate_fn` — a DataLoader collate that stacks
-  per-sample ``input`` images and ``target`` scalar class ids into batched
-  tensors and keeps per-sample metadata as a list (the default collate would
-  crash on string-valued metadata such as ``pack_id`` or ``iq_file``).
+Collate: :func:`classification_collate_fn` is an alias to the generic
+:func:`~marainer.collate.collate_fn_with_metadata` — it stacks per-sample
+``input`` images and ``target`` scalar class ids into batched tensors and
+preserves per-sample metadata as a list (the default collate would crash on
+string-valued metadata such as ``pack_id`` or ``iq_file``). This collate is
+modality-agnostic and reused by all classification, detection, segmentation,
+and regression tasks.
 
 Most torchmetrics classification metrics
 (:class:`torchmetrics.classification.MulticlassAccuracy`,
@@ -41,16 +42,12 @@ Typical wiring (YAML)::
       collate_fn: !ref:sonair.classification.classification_collate_fn
 """
 
-from typing import Any, Dict, List
+from typing import List
 
-import torch
 import torch.nn as nn
 from confluid import register
 from dataflux.sample import Sample
-from logflow import get_logger
-from torch import Tensor
-
-logger = get_logger(__name__)
+from marainer.collate import collate_fn_with_metadata
 
 # The classification loss IS ``torch.nn.CrossEntropyLoss`` — register it (no
 # wrapper class) so it's a pickable ``task="classification", role="loss"`` option
@@ -59,13 +56,12 @@ logger = get_logger(__name__)
 register(nn.CrossEntropyLoss, task="classification", role="loss")
 
 
-# ---------------------------------------------------------------------------
-# Collate function
-# ---------------------------------------------------------------------------
-
-
 def classification_collate_fn(batch: List[Sample]) -> Sample:
     """Collate per-sample classification samples into a batched Trainer-ready Sample.
+
+    This is an alias to :func:`marainer.collate.collate_fn_with_metadata` — a
+    generic collate that stacks input and target tensors while preserving
+    per-sample metadata as a list (not nested under a ``"per_sample"`` key).
 
     Each input ``Sample`` is expected to carry:
 
@@ -80,52 +76,16 @@ def classification_collate_fn(batch: List[Sample]) -> Sample:
 
     * ``.input`` — ``[N, 3, H, W]`` stacked image tensor.
     * ``.target`` — ``[N]`` stacked int64 class-id tensor.
-    * ``.metadata`` — ``{"per_sample": [<per-sample metadata dicts>]}``,
-      preserved as a list so string-valued fields (``pack_id``, ``iq_file``,
-      ``drone``) survive collation. The default DataLoader collate would
-      crash on those.
+    * ``.metadata`` — ``[<per-sample metadata dicts>]``, a list (not nested
+      under ``"per_sample"``) so string-valued fields (``pack_id``, ``iq_file``,
+      ``drone``) survive collation. The default DataLoader collate would crash
+      on those.
 
     All per-sample image tensors must already share the same spatial dims;
     mixed sizes must be resized upstream (e.g. via Waivefront's
     :class:`~dataflux.ops.image.ConvertToImageOp`).
     """
-    if not batch:
-        raise ValueError("classification_collate_fn received an empty batch.")
-    images: List[Tensor] = []
-    targets: List[Tensor] = []
-    metas: List[Dict[str, Any]] = []
-    for s in batch:
-        if not isinstance(s.input, Tensor):
-            raise TypeError(
-                f"classification_collate_fn expects sample.input to be a torch.Tensor; "
-                f"got {type(s.input).__name__}."
-            )
-        if not isinstance(s.target, Tensor):
-            raise TypeError(
-                f"classification_collate_fn expects sample.target to be a torch.Tensor; "
-                f"got {type(s.target).__name__}."
-            )
-        images.append(s.input)
-        # Coerce to 0-D int64 so torch.stack produces a clean [N] tensor.
-        # Tolerate already-int64 0-D tensors (no-op) and other int dtypes.
-        t = s.target
-        if t.dtype != torch.int64:
-            t = t.long()
-        if t.dim() != 0:
-            raise ValueError(
-                f"classification_collate_fn expects sample.target to be a 0-D scalar tensor, "
-                f"got shape {tuple(t.shape)}."
-            )
-        targets.append(t)
-        metas.append(s.metadata)
-
-    return Sample(
-        input=torch.stack(images),
-        target=torch.stack(targets),
-        metadata={"per_sample": metas},
-    )
+    return collate_fn_with_metadata(batch)
 
 
-__all__ = [
-    "classification_collate_fn",
-]
+__all__ = ["classification_collate_fn"]

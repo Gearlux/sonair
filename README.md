@@ -10,7 +10,7 @@ custom Lightning module. The Trainer's standard
 `preds = self(batch.input); loss = self.loss_fn(preds, batch.target)` flow
 fits classification natively.
 
-The first-class model is **TimmClassifierModel**, a generic wrapper that
+The first-class model is **TimmModel**, a generic wrapper that
 takes any `model_name` from timm's catalogue (efficientvit, resnet, vit,
 swin, convnext, mobilenetv3, ...) and exposes its constructor knobs to YAML.
 
@@ -33,7 +33,7 @@ pip install -e ".[dev]"
 ### YAML wiring
 
 ```yaml
-model: !class:sonair.timm_classifier.TimmClassifierModel
+model: !class:sonair.TimmModel
   model_name: efficientvit_b0
   num_classes: 37
   pretrained: true
@@ -44,7 +44,7 @@ loss_fn: !class:torch.nn.CrossEntropyLoss   # the classification loss (no sonair
 val_metrics: !class:torchmetrics.classification.MulticlassAccuracy
   num_classes: 37
 
-train_loader: !class:torch.utils.data.DataLoader
+train_loader: !lazy:torch.utils.data.DataLoader
   batch_size: 32
   shuffle: true
   collate_fn: !ref:sonair.classification.classification_collate_fn
@@ -70,9 +70,9 @@ pipeline:
    the image and `dataflux.ops.target.MetadataToTargetOp` → `EncodeTargetOp`
    turn the metadata label into a scalar int64 class id (the declarative
    scikit-`LabelEncoder` analogue — there is no sonair/waivefront target op).
-   The `HuggingFaceClassificationDataset` path skips step 3 entirely: HF's
+   The `dataflux.sources.HuggingFaceSource` path skips step 3 entirely: HF's
    `ClassLabel` feature already yields an integer label.
-4. `sonair.timm_classifier.TimmClassifierModel` consumes the image and
+4. `sonair.TimmModel` consumes the image and
    emits per-image class logits.
 5. `torch.nn.CrossEntropyLoss` (registered as the classification loss) trains it.
 
@@ -90,7 +90,7 @@ and dump per-window classification JSON over the full RFUAV dataset.
 
 | Class | timm factory | Notes |
 |-------|--------------|-------|
-| `TimmClassifierModel` | `timm.create_model(model_name, ...)` | Generic — any timm backbone via `model_name` arg, default `efficientvit_b0` |
+| `TimmModel` | `timm.create_model(model_name, ...)` | Generic — any timm backbone via `model_name` arg, default `efficientvit_b0` |
 
 Recommended backbones for spectrogram classification:
 
@@ -104,7 +104,7 @@ Recommended backbones for spectrogram classification:
 
 See `timm.list_models()` for the full catalogue.
 
-`TimmClassifierModel` is tagged `@configurable(task="classification", role="model")` (and
+`TimmModel` is tagged `@configurable(task="classification", role="model")` (and
 `HuggingFaceClassificationDataset` carries `role="dataset"`, the trainer/evaluator `role="trainer"`/`"evaluator"`,
 and `torch.nn.CrossEntropyLoss` is `register`-ed as `role="loss"`), so navigaitor's
 `list_classes(task=…, role=…)` scan + the visual-editor form-spec offer them — and any future
@@ -125,7 +125,7 @@ image_size: 224
 train_set: !class:sonair.hf_dataset.HuggingFaceClassificationDataset
   repo_id: ylecun/mnist
   split: train
-model: !lazy:sonair.timm_classifier.TimmClassifierModel   # !lazy: so the count can be injected
+model: !lazy:sonair.TimmModel   # !lazy: so the count can be injected
   model_name: efficientvit_b0
 val_metrics: !lazy:torchmetrics.MetricCollection
   metrics:

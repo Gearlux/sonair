@@ -2,17 +2,14 @@
 
 from sonair.classification import classification_collate_fn
 from sonair.evaluator import LightningClassificationEvaluator
-from sonair.hf_dataset import HuggingFaceClassificationDataset
-from sonair.timm_classifier import TimmClassifierForPrediction, TimmClassifierModel
+from sonair.timm_classifier import TimmModel
 from sonair.trainer import LightningClassificationTrainer
 
 __version__ = "0.1.0"
 
 __all__ = [
-    "TimmClassifierModel",
-    "TimmClassifierForPrediction",
+    "TimmModel",
     "classification_collate_fn",
-    "HuggingFaceClassificationDataset",
     "LightningClassificationTrainer",
     "LightningClassificationEvaluator",
 ]

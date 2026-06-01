@@ -14,7 +14,7 @@ The wrapper exists for three reasons:
    for YAML wiring while keeping a sensible default that matches the
    spectrogram-classification baseline (``efficientvit_b0`` + ImageNet).
 2. **Checkpoint loading**: ``checkpoint_path`` strips Lightning's ``"model."``
-   prefix via :func:`sonair.checkpoint.load_lightning_checkpoint`, so a
+   prefix via :func:`marainer.checkpoint.load_lightning_checkpoint`, so a
    marainer-trained model resumes / evaluates cleanly without forcing the
    caller to know about Lightning's wrapping.
 3. **Generic across timm's zoo**: ``model_name`` accepts any of timm's
@@ -23,16 +23,16 @@ The wrapper exists for three reasons:
    resolution requirements are enforced inside :func:`timm.create_model`,
    not here.
 
-Typical wiring (YAML)::
+Typical wiring (YAML) — declare the model ``!lazy:`` so the trainer injects the
+dataset-derived ``num_classes`` at flow time (omit it from the config)::
 
-    model: !class:sonair.timm_classifier.TimmClassifierModel
+    model: !lazy:sonair.TimmModel
       model_name: efficientvit_b0
-      num_classes: 37
       pretrained: true
     loss_fn: !class:torch.nn.CrossEntropyLoss
       label_smoothing: 0.1
-    val_metrics: !class:torchmetrics.classification.MulticlassAccuracy
-      num_classes: 37
+
+(Pin ``num_classes`` explicitly only to override the dataset-derived value.)
 """
 
 from typing import List, Optional, cast
@@ -42,102 +42,138 @@ import torch
 import torch.nn as nn
 from confluid import configurable
 from logflow import get_logger
+from marainer.checkpoint import load_lightning_checkpoint
 from marainer.outputs import ClassificationOutput, classification_output
 from torch import Tensor
-
-from sonair.checkpoint import load_lightning_checkpoint
 
 logger = get_logger(__name__)
 
 
-@configurable(task="classification", role="model")
-class TimmClassifierModel(nn.Module):
+@configurable(task="classification", role="model", lazy=True)
+class TimmModel(nn.Module):
     """timm-backed image-classification model wrapped for the Marainer Trainer flow.
 
     ``forward(images) -> logits`` only — classification models compute loss
     outside the model, so the Trainer's standard ``loss_fn(preds, target)``
     call works without a batch wrapper.
 
+    **Lazy construction (Lazy-Init / Zero-Arg mandate).** ``__init__`` does NO
+    functional work — it only stores config. The timm backbone (and any
+    pretrained-weight download) is built on first use by :meth:`_ensure_classifier`
+    (triggered by :meth:`forward` or the explicit :meth:`realize` hook), so
+    ``TimmModel()`` is cheap and does no network I/O. Tagged ``lazy=True`` so a
+    config wires it ``!lazy:`` and FluxStudio emits a deferred ``LazyClass`` the
+    trainer flows with the derived ``num_classes``. ``model_name`` and
+    ``num_classes`` have **no default** (``None``) and are validated lazily when
+    the backbone is built — not in ``__init__``.
+
+    The fixed internals ``in_channels=3`` (RGB spectrograms), ``drop_rate=0.0``,
+    and non-strict checkpoint load are no longer constructor knobs.
+
     Args:
         model_name: timm model identifier — ``"efficientvit_b0"``,
             ``"resnet50"``, ``"vit_base_patch16_224"``, ``"swin_tiny_patch4_window7_224"``,
             ``"convnext_tiny"``, ``"mobilenetv3_small_100"``, etc. See
-            ``timm.list_models()`` for the full list. Defaults to
-            ``"efficientvit_b0"`` — fast modern ViT-CNN hybrid that handles
-            spectrograms well at 224×224.
-        num_classes: Output class count. timm replaces the original ImageNet
-            head with a fresh linear layer of this size whenever
-            ``num_classes`` differs from the pretrained checkpoint's class
-            count. Defaults to ``1000`` (ImageNet-1k passthrough). In a
-            marainer training run you may **omit** this in the config: the
-            trainer derives the count from the dataset
+            ``timm.list_models()`` for the full list. **Required to build** —
+            ``""`` (the default) means unset; building the backbone with an empty
+            ``model_name`` raises. ``efficientvit_b0`` is the spectrogram baseline.
+        num_classes: Output class count. timm replaces the original head with a
+            fresh linear layer of this size. **Required to build** — ``0`` (the
+            default) means unset. In a marainer training run **omit** it in the
+            config: the classification trainer derives the count from the dataset
             (:meth:`sonair.hf_dataset.HuggingFaceClassificationDataset.num_classes`,
-            which walks the targets) and injects it when the model is
-            lazily constructed. Set it explicitly to override the derived
-            value.
+            which walks the targets) and injects it via ``flow(model, num_classes=…)``.
+            Set it explicitly to override the derived value.
         pretrained: Download timm's pretrained weights for ``model_name`` on
-            first use. Defaults to ``True``. Pass ``False`` for offline CI or
-            from-scratch training (parallel to deltaid's
-            ``encoder_weights="imagenet"``/``None`` knob).
-        in_channels: Input channel count. Defaults to ``3`` (RGB spectrogram
-            images). timm rebuilds the stem conv when this differs from the
-            backbone's native channel count.
-        drop_rate: Final-layer dropout probability. ``0.0`` (default) is what
-            most timm recipes use; bump to ``0.1``–``0.3`` if overfitting.
-        drop_path_rate: Stochastic depth probability. Only honored by
-            backbones that support it (most modern ones do); silently ignored
-            elsewhere. ``0.0`` (default) is fine for short fine-tuning runs.
+            first build. Defaults to ``True``. Pass ``False`` for offline CI or
+            from-scratch training.
         checkpoint_path: Optional path to a Lightning ``.ckpt`` (or plain
-            torch state-dict) saved by a previous training run. Loaded after
-            the pretrained weights so checkpoint values win. ``"model."``
-            prefix from Lightning wrapping is stripped automatically.
-        checkpoint_strict: Forwarded to ``load_state_dict(strict=...)``.
-            Defaults to ``False`` so e.g. a re-trained classifier head with
-            a different ``num_classes`` doesn't reject the whole load.
+            torch state-dict) saved by a previous training run, loaded after the
+            backbone is built (so checkpoint values win). ``""`` (default) =
+            none. The Lightning ``"model."`` prefix is stripped automatically.
+
+    Attributes:
+        checkpoint_strict: Whether to enforce strict key matching when loading
+            checkpoint. Defaults to ``False`` so incompatible keys (e.g., a
+            different ``num_classes``) don't reject the load. Set to ``True``
+            to require exact key match.
+        drop_path_rate: Drop path rate for stochastic depth. Currently unused
+            (no effect on backbone construction). Defaults to ``""``.
+        in_channels: Input channel count. Fixed to ``3`` for RGB spectrograms.
+            Stored as an attribute for state_dict round-trip compatibility;
+            immutable via constructor.
+        drop_rate: Dropout rate for the backbone. Fixed to ``0.0``. Stored as
+            an attribute for state_dict round-trip compatibility; immutable via
+            constructor.
     """
 
     def __init__(
         self,
-        model_name: str = "efficientvit_b0",
-        num_classes: int = 1000,
+        model_name: str = "",
+        num_classes: int = 0,
         pretrained: bool = True,
-        in_channels: int = 3,
-        drop_rate: float = 0.0,
-        drop_path_rate: float = 0.0,
-        checkpoint_path: Optional[str] = None,
-        checkpoint_strict: bool = False,
+        checkpoint_path: str = "",
     ) -> None:
         super().__init__()
-        if num_classes < 1:
-            raise ValueError(f"num_classes must be >= 1, got {num_classes}.")
-        self.model_name = model_name
-        self.num_classes = int(num_classes)
-        self.pretrained = bool(pretrained)
-        self.in_channels = int(in_channels)
-        # Stored as ``self.classifier`` (not ``self.model``) so a state_dict
-        # saved through marainer's Lightning wrapper — which adds a leading
-        # ``model.`` prefix — round-trips cleanly. ``load_lightning_checkpoint``
-        # strips that single ``model.`` prefix, leaving keys like
-        # ``classifier.stem.0.weight`` that match this wrapper's layout. If
-        # we used ``self.model``, the stripping would also chew through our
-        # own attribute name, producing keys (``stem.0.weight``) that don't
-        # match anything.
-        # Only forward drop_path_rate when non-default — timm does not filter
-        # unknown kwargs and not every backbone exposes it (e.g. efficientvit_b0
-        # rejects drop_path_rate at __init__). drop_rate is universal.
-        extra_kwargs: dict = {}
-        if drop_path_rate > 0.0:
-            extra_kwargs["drop_path_rate"] = drop_path_rate
-        self.classifier = timm.create_model(
-            model_name,
-            pretrained=pretrained,
-            num_classes=self.num_classes,
-            in_chans=self.in_channels,
-            drop_rate=drop_rate,
-            **extra_kwargs,
-        )
-        if checkpoint_path:
-            load_lightning_checkpoint(self, checkpoint_path, strict=checkpoint_strict)
+        # Store config ONLY — no functional work (no timm.create_model, no
+        # download, no checkpoint load). The backbone is built lazily by
+        # _ensure_classifier() on first forward / realize(). model_name and
+        # num_classes are validated there, NOT here, so TimmModel() is cheap and
+        # zero-arg construction works (Lazy-Init / Zero-Arg mandate).
+        self.model_name: str = model_name
+        self.num_classes: int = num_classes
+        self.pretrained: bool = pretrained
+        self.in_channels: int = 3
+        self.drop_rate: float = 0.0
+        self.drop_path_rate: str = ""
+        self.checkpoint_path = checkpoint_path
+        self.checkpoint_strict: bool = False
+
+    def _ensure_classifier(self) -> nn.Module:
+        """Build the timm backbone on first use (cached), validating lazily.
+
+        Registered under the public submodule name ``classifier`` (NOT a private
+        ``_classifier``) so a state_dict saved through marainer's Lightning
+        wrapper — which adds a leading ``model.`` prefix that
+        :func:`~marainer.checkpoint.load_lightning_checkpoint` strips — round-trips
+        to ``classifier.<layer>`` keys, matching this wrapper's layout (and any
+        checkpoint written before lazy construction). A property named
+        ``classifier`` is deliberately avoided: it would force a ``_classifier``
+        backing submodule and rename every state_dict key.
+        """
+        if "classifier" not in self._modules:
+            # Validate the required config lazily (sentinels: "" / 0 mean "unset").
+            if not self.model_name:
+                raise ValueError("TimmModel.model_name is required to build the backbone (got empty).")
+            if self.num_classes < 1:
+                raise ValueError(
+                    f"TimmModel.num_classes must be >= 1 to build the backbone (got {self.num_classes}) — "
+                    "set it explicitly, or let the classification trainer inject it from the dataset."
+                )
+            self.add_module(
+                "classifier",
+                timm.create_model(
+                    self.model_name,
+                    pretrained=self.pretrained,
+                    num_classes=self.num_classes,
+                    in_chans=self.in_channels,
+                    drop_rate=self.drop_rate,
+                ),
+            )
+            if self.checkpoint_path:
+                load_lightning_checkpoint(self, self.checkpoint_path, strict=self.checkpoint_strict)
+        return cast(nn.Module, self._modules["classifier"])
+
+    def realize(self) -> "TimmModel":
+        """Force-build the lazy backbone now, returning self.
+
+        The classification trainer calls this (via ``getattr(model, "realize", …)``)
+        right after ``flow(model, num_classes=N)`` so ``self.parameters()`` is
+        populated BEFORE Lightning's ``configure_optimizers`` builds the optimizer
+        (which would otherwise see an empty parameter set).
+        """
+        self._ensure_classifier()
+        return self
 
     def forward(self, images: Tensor) -> Tensor:
         """Run the classifier and emit per-image class logits.
@@ -153,14 +189,14 @@ class TimmClassifierModel(nn.Module):
             ``[N, num_classes]`` raw logits.
         """
         if images.dim() != 4:
-            raise ValueError(f"TimmClassifierModel expects 4D [N,C,H,W] images, got shape {tuple(images.shape)}.")
+            raise ValueError(f"TimmModel expects 4D [N,C,H,W] images, got shape {tuple(images.shape)}.")
         n, c, _, _ = images.shape
         if c != self.in_channels:
             raise ValueError(
-                f"TimmClassifierModel was built for in_channels={self.in_channels}, " f"got images with {c} channels."
+                f"TimmModel was built for in_channels={self.in_channels}, " f"got images with {c} channels."
             )
 
-        logits = cast(Tensor, self.classifier(images))
+        logits = cast(Tensor, self._ensure_classifier()(images))
 
         # Per-batch diagnostic: log argmax distribution + logits range.
         # Predicting one class is normal early in training so we don't
@@ -178,45 +214,4 @@ class TimmClassifierModel(nn.Module):
         return logits
 
 
-@configurable
-class TimmClassifierForPrediction(TimmClassifierModel):
-    """:class:`TimmClassifierModel` variant that emits per-sample dicts.
-
-    Use this class **only** in :class:`marainer.evaluator.LightningEvaluator`'s
-    ``predict_*.yaml`` configs where the ``predictions_sink`` expects
-    per-sample :class:`~marainer.outputs.ClassificationOutput` dispatch.
-    For ``train_*.yaml`` and ``evaluate_*.yaml`` configs where torchmetrics
-    consume raw ``[N, C]`` logits, use the base
-    :class:`TimmClassifierModel`.
-
-    Why two classes instead of a flag: the base Trainer's
-    ``validation_step`` calls ``loss_fn(preds, target)`` with
-    ``preds`` shaped like a tensor. If we toggled per-sample output via
-    ``self.training``, validation during training would break (loss can't
-    consume a list of dicts). Keeping the two cases as distinct classes
-    makes the contract explicit at the YAML level.
-
-    Both classes share the same ``self.classifier`` attribute, so a
-    ``.ckpt`` saved through training (which uses
-    :class:`TimmClassifierModel`) loads cleanly into this class via the
-    same ``checkpoint_path`` argument.
-    """
-
-    def forward(self, images: Tensor) -> List[ClassificationOutput]:  # type: ignore[override]
-        """Run the classifier and emit one :class:`ClassificationOutput` per sample.
-
-        Args:
-            images: ``[N, in_channels, H, W]`` float tensor.
-
-        Returns:
-            List of length ``N``, each entry a
-            :class:`~marainer.outputs.ClassificationOutput` dict carrying
-            ``logits``/``probs`` shaped ``[1, C]`` and ``class_idx`` shaped
-            ``[1]`` for that sample.
-        """
-        logits = super().forward(images)  # [N, C]
-        n = logits.shape[0]
-        return [classification_output(logits[i : i + 1]) for i in range(n)]
-
-
-__all__ = ["TimmClassifierModel", "TimmClassifierForPrediction"]
+__all__ = ["TimmModel"]

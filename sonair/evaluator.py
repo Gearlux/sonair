@@ -15,23 +15,22 @@ Minimal YAML example::
 
     evaluator: !class:sonair.evaluator.LightningClassificationEvaluator
       num_classes: 37
-      model: !class:sonair.timm_classifier.TimmClassifierModel
+      model: !class:sonair.timm_classifier.TimmModel
         model_name: efficientvit_b0
         num_classes: !ref:num_classes
         pretrained: false
         checkpoint_path: ./checkpoints/last.ckpt
-      dataset: !class:sonair.hf_dataset.HuggingFaceClassificationDataset
-        repo_id: kitofrank/RFUAV
+      dataset: !class:dataflux.sources.HuggingFaceSource
+        path: kitofrank/RFUAV
         split: validation
 """
 
-from typing import Any, Optional
+from typing import Any
 
-import pytorch_lightning as L
-from confluid import Class, Lazy, configurable
+from confluid import LazyClass, configurable, flow
+from confluid.fluid import Fluid
 from marainer.evaluator import LightningEvaluator
 from torch.utils.data import DataLoader
-from torchmetrics import MetricCollection
 
 from sonair.classification import classification_collate_fn
 from sonair.trainer import _build_classification_metrics
@@ -41,21 +40,22 @@ from sonair.trainer import _build_classification_metrics
 class LightningClassificationEvaluator(LightningEvaluator):
     """Specialised image-classification evaluator with baked-in defaults.
 
+    Mirrors :class:`~marainer.evaluator.LightningEvaluator`'s minimal-ctor
+    discipline: only ``model`` / ``dataset`` / ``num_classes`` (+ identity
+    ``experiment_name`` / ``run_name``). The classification defaults — the
+    ``test/``-prefixed metric set and the ``classification_collate_fn`` loader —
+    are body attributes; ``predictions_sink`` / ``lightning`` /
+    ``metrics_sidecar_path`` inherit the base defaults and are configured
+    post-construction (YAML / broadcasting; a deferred slot uses ``!lazy:``).
+
     Args:
         model: Classification model that emits ``[N, num_classes]`` logits.
             The model is responsible for loading its own weights — pass
             ``checkpoint_path`` to the model class.
         dataset: Evaluation dataset or Flux pipeline.
         num_classes: Number of output classes; drives metric construction.
-        loader: Deferred DataLoader (default includes ``classification_collate_fn``).
-        predictions_sink: Optional sink with ``.write(prediction, metadata)`` and
-            ``.close()``. Use :class:`~marainer.sinks.ClassificationPredictionsSink`
-            for per-sample JSON output.
-        lightning: PyTorch Lightning Trainer config.
         experiment_name: MLflow experiment name.
         run_name: MLflow run name.
-        metrics_sidecar_path: Optional path; when set, writes a logger-agnostic
-            JSON dump of the final metrics after evaluation completes.
     """
 
     def __init__(
@@ -63,22 +63,28 @@ class LightningClassificationEvaluator(LightningEvaluator):
         model: Any,
         dataset: Any,
         num_classes: int,
-        loader: Lazy[Any] = Class(DataLoader, collate_fn=classification_collate_fn),
-        predictions_sink: Any = None,
-        lightning: Any = Class(L.Trainer),
         experiment_name: str = "sonair_classification_eval",
         run_name: str = "evaluate",
-        metrics_sidecar_path: Optional[str] = None,
     ) -> None:
-        metrics: MetricCollection = _build_classification_metrics(num_classes).clone(prefix="test/")
-        super().__init__(
-            model=model,
-            dataset=dataset,
-            loader=loader,
-            metrics=metrics,
-            predictions_sink=predictions_sink,
-            lightning=lightning,
-            experiment_name=experiment_name,
-            run_name=run_name,
-            metrics_sidecar_path=metrics_sidecar_path,
-        )
+        super().__init__(model=model, dataset=dataset, experiment_name=experiment_name, run_name=run_name)
+        self.num_classes = int(num_classes)
+        self.metrics = _build_classification_metrics(self.num_classes).clone(prefix="test/")
+        self.loader = LazyClass(DataLoader, collate_fn=classification_collate_fn)
+
+    def run(self) -> None:
+        """Flow the model with the (required) ``num_classes`` and realize it, then evaluate.
+
+        sonair OWNS the num_classes injection here too (mirroring the trainer) instead of the
+        generic ``marainer.dimensions`` path: a deferred model is flowed with the evaluator's
+        ``num_classes`` and a lazy backbone (e.g. ``TimmClassifierForPrediction``) is realized.
+        By the time the base ``run()`` executes, the model is LIVE so its generic derivation
+        no-ops.
+        """
+        if isinstance(self.model, Fluid):
+            self.model = flow(self.model, num_classes=self.num_classes)
+        else:
+            self.model = flow(self.model)
+        realize = getattr(self.model, "realize", None)
+        if callable(realize):
+            realize()
+        super().run()

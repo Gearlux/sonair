@@ -146,16 +146,17 @@ def test_num_classes_read_from_model_not_data() -> None:
     assert ev.num_classes == 7  # from the model, not 3 from the data
 
 
-def test_default_loader_uses_collate_fn_with_metadata() -> None:
+def test_default_loader_uses_classification_collate_fn() -> None:
     from confluid.fluid import Class as ConfluidClass
+
+    from sonair.classification import classification_collate_fn
 
     ev = _make_evaluator(
         model=_TinyClassifier(num_classes=3),
         dataset=_make_flux(8),
-        num_classes=3,
     )
     assert isinstance(ev.loader, ConfluidClass)
-    assert ev.loader.kwargs.get("collate_fn") is collate_fn_with_metadata
+    assert ev.loader.kwargs.get("collate_fn") is classification_collate_fn
 
 
 # ---------------------------------------------------------------------------

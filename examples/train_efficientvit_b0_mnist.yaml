@@ -43,7 +43,7 @@ val_set: !class:dataflux.sources.HuggingFaceSource
 # Lightning Trainer from them.
 batch_size: 32
 num_workers: 8
-max_epochs: 20
+max_epochs: 3
 
 # `logger` broadcasts into the trainer ctor and is forwarded to the base, which
 # bakes it into LazyClass(pytorch_lightning.Trainer, logger=[...]); the base's

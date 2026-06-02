@@ -6,7 +6,7 @@ the dataset and the (trained) model.
 
 Baked-in defaults (all overridable via YAML ``@configurable`` attributes):
 
-* ``loader`` ``collate_fn`` — :func:`~sonair.classification.collate_fn_with_metadata`
+* ``loader`` ``collate_fn`` — :func:`~sonair.classification.classification_collate_fn`
 * ``metrics`` — :class:`~torchmetrics.classification.MulticlassAccuracy` (top-1)
   + :class:`~torchmetrics.classification.MulticlassF1Score` (macro).
 
@@ -32,7 +32,6 @@ from typing import Any, Optional
 from confluid import LazyClass, configurable, flow
 from dataflux import LabelMap
 from logflow import get_logger
-from marainer.collate import collate_fn_with_metadata
 from marainer.evaluator import LightningEvaluator
 from marainer.trainer import build_metric_collection, ensure_sample_dataset
 from torch import nn
@@ -40,6 +39,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
 
+from sonair.classification import classification_collate_fn
 from sonair.trainer import detect_target_kind, encode_flux
 
 logger = get_logger(__name__)
@@ -53,7 +53,7 @@ class LightningClassificationEvaluator(LightningEvaluator):
     discipline: only ``model`` / ``dataset`` (+ identity ``experiment_name`` /
     ``run_name``); ``num_classes`` is NOT a knob — it is read off the trained
     model in :meth:`initialize`. The classification defaults —
-    the ``test/``-prefixed metric set and the ``collate_fn_with_metadata`` loader —
+    the ``test/``-prefixed metric set and the ``classification_collate_fn`` loader —
     are deferred (body attributes with `LazyClass` defaults); ``predictions_sink`` /
     ``lightning`` / ``metrics_sidecar_path`` inherit the base defaults and are
     configured post-construction (YAML / broadcasting).
@@ -98,7 +98,7 @@ class LightningClassificationEvaluator(LightningEvaluator):
         self.num_classes: Optional[int] = None
         self.label_map = label_map
         self.metrics = metrics
-        self.loader = LazyClass(DataLoader, collate_fn=collate_fn_with_metadata)
+        self.loader = LazyClass(DataLoader, collate_fn=classification_collate_fn)
 
     def run(self) -> None:
         """Resolve num_classes + flow the model and metrics, then run the base eval."""

@@ -7,15 +7,15 @@
 #
 # How it stays this small:
 #  * `sonair.LightningClassificationTrainer` bakes loss (CrossEntropy), collate,
-#    optimizer (AdamW), and metrics (top1/top5/f1). It also exposes ergonomic
-#    knobs (batch_size / num_workers / persist_workers / max_epochs / logger)
-#    that build the DataLoaders + the pytorch_lightning.Trainer for you.
+#    optimizer (AdamW), and metrics (top1/f1). It also exposes ergonomic knobs
+#    (batch_size / num_workers / max_epochs / logger) that build the DataLoaders
+#    + the pytorch_lightning.Trainer for you.
 #  * Every top-level key below is wired into the trainer by **Confluid
 #    broadcasting** (sibling keys are injected into the same-named trainer
 #    constructor params) — no nesting or `!ref` plumbing needed.
 #  * The model is `!lazy:` so `num_classes` is **derived from the dataset**
-#    (10 for MNIST, via HuggingFaceClassificationDataset.derived_dimensions) and
-#    injected at run time — it is NOT specified anywhere here.
+#    (10 for MNIST, via `dataflux.num_classes` walking the targets) and injected
+#    by the trainer's `initialize()` at run time — it is NOT specified here.
 #
 # MNIST is greyscale 28x28; the dataset converts each image to RGB and resizes
 # to the model's expected size, so the 3-channel efficientvit backbone works.
@@ -31,25 +31,24 @@ model: !lazy:sonair.TimmModel
 
 # Data: HuggingFace `mnist`. MNIST exposes `train` and `test` splits (no
 # `validation`), so the held-out split is `test`.
-train_set: !class:sonair.hf_dataset.HuggingFaceClassificationDataset
-  repo_id: "mnist"
+train_set: !class:dataflux.sources.HuggingFaceSource
+  path: "mnist"
   split: train
 
-val_set: !class:sonair.hf_dataset.HuggingFaceClassificationDataset
-  repo_id: "mnist"
+val_set: !class:dataflux.sources.HuggingFaceSource
+  path: "mnist"
   split: test
 
 # Ergonomic knobs — broadcast into the trainer, which assembles the loaders +
 # Lightning Trainer from them.
 batch_size: 32
 num_workers: 8
-persist_workers: true
 max_epochs: 20
 
-# `lightning_loggers` broadcasts into the trainer (named to avoid the read-only
-# LightningModule.logger/.loggers properties); its `!class:` logger Fluids are
-# pre-flowed and become pytorch_lightning.Trainer(logger=[...]) at run time.
-lightning_loggers:
+# `logger` broadcasts into the trainer ctor and is forwarded to the base, which
+# bakes it into LazyClass(pytorch_lightning.Trainer, logger=[...]); the base's
+# flow(self.lightning) at run() materializes these `!class:` logger Fluids.
+logger:
   - !class:pytorch_lightning.loggers.TensorBoardLogger
     save_dir: ./lightning_logs
     name: mnist_efficientvit_b0

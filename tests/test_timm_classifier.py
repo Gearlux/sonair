@@ -58,17 +58,18 @@ def test_zero_arg_construction_is_cheap_and_does_no_build() -> None:
     assert list(model.parameters()) == []  # nothing materialised yet
 
 
-def test_realize_builds_the_backbone() -> None:
+def test_solidify_builds_the_backbone() -> None:
     model = TimmModel(model_name=TEST_MODEL, num_classes=4, pretrained=False)
+    assert model.classifier is None
     assert "classifier" not in model._modules
-    assert model.realize() is model
+    assert model.solidify() is model.classifier  # returns the cached backbone
     assert "classifier" in model._modules
     assert sum(p.numel() for p in model.parameters()) > 0
 
 
 def test_missing_model_name_raises_at_build() -> None:
     with pytest.raises(ValueError, match="model_name"):
-        TimmModel(num_classes=4, pretrained=False).realize()
+        TimmModel(num_classes=4, pretrained=False).solidify()
 
 
 # --- Input validation ------------------------------------------------------
@@ -90,7 +91,7 @@ def test_rejects_zero_num_classes() -> None:
     # num_classes=0 is the "unset" sentinel — cheap to construct, raises at build.
     model = TimmModel(model_name=TEST_MODEL, num_classes=0, pretrained=False)
     with pytest.raises(ValueError, match="num_classes"):
-        model.realize()
+        model.solidify()
 
 
 # --- Checkpoint round-trip -------------------------------------------------
@@ -98,7 +99,8 @@ def test_rejects_zero_num_classes() -> None:
 
 def test_checkpoint_round_trip_via_init(tmp_path: Path) -> None:
     """Saving a state_dict and reloading via checkpoint_path produces identical weights."""
-    src = _make_model(num_classes=4).realize()  # build so there's a state_dict to save
+    src = _make_model(num_classes=4)
+    src.solidify()  # build so there's a state_dict to save (src stays the TimmModel)
     ckpt_path = tmp_path / "model.pt"
     torch.save(src.state_dict(), ckpt_path)
 
@@ -107,7 +109,8 @@ def test_checkpoint_round_trip_via_init(tmp_path: Path) -> None:
         num_classes=4,
         pretrained=False,
         checkpoint_path=str(ckpt_path),
-    ).realize()  # build -> loads the checkpoint
+    )
+    dst.solidify()  # build -> loads the checkpoint
     for (k_src, v_src), (k_dst, v_dst) in zip(src.state_dict().items(), dst.state_dict().items()):
         assert k_src == k_dst
         assert torch.equal(v_src, v_dst)
@@ -122,7 +125,8 @@ def test_checkpoint_strips_lightning_model_prefix(tmp_path: Path) -> None:
     prefix and leave keys like ``classifier.stem.0.weight`` matching the
     wrapper layout.
     """
-    src = _make_model(num_classes=4).realize()
+    src = _make_model(num_classes=4)
+    src.solidify()
     src_state = src.state_dict()
     lightning_state = {f"model.{k}": v for k, v in src_state.items()}
     ckpt_path = tmp_path / "lightning.ckpt"
@@ -133,7 +137,8 @@ def test_checkpoint_strips_lightning_model_prefix(tmp_path: Path) -> None:
         num_classes=4,
         pretrained=False,
         checkpoint_path=str(ckpt_path),
-    ).realize()
+    )
+    dst.solidify()
     for k in src_state:
         assert torch.equal(src_state[k], dst.state_dict()[k])
 
@@ -150,7 +155,7 @@ def test_missing_checkpoint_raises(tmp_path: Path) -> None:
         checkpoint_path=str(missing),
     )
     with pytest.raises(FileNotFoundError):
-        model.realize()  # checkpoint loads at build time, not __init__
+        model.solidify()  # checkpoint loads at build time, not __init__
 
 
 # --- Differentiability -----------------------------------------------------

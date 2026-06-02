@@ -15,6 +15,7 @@ dependencies = [
     "timm>=1.0.0",
     "datasets>=2.0.0",
     "pillow",
+    "tqdm",  # progress bar while the trainer walks train targets to fit the label encoder
 ]
 requires-python = ">=3.12"
 

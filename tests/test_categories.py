@@ -22,6 +22,8 @@ def test_categories_enumerable_via_registry() -> None:
     assert "TimmModel" in registry.list_classes(category="classification_model")
     # The classification loss is the registered third-party torch.nn.CrossEntropyLoss.
     assert "CrossEntropyLoss" in registry.list_classes(category="classification_loss")
+    # SigmoidFocalLoss is sonair's own thin wrapper over torchvision's function.
+    assert "SigmoidFocalLoss" in registry.list_classes(category="classification_loss")
 
 
 def test_task_role_tags() -> None:

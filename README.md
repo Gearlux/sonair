@@ -104,43 +104,75 @@ Recommended backbones for spectrogram classification:
 
 See `timm.list_models()` for the full catalogue.
 
-`TimmModel` is tagged `@configurable(task="classification", role="model")` (and
-`HuggingFaceClassificationDataset` carries `role="dataset"`, the trainer/evaluator `role="trainer"`/`"evaluator"`,
-and `torch.nn.CrossEntropyLoss` is `register`-ed as `role="loss"`), so navigaitor's
-`list_classes(task=…, role=…)` scan + the visual-editor form-spec offer them — and any future
-classification model/dataset/loss — as task-scoped options.
+`TimmModel` is tagged `@configurable(task="classification", role="model")` (the
+trainer/evaluator carry `role="trainer"`/`"evaluator"`, and `torch.nn.CrossEntropyLoss`
+is `register`-ed as `role="loss"`), so navigaitor's `list_classes(task=…, role=…)`
+scan + the visual-editor form-spec offer them — and any future classification
+model/loss — as task-scoped options. The dataset is the generic
+`dataflux.sources.HuggingFaceSource`.
 
-## Class count: omit `num_classes`, it's derived from the dataset
+## Class count: how `num_classes` is resolved
 
-`HuggingFaceClassificationDataset.num_classes()` is a **lazy method** (not an
-`__init__` attribute): it walks the targets — target-only via dataflux's
-projection, so no image is decoded — and returns `max(class_id) + 1`.
-`derived_dimensions()` returns `{"num_classes": …}`. marainer reads this hook at
-run time and injects the count when it lazily constructs the model + metrics, so
-a training config may **omit `num_classes` entirely**:
+`LightningClassificationTrainer.initialize()` (run at the top of `run()`) resolves the count
+in this order:
+
+1. **A concrete (already-built) model is authoritative** — its classifier head is sized, so
+   `num_classes` is read straight off it (`getattr(model, "num_classes")`). A dataset walk that
+   disagreed would mis-size the metrics against the head.
+2. An explicit `num_classes` on the trainer.
+3. A `label_map` (see below).
+4. A `!lazy:` model's pinned `num_classes` kwarg.
+5. **Derived from the data** — `dataflux.num_classes(train_set)` walks the (integer) targets and
+   returns `max(class_id) + 1`.
+
+So the canonical flat config wires the model `!lazy:` *without* `num_classes` and lets the
+dataset drive it:
 
 ```yaml
-# num_classes omitted at the top level → derived from the dataset.
-image_size: 224
-train_set: !class:sonair.hf_dataset.HuggingFaceClassificationDataset
-  repo_id: ylecun/mnist
-  split: train
-model: !lazy:sonair.TimmModel   # !lazy: so the count can be injected
+model: !lazy:sonair.TimmModel        # !lazy: so the derived count is injected
   model_name: efficientvit_b0
-val_metrics: !lazy:torchmetrics.MetricCollection
-  metrics:
-    top1: !class:torchmetrics.classification.MulticlassAccuracy { top_k: 1 }
+train_set: !class:dataflux.sources.HuggingFaceSource
+  path: kitofrank/RFUAV
+  split: train
 ```
 
-Set `num_classes` explicitly (top-level or on the model) to fix the head size
-and skip the walk. The visual editor / `train_classification` MCP tool emit the
-`!lazy:` form automatically when you leave `num_classes` blank.
+## String labels, encoding, and balanced loss
+
+When the dataset's `target` is a **class-name string** (a generic HF imagefolder, etc.) rather
+than an integer id, the trainer auto-encodes it:
+
+- **Encoding** — it fits a `dataflux.LabelMap` from the train targets (scikit-learn
+  `LabelEncoder`, shown with a progress bar), or uses a `label_map` you pass in. The wired
+  `train`/`val`/`test` sets are wrapped so their targets become ids, and the map's class names are
+  persisted to `class_names.json` next to the checkpoint — which `LightningClassificationEvaluator`
+  reloads (via `dataflux.LabelMap.load`) so eval/predict share the identical name↔id ordering.
+- **Balanced loss** — with `balance_classes: true` (the default), the trainer derives
+  inverse-frequency class weights from the targets it walked and injects them into the loss (when
+  the loss takes a `weight` tensor, e.g. `CrossEntropyLoss`). The weights are exposed on
+  `trainer.class_weights`. Set `balance_classes: false` to leave the loss unweighted.
+
+```yaml
+trainer: !class:sonair.LightningClassificationTrainer
+  run_name: cats_vs_dogs
+  balance_classes: true            # inverse-frequency class weights (default)
+  # Optionally pin the encoding instead of fitting it:
+  # label_map: !class:dataflux.LabelMap
+  #   mapping: { cat: 0, dog: 1 }
+model: !lazy:sonair.TimmModel
+  model_name: efficientvit_b0
+train_set: !class:dataflux.sources.HuggingFaceSource
+  path: ./my_imagefolder      # string labels — auto-encoded
+  split: train
+```
+
+Multi-label string targets (a *sequence* of names) are not yet supported and raise a clear error.
 
 ## Adapters
 
 | Symbol | Purpose |
 |--------|---------|
-| `torch.nn.CrossEntropyLoss` | The classification loss — registered (no sonair wrapper) as `task="classification", role="loss"`; set `label_smoothing` / `ignore_index` / `reduction` from YAML. |
+| `torch.nn.CrossEntropyLoss` | The default classification loss — registered (no sonair wrapper) as `task="classification", role="loss"`; set `label_smoothing` / `ignore_index` / `reduction` from YAML. Consumes int64 class-id targets `[N]`. |
+| `SigmoidFocalLoss` | Thin `nn.Module` wrapper over `torchvision.ops.sigmoid_focal_loss` (a function, which confluid's `register` can't tag) — a pickable `task="classification", role="loss"` configurable with `alpha` / `gamma` / `reduction` knobs. Expects **float** targets the same shape as the logits (e.g. one-hot `[N, C]`), like the `BCEWithLogitsLoss` family. Defaults `reduction="mean"` (a scalar loss), not torchvision's `"none"`. |
 | `classification_collate_fn` | DataLoader collate that stacks per-sample image tensors and scalar class-id targets, preserves per-sample metadata as a list (the default collate crashes on string-valued metadata). |
 | `load_lightning_checkpoint` | Strip Lightning's `"model."` prefix when loading a `.ckpt` saved through `marainer.trainer.LightningTrainer`. |
 

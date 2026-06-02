@@ -35,7 +35,7 @@ dataset-derived ``num_classes`` at flow time (omit it from the config)::
 (Pin ``num_classes`` explicitly only to override the dataset-derived value.)
 """
 
-from typing import List, Optional, cast
+from typing import Optional, cast
 
 import timm
 import torch
@@ -43,7 +43,6 @@ import torch.nn as nn
 from confluid import configurable
 from logflow import get_logger
 from marainer.checkpoint import load_lightning_checkpoint
-from marainer.outputs import ClassificationOutput, classification_output
 from torch import Tensor
 
 logger = get_logger(__name__)
@@ -59,13 +58,13 @@ class TimmModel(nn.Module):
 
     **Lazy construction (Lazy-Init / Zero-Arg mandate).** ``__init__`` does NO
     functional work — it only stores config. The timm backbone (and any
-    pretrained-weight download) is built on first use by :meth:`_ensure_classifier`
-    (triggered by :meth:`forward` or the explicit :meth:`realize` hook), so
-    ``TimmModel()`` is cheap and does no network I/O. Tagged ``lazy=True`` so a
-    config wires it ``!lazy:`` and FluxStudio emits a deferred ``LazyClass`` the
-    trainer flows with the derived ``num_classes``. ``model_name`` and
-    ``num_classes`` have **no default** (``None``) and are validated lazily when
-    the backbone is built — not in ``__init__``.
+    pretrained-weight download) is built on first use by :meth:`solidify` (called by
+    :meth:`forward`, by confluid's auto-solidify on ``flow``, or explicitly) and cached
+    in ``self.classifier``, so ``TimmModel()`` is cheap and does no network I/O. Tagged
+    ``lazy=True`` so a config wires it ``!lazy:`` and FluxStudio emits a deferred
+    ``LazyClass`` the trainer flows with the derived ``num_classes``. ``model_name`` and
+    ``num_classes`` default to the unset sentinels ``""`` / ``0`` and are validated lazily
+    when the backbone is built — not in ``__init__``.
 
     The fixed internals ``in_channels=3`` (RGB spectrograms), ``drop_rate=0.0``,
     and non-strict checkpoint load are no longer constructor knobs.
@@ -81,9 +80,8 @@ class TimmModel(nn.Module):
             fresh linear layer of this size. **Required to build** — ``0`` (the
             default) means unset. In a marainer training run **omit** it in the
             config: the classification trainer derives the count from the dataset
-            (:meth:`sonair.hf_dataset.HuggingFaceClassificationDataset.num_classes`,
-            which walks the targets) and injects it via ``flow(model, num_classes=…)``.
-            Set it explicitly to override the derived value.
+            (``dataflux.num_classes``, which walks the targets) and injects it via
+            ``flow(model, num_classes=…)``. Set it explicitly to override the derived value.
         pretrained: Download timm's pretrained weights for ``model_name`` on
             first build. Defaults to ``True``. Pass ``False`` for offline CI or
             from-scratch training.
@@ -97,8 +95,8 @@ class TimmModel(nn.Module):
             checkpoint. Defaults to ``False`` so incompatible keys (e.g., a
             different ``num_classes``) don't reject the load. Set to ``True``
             to require exact key match.
-        drop_path_rate: Drop path rate for stochastic depth. Currently unused
-            (no effect on backbone construction). Defaults to ``""``.
+        classifier: Lazy cache for the built timm backbone (``None`` until
+            :meth:`solidify`). Public submodule name so state_dict keys are ``classifier.*``.
         in_channels: Input channel count. Fixed to ``3`` for RGB spectrograms.
             Stored as an attribute for state_dict round-trip compatibility;
             immutable via constructor.
@@ -117,32 +115,38 @@ class TimmModel(nn.Module):
         super().__init__()
         # Store config ONLY — no functional work (no timm.create_model, no
         # download, no checkpoint load). The backbone is built lazily by
-        # _ensure_classifier() on first forward / realize(). model_name and
-        # num_classes are validated there, NOT here, so TimmModel() is cheap and
-        # zero-arg construction works (Lazy-Init / Zero-Arg mandate).
+        # solidify() on first call / forward(). model_name and num_classes are
+        # validated there, NOT here, so TimmModel() is cheap and zero-arg
+        # construction works (Lazy-Init / Zero-Arg mandate).
         self.model_name: str = model_name
         self.num_classes: int = num_classes
         self.pretrained: bool = pretrained
         self.in_channels: int = 3
         self.drop_rate: float = 0.0
-        self.drop_path_rate: str = ""
         self.checkpoint_path = checkpoint_path
         self.checkpoint_strict: bool = False
+        # Lazy cache for the timm backbone — built once by solidify(). Registered
+        # under the public name `classifier` so the state_dict round-trips as
+        # `classifier.*` through marainer's Lightning checkpoint loading.
+        self.classifier: Optional[nn.Module] = None
 
-    def _ensure_classifier(self) -> nn.Module:
-        """Build the timm backbone on first use (cached), validating lazily.
+    def solidify(self) -> nn.Module:
+        """Build the timm backbone on first call (cached in ``self.classifier``) and return it.
 
-        Registered under the public submodule name ``classifier`` (NOT a private
-        ``_classifier``) so a state_dict saved through marainer's Lightning
-        wrapper — which adds a leading ``model.`` prefix that
-        :func:`~marainer.checkpoint.load_lightning_checkpoint` strips — round-trips
-        to ``classifier.<layer>`` keys, matching this wrapper's layout (and any
-        checkpoint written before lazy construction). A property named
-        ``classifier`` is deliberately avoided: it would force a ``_classifier``
-        backing submodule and rename every state_dict key.
+        Validates the required config lazily (``model_name`` / ``num_classes`` — the
+        sentinels ``""`` / ``0`` mean "unset"), builds the timm model, and loads
+        ``checkpoint_path`` into it when set. Confluid's ``flow()`` auto-calls this after
+        construction, and :meth:`forward` calls it too, so the backbone (and
+        ``self.parameters()``) exists before the optimizer reads it. Idempotent — returns
+        the cached backbone on later calls.
+
+        The backbone is stored as the public submodule ``self.classifier`` (NOT a private
+        ``_classifier``) so a state_dict saved through marainer's Lightning wrapper — which
+        adds a leading ``model.`` prefix that
+        :func:`~marainer.checkpoint.load_lightning_checkpoint` strips — round-trips to
+        ``classifier.<layer>`` keys, matching this wrapper's layout.
         """
-        if "classifier" not in self._modules:
-            # Validate the required config lazily (sentinels: "" / 0 mean "unset").
+        if self.classifier is None:
             if not self.model_name:
                 raise ValueError("TimmModel.model_name is required to build the backbone (got empty).")
             if self.num_classes < 1:
@@ -150,30 +154,16 @@ class TimmModel(nn.Module):
                     f"TimmModel.num_classes must be >= 1 to build the backbone (got {self.num_classes}) — "
                     "set it explicitly, or let the classification trainer inject it from the dataset."
                 )
-            self.add_module(
-                "classifier",
-                timm.create_model(
-                    self.model_name,
-                    pretrained=self.pretrained,
-                    num_classes=self.num_classes,
-                    in_chans=self.in_channels,
-                    drop_rate=self.drop_rate,
-                ),
+            self.classifier = timm.create_model(
+                self.model_name,
+                pretrained=self.pretrained,
+                num_classes=self.num_classes,
+                in_chans=self.in_channels,
+                drop_rate=self.drop_rate,
             )
             if self.checkpoint_path:
                 load_lightning_checkpoint(self, self.checkpoint_path, strict=self.checkpoint_strict)
-        return cast(nn.Module, self._modules["classifier"])
-
-    def realize(self) -> "TimmModel":
-        """Force-build the lazy backbone now, returning self.
-
-        The classification trainer calls this (via ``getattr(model, "realize", …)``)
-        right after ``flow(model, num_classes=N)`` so ``self.parameters()`` is
-        populated BEFORE Lightning's ``configure_optimizers`` builds the optimizer
-        (which would otherwise see an empty parameter set).
-        """
-        self._ensure_classifier()
-        return self
+        return cast(nn.Module, self.classifier)
 
     def forward(self, images: Tensor) -> Tensor:
         """Run the classifier and emit per-image class logits.
@@ -196,7 +186,7 @@ class TimmModel(nn.Module):
                 f"TimmModel was built for in_channels={self.in_channels}, " f"got images with {c} channels."
             )
 
-        logits = cast(Tensor, self._ensure_classifier()(images))
+        logits = cast(Tensor, self.solidify()(images))
 
         # Per-batch diagnostic: log argmax distribution + logits range.
         # Predicting one class is normal early in training so we don't

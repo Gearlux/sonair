@@ -27,9 +27,9 @@ Minimal YAML example::
 """
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
-from confluid import LazyClass, configurable, flow
+from confluid import Fluid, LazyClass, configurable, flow
 from dataflux import LabelMap
 from logflow import get_logger
 from marainer.evaluator import LightningEvaluator
@@ -80,8 +80,8 @@ class LightningClassificationEvaluator(LightningEvaluator):
 
     def __init__(
         self,
-        model: nn.Module,
-        dataset: Dataset[Any],
+        model: Union[nn.Module, Fluid],
+        dataset: Union[Dataset[Any], Fluid],
         experiment_name: str = "sonair_classification_eval",
         run_name: Optional[str] = None,
         label_map: Optional[LabelMap] = None,

@@ -465,8 +465,11 @@ def test_string_targets_fit_encode_and_expose_map() -> None:
     assert trainer.num_classes == 3
     # The train set is now a Flux whose targets are encoded class-id ints, and it exposes
     # label_names so marainer persists class_names.json.
-    assert trainer.train_set.label_names == ["bird", "cat", "dog"]
-    encoded = {trainer.train_set[i].target for i in range(len(trainer.train_set))}
+    from typing import Sized
+
+    train_set = cast(Flux, trainer.train_set)
+    assert train_set.label_names == ["bird", "cat", "dog"]  # type: ignore[attr-defined]
+    encoded = {train_set[i].target for i in range(len(cast(Sized, train_set)))}
     assert encoded == {0, 1, 2}
     assert all(isinstance(t, int) for t in encoded)
 
@@ -485,7 +488,8 @@ def test_explicit_label_map_drives_encoding_and_num_classes() -> None:
     # num_classes comes from the pinned map (4), not the 3 labels that appear in the data.
     assert trainer.num_classes == 4
     assert trainer.label_map is lm
-    sample0 = trainer.train_set[0]
+    train_set = cast(Flux, trainer.train_set)
+    sample0 = train_set[0]
     assert sample0.target == lm.mapping[_string_samples(["cat", "dog", "bird"])[0].target]
 
 

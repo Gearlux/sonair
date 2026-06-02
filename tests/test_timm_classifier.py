@@ -72,6 +72,24 @@ def test_missing_model_name_raises_at_build() -> None:
         TimmModel(num_classes=4, pretrained=False).solidify()
 
 
+def test_backbone_property_builds_and_caches_without_flow() -> None:
+    # A directly-constructed (never-flowed) TimmModel materialises its backbone via the property.
+    model = TimmModel(model_name=TEST_MODEL, num_classes=4, pretrained=False)
+    assert model.classifier is None
+    built = model.backbone  # property access triggers the build
+    assert "classifier" in model._modules
+    assert built is model.classifier
+    # The property, solidify(), and the cache all share ONE backbone (build happens at most once).
+    assert model.backbone is built
+    assert model.solidify() is built
+
+
+def test_backbone_property_validates_lazily() -> None:
+    # Same lazy validation as solidify() — the property is just the cached accessor over it.
+    with pytest.raises(ValueError, match="num_classes"):
+        _ = TimmModel(model_name=TEST_MODEL, num_classes=0, pretrained=False).backbone
+
+
 # --- Input validation ------------------------------------------------------
 
 

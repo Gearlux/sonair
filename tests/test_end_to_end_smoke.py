@@ -1,5 +1,5 @@
 """End-to-end smoke test: TimmModel + torch.nn.CrossEntropyLoss +
-classification_collate_fn + a fake dataset threaded through one full
+collate_fn_with_metadata + a fake dataset threaded through one full
 forward+backward step.
 
 This proves the wiring contract that the YAML configs in
@@ -9,15 +9,15 @@ classification path stays green even when HuggingFace's CDN is rate-limited
 or unreachable.
 """
 
-from typing import List
+from typing import Any, Dict, List
 
 import torch
 import torch.nn as nn
 from dataflux.sample import Sample
+from marainer.collate import collate_fn_with_metadata
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from sonair.classification import classification_collate_fn
 from sonair.timm_classifier import TimmModel
 
 
@@ -30,7 +30,7 @@ class _FakeHFDataset:
     """Fake HF dataset that returns dataflux Samples (same interface as HuggingFaceSource)."""
 
     def __init__(self, n_per_class: int = 4, n_classes: int = 3, image_size: int = 64) -> None:
-        self._items = []
+        self._items: List[Dict[str, Any]] = []
         self.image_size = image_size
         for cls_id in range(n_classes):
             for _ in range(n_per_class):
@@ -71,12 +71,14 @@ def test_full_train_step_runs_end_to_end() -> None:
     # Use the fake dataset directly — HuggingFaceSource would wrap it similarly.
     fake_ds = _FakeHFDataset(n_per_class=4, n_classes=3, image_size=64)
 
-    loader = DataLoader(
-        fake_ds,
+    # dataflux sources are map-style (len + getitem) but not torch Dataset
+    # subclasses, so the stub's arg-type is stricter than DataLoader's runtime.
+    loader: DataLoader = DataLoader(
+        fake_ds,  # type: ignore[arg-type]
         batch_size=4,
         shuffle=True,
         num_workers=0,
-        collate_fn=classification_collate_fn,
+        collate_fn=collate_fn_with_metadata,
     )
     # resnet18 is small and runs in a few hundred ms; use 64x64 input so
     # this whole test stays under one second wall-clock.
@@ -87,8 +89,8 @@ def test_full_train_step_runs_end_to_end() -> None:
     )
     loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    # Realize the lazy model so optimizer can see parameters.
-    model.realize()
+    # Solidify the lazy model so optimizer can see parameters.
+    model.solidify()
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
     batch = next(iter(loader))
@@ -113,9 +115,14 @@ def test_full_train_step_runs_end_to_end() -> None:
 def test_metadata_per_sample_survives_collation() -> None:
     """Per-sample metadata must round-trip through collate."""
     fake_ds = _FakeHFDataset(n_per_class=2, n_classes=3, image_size=32)
-    loader = DataLoader(fake_ds, batch_size=4, num_workers=0, collate_fn=classification_collate_fn)
+    loader: DataLoader = DataLoader(
+        fake_ds,  # type: ignore[arg-type]
+        batch_size=4,
+        num_workers=0,
+        collate_fn=collate_fn_with_metadata,
+    )
     batch = next(iter(loader))
-    metas = batch.metadata["per_sample"]
+    metas = batch.metadata
     assert isinstance(metas, list)
     assert len(metas) == 4
     for m in metas:

@@ -9,13 +9,12 @@ Baked-in defaults (all overridable via YAML ``@configurable`` attributes):
 
 * ``loss_fn`` — :class:`torch.nn.CrossEntropyLoss` (override via the ``loss_fn``
   slot; any ``task="classification", role="loss"`` class is offered)
-* ``train/val/test_loader`` — built from the ``batch_size`` / ``num_workers`` /
-  ``persist_workers`` knobs, with :func:`~sonair.classification.classification_collate_fn`
+* ``train/val/test_loader`` — built from the ``batch_size`` / ``num_workers`` knobs,
+  with :func:`~marainer.collate.collate_fn_with_metadata`
 * ``optimizer`` — ``AdamW(lr=1e-4, weight_decay=0.05)``
 * ``lightning`` — ``pytorch_lightning.Trainer`` built from ``max_epochs`` + ``logger``
-* Metrics — :class:`~torchmetrics.classification.MulticlassAccuracy` (top-1)
-  + :class:`~torchmetrics.classification.MulticlassF1Score` (macro) per split;
-  top-5 accuracy added when ``num_classes >= 5``.
+* Metrics — the ``metrics`` dict (default top-1 ``MulticlassAccuracy`` + macro
+  ``MulticlassF1Score``), flowed with ``num_classes`` and cloned per split.
 
 Minimal **flat** YAML — top-level keys are wired into the trainer by Confluid
 broadcasting (no nesting / ``!ref`` needed); the ``!lazy:`` model gets
@@ -37,47 +36,84 @@ broadcasting (no nesting / ``!ref`` needed); the ``!lazy:`` model gets
     max_epochs: 20
 """
 
-from typing import Any, List, Optional
+import inspect
+from typing import Any, Iterable, List, Literal, Optional, Union
 
-import pytorch_lightning as L
 import torch
 import torch.nn as nn
-from confluid import (  # LazyClass is the deferred Fluid (confluid.Lazy is the annotation)
-    Class,
-    LazyClass,
-    configurable,
-    flow,
-)
+from confluid import LazyClass, configurable, flow
 from confluid.fluid import Fluid
-from marainer.trainer import LightningTrainer
-from torch.utils.data import DataLoader
-from torchmetrics import MetricCollection
+from confluid.registry import resolve_class
+from dataflux import Flux, LabelMap, iter_targets
+from logflow import get_logger
+from marainer.collate import collate_fn_with_metadata
+from marainer.trainer import LightningTrainer, build_metric_collection, ensure_sample_dataset
+from pytorch_lightning.loggers import Logger
+from torch.utils.data import DataLoader, Dataset
+from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
+from tqdm import tqdm
 
-from sonair.classification import classification_collate_fn
+logger = get_logger(__name__)
 
-
-def _build_classification_metrics(num_classes: int) -> MetricCollection:
-    metrics: dict[str, Any] = {
-        "accuracy_top1": MulticlassAccuracy(num_classes=num_classes, top_k=1),
-        "f1_macro": MulticlassF1Score(num_classes=num_classes, average="macro"),
-    }
-    if num_classes >= 5:
-        metrics["accuracy_top5"] = MulticlassAccuracy(num_classes=num_classes, top_k=5)
-    return MetricCollection(metrics)
+#: How a sample's ``target`` is shaped — drives the encode / num_classes path.
+_TargetKind = Literal["int", "str", "multilabel", "empty"]
 
 
-def _dataset_num_classes(dataset: Any) -> Optional[int]:
-    """Read ``num_classes`` from a dataset's lazy hook (``num_classes()`` method,
-    else ``derived_dimensions()["num_classes"]``); ``None`` if it exposes neither."""
-    nc = getattr(dataset, "num_classes", None)
-    if callable(nc):
-        return int(nc())
-    derive = getattr(dataset, "derived_dimensions", None)
-    if callable(derive):
-        value = derive().get("num_classes")
-        return int(value) if value is not None else None
-    return None
+def _loss_accepts_weight(loss: Any) -> bool:
+    """True when ``loss``'s CONSTRUCTOR declares a ``weight`` parameter (balance-capability check).
+
+    Works whether ``loss`` is still deferred (a confluid ``Fluid`` / ``!lazy:`` — resolved to its
+    target class via ``confluid.registry.resolve_class``) or already a live ``nn.Module``. The ctor
+    signature, not ``hasattr(loss, "weight")``, is authoritative: it tells us whether the weight can
+    be supplied at construction (so a balanced ``weight`` tensor can be flowed in / set).
+    """
+    loss_cls = resolve_class(loss.target) if isinstance(loss, Fluid) else type(loss)
+    if loss_cls is None:
+        return False
+    try:
+        # signature(cls) gives the constructor's call signature (without `self`).
+        return "weight" in inspect.signature(loss_cls).parameters
+    except (ValueError, TypeError):  # pragma: no cover - C-extension ctor without a signature
+        return False
+
+
+def _target_to_int(value: Any) -> int:
+    """Coerce a single scalar class id into a Python ``int`` (rejects bool)."""
+    if isinstance(value, bool):
+        raise TypeError(f"target {value!r} is a bool, not a class id")
+    return int(value)
+
+
+def detect_target_kind(source: Any) -> _TargetKind:
+    """Classify a dataset's target by peeking the first non-``None`` target (cheap projection).
+
+    Shared by the classification trainer and evaluator so both decide the encode / num_classes
+    path identically. ``"int"`` (scalar class id), ``"str"`` (class name), ``"multilabel"`` (a
+    sequence of names — not yet supported), or ``"empty"`` (no targets).
+    """
+    for target in iter_targets(flow(source)):
+        if target is None:
+            continue
+        if isinstance(target, str):
+            return "str"
+        if isinstance(target, (list, tuple, set)):
+            return "multilabel"
+        return "int"
+    return "empty"
+
+
+def encode_flux(source: Any, label_map: LabelMap) -> Flux:
+    """Wrap ``source`` in a :class:`~dataflux.Flux` applying ``label_map``'s encode op.
+
+    The encoded ``target`` is a plain class-id ``int`` (``EncodeTargetOp`` is framework-agnostic);
+    the DataLoader collate turns the per-batch list of ids into the target tensor. Exposes
+    ``label_names`` on the returned Flux so marainer's ``_resolve_label_names`` persists
+    ``class_names.json`` (the file the evaluator/predict path reloads via ``LabelMap.load``).
+    """
+    flux = Flux(source=flow(source), ops=[label_map.encode_op()])
+    flux.label_names = label_map.label_names  # type: ignore[attr-defined]
+    return flux
 
 
 @configurable(task="classification", role="trainer")
@@ -95,159 +131,284 @@ class LightningClassificationTrainer(LightningTrainer):
     * ``loss_fn`` — :class:`torch.nn.CrossEntropyLoss`
     * ``optimizer`` — deferred ``AdamW(lr=1e-4, weight_decay=0.05)``
     * ``train/val/test_loader`` — deferred ``DataLoader`` with
-      :func:`~sonair.classification.classification_collate_fn`
-    * Metrics — top-1 ``MulticlassAccuracy`` + macro ``MulticlassF1Score``
-      (+ top-5 when ``num_classes >= 5``); built in :meth:`run` once ``num_classes``
-      is resolved. **sonair OWNS the num_classes derivation** (:meth:`_resolve_model_and_metrics`):
-      it resolves the count (explicit trainer arg → explicit on the model config →
-      derived from the dataset) and flows + realizes the model with it directly,
-      rather than relying on the generic ``marainer.dimensions.flow_node_with_dims``.
+      :func:`~sonair.classification.collate_fn_with_metadata`
+    * Metrics — the ``metrics`` dict of single-metric ``LazyClass`` templates
+      (default top-1 ``MulticlassAccuracy`` + macro ``MulticlassF1Score``; add top-5
+      etc. by extending the dict). :meth:`initialize` flows each with the resolved
+      ``num_classes``, wraps them in a ``MetricCollection``, and clones it per split
+      (``train/`` · ``val/`` · ``test/``). **sonair OWNS the num_classes resolution**
+      (:meth:`initialize`): a concrete model's ``num_classes`` (authoritative head size) →
+      explicit trainer arg → the ``label_map`` → a lazy model's pinned ``num_classes`` →
+      ``dataflux.num_classes(train_set)`` (walks integer targets); it then flows the model
+      + metrics with that count directly — no generic dimension-injection layer. String
+      targets are auto-encoded via a ``dataflux.LabelMap`` and the loss is class-balanced
+      (see ``label_map`` / ``balance_classes`` below).
 
-    **Ergonomic flat-config knobs** — ``batch_size`` / ``num_workers`` /
-    ``persist_workers`` / ``max_epochs`` / ``lightning_loggers`` are plain
-    defaulted attributes too, so Confluid broadcasting injects matching flat
-    top-level YAML keys into them. They are folded into the deferred loader /
-    Trainer stubs in :meth:`run` (NOT in ``__init__`` — run-time work keeps the
-    constructor clean). (``lightning_loggers`` is named to dodge the read-only
-    ``LightningModule.logger`` / ``.loggers`` properties; it becomes ``L.Trainer(logger=…)``.)
+    **Ergonomic flat-config knobs** — ``batch_size`` / ``num_workers`` / ``max_epochs`` /
+    ``logger`` are constructor params, so Confluid broadcasting injects matching flat
+    top-level YAML keys. ``batch_size`` / ``num_workers`` are baked into the deferred
+    ``DataLoader`` stubs in ``__init__``; ``max_epochs`` / ``logger`` are forwarded to the
+    base, which bakes them into ``LazyClass(L.Trainer, max_epochs=…, logger=…)``.
 
     Args:
-        model: Classification model emitting ``[N, num_classes]`` logits (wire ``!lazy:`` so the
-            trainer flows it with the resolved num_classes at run() — see :meth:`_resolve_model_and_metrics`).
+        model: Classification model emitting ``[N, num_classes]`` logits (wire ``!lazy:`` so
+            :meth:`initialize` flows it with the resolved num_classes at run time).
         train_set: Training dataset or Flux pipeline.
-        num_classes: Output class count; omit to derive from the dataset (or the model config) at run().
-        batch_size: DataLoader batch size folded into the default loaders at run().
-        num_workers: DataLoader worker-process count folded into the default loaders at run().
-        persist_workers: Keep DataLoader workers alive between epochs (only honored when ``num_workers > 0``).
-        max_epochs: ``pytorch_lightning.Trainer(max_epochs=...)`` for the default Trainer built at run().
-        lightning_loggers: Optional list of Lightning loggers (``List``-typed so a flat
-            ``lightning_loggers: [...]`` broadcasts in); become ``L.Trainer(logger=[...])``.
+        num_classes: Output class count; omit to resolve it from the model config or
+            ``dataflux.num_classes(train_set)`` in :meth:`initialize`.
+        max_epochs: ``pytorch_lightning.Trainer(max_epochs=...)`` (forwarded to the base Trainer).
+        batch_size: DataLoader batch size baked into the default loaders in ``__init__``.
+        num_workers: DataLoader worker-process count baked into the default loaders in ``__init__``.
+        logger: Optional list of Lightning loggers (``List``-typed so a flat ``logger: [...]``
+            broadcasts in); forwarded to the base as ``L.Trainer(logger=[...])``.
         experiment_name: MLflow experiment name.
-        run_name: MLflow run name.
+        run_name: MLflow run name. ``None`` (default) auto-generates a random slug like
+            ``train_funny_rabbit`` (via the base; see :func:`marainer.run_names.generate_run_name`).
+        label_map: Optional :class:`~dataflux.LabelMap` (name→id) pinning the class encoding. When
+            given, ``num_classes`` is taken from it and string targets are encoded through it. When
+            omitted and the dataset's targets are *strings*, :meth:`initialize` fits one from the
+            train set (sklearn ``LabelEncoder``). ``None`` (default) + integer targets ⇒ no encoding.
+        balance_classes: When ``True`` (default), :meth:`initialize` walks the (encoded) train
+            targets and injects inverse-frequency class weights into ``loss_fn`` (when the loss
+            accepts a ``weight`` tensor, e.g. ``CrossEntropyLoss``); the weights are exposed on
+            ``self.class_weights``. Set ``False`` to leave the loss unweighted.
+        metrics: Dict of single-metric ``LazyClass`` templates flowed per split in
+            :meth:`initialize` (default top-1 accuracy + macro F1).
     """
 
     def __init__(
         self,
-        model: Any,
-        train_set: Any,
+        model: nn.Module,
+        train_set: Dataset[Any],
         num_classes: Optional[int] = None,
+        max_epochs: int = 10,
         batch_size: int = 32,
         num_workers: int = 0,
-        persist_workers: bool = False,
-        max_epochs: int = 10,
-        lightning_loggers: Optional[List[Any]] = None,
+        logger: Optional[Union[Logger, Iterable[Logger], bool]] = None,
         experiment_name: str = "sonair_classification",
-        run_name: str = "train",
+        run_name: Optional[str] = None,
+        label_map: Optional[LabelMap] = None,
+        balance_classes: bool = True,
+        metrics: dict[str, Metric | LazyClass[Metric]] | MetricCollection = {
+            "accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1),
+            "f1_macro": LazyClass[Metric](MulticlassF1Score, average="macro"),
+        },
     ) -> None:
-        super().__init__(model=model, train_set=train_set, experiment_name=experiment_name, run_name=run_name)
+        super().__init__(
+            model=model,
+            train_set=train_set,
+            experiment_name=experiment_name,
+            run_name=run_name,
+            logger=logger,
+            max_epochs=max_epochs,
+        )
         # Store config ONLY — no functional work. The loaders/optimizer are deferred
-        # (LazyClass); the base run() flows them (loaders with the dataset, optimizer
-        # with model params). The ergonomic knobs are folded into the loader/Trainer
-        # stubs at run() time (not here). `lightning_loggers` is a List-typed param so
-        # Confluid broadcasts a flat `lightning_loggers: [...]` list into it (and it
-        # dodges the read-only LightningModule.logger/.loggers properties).
+        # (LazyClass): the loaders bake in the ergonomic batch_size/num_workers knobs
+        # here (cheap — LazyClass defers actual construction), and the base run() flows
+        # them with the dataset (the optimizer with model params). max_epochs / logger
+        # are forwarded to the base, which bakes them into LazyClass(L.Trainer, ...).
+        # The model + metrics are flowed with num_classes in initialize() (run time).
         self.num_classes = int(num_classes) if num_classes is not None else None
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.persist_workers = persist_workers
+        # Optional pinned name->int label map (or fitted from the train set in initialize() when the
+        # targets are strings); `class_weights` is the inverse-frequency balanced-loss weight derived
+        # from the walked targets. Both are exposed (read after initialize()).
+        self.label_map = label_map
+        self.balance_classes = balance_classes
+        self.class_weights: Optional[torch.Tensor] = None
         self.max_epochs = max_epochs
-        self.lightning_loggers = lightning_loggers
         self.loss_fn = nn.CrossEntropyLoss()
         self.optimizer = LazyClass(torch.optim.AdamW, lr=1e-4, weight_decay=0.05)
-        self.train_loader = LazyClass(DataLoader, collate_fn=classification_collate_fn)
-        self.val_loader = LazyClass(DataLoader, collate_fn=classification_collate_fn)
-        self.test_loader = LazyClass(DataLoader, collate_fn=classification_collate_fn)
-        # `lightning` stays the base default LazyClass(L.Trainer); knobs folded in run().
-        # Metrics: built eagerly here when num_classes is given (cheap; lets callers inspect them
-        # post-construction). When omitted they stay None and run() builds them once
-        # _resolve_model_and_metrics() derives the count. Either way sonair OWNS the num_classes
-        # resolution (explicit -> model-config -> dataset) — NOT the generic marainer.dimensions path.
-        if self.num_classes is not None:
-            base = _build_classification_metrics(self.num_classes)
-            self.train_metrics = base.clone(prefix="train/")
-            self.val_metrics = base.clone(prefix="val/")
-            self.test_metrics = base.clone(prefix="test/")
+        self.train_loader = LazyClass(
+            DataLoader,
+            collate_fn=collate_fn_with_metadata,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            persistent_workers=num_workers != 0,
+            shuffle=True,
+        )
+        self.val_loader = LazyClass(
+            DataLoader,
+            collate_fn=collate_fn_with_metadata,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            persistent_workers=num_workers != 0,
+            shuffle=False,
+        )
+        self.test_loader = LazyClass(
+            DataLoader,
+            collate_fn=collate_fn_with_metadata,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            persistent_workers=num_workers != 0,
+            shuffle=False,
+        )
+        self.metrics = metrics
 
     def run(self) -> None:
-        """Fold the ergonomic knobs into the deferred stubs, then run the base flow.
-
-        Knob application is RUN-TIME work (the constructor stays side-effect-free).
-        It runs after liquifai's deep-flow, so building a concrete ``Class`` for
-        ``lightning`` here is safe (deep-flow never sees it).
-        """
-        self._apply_loader_knobs()
-        self._apply_lightning_knobs()
-        self._resolve_model_and_metrics()
+        """Resolve num_classes + flow the model and metrics, then run the base loop."""
+        self.initialize()
         super().run()
 
-    def _resolve_model_and_metrics(self) -> None:
-        """Determine ``num_classes`` and build the model + metrics with it — sonair OWNS
-        this (NOT the generic ``marainer.dimensions.flow_node_with_dims``).
+    def initialize(self) -> None:
+        """Resolve the label encoding + ``num_classes``, then flow the model + metrics with it.
 
-        Resolution order: an explicit trainer ``num_classes`` → an explicit
-        ``num_classes`` on the model's deferred config (a config value wins) → derived
-        from the training dataset (walks its targets). The model is then flowed with the
-        resolved count and **realized** so its parameters exist before Lightning's
-        ``configure_optimizers``; the metric set is built eagerly. By the time the base
-        ``run()`` executes, the model + metrics are LIVE, so its generic
-        dimension-derivation (`flow_node_with_dims`) no-ops.
+        sonair OWNS this (no generic dimension-injection layer). The work, in order:
+
+        1. **Detect the target kind** (cheap — peeks one target): integer class ids, class-name
+           *strings*, or a sequence of names (multi-label, not yet supported).
+        2. **Label encoding** — when the targets are strings: use the pinned ``label_map`` if given,
+           else fit a :class:`~dataflux.LabelMap` from the train targets (sklearn ``LabelEncoder``,
+           shown with a progress bar). The wired ``train``/``val``/``test`` sets are then wrapped in
+           a :class:`~dataflux.Flux` carrying the map's ``encode_op`` so targets become ints, and the
+           map's ``label_names`` is exposed on the train set so marainer persists ``class_names.json``
+           (which the evaluator/predict path reloads via ``LabelMap.load``).
+        3. **Resolve ``num_classes``** — a **concrete (non-``Fluid``) model is authoritative**
+           (``getattr(model, "num_classes")``): its classifier head is already sized, so the count
+           MUST come from it, not from a dataset walk that could mis-size the metrics. Otherwise:
+           explicit trainer arg → the ``label_map`` → the lazy model's pinned ``num_classes`` →
+           derived from the data (``max(class_id)+1``).
+        4. **Balanced loss** — when ``balance_classes`` and the loss accepts a ``weight`` tensor,
+           inject inverse-frequency class weights computed from the walked targets (exposed on
+           ``self.class_weights``).
+        5. Flow the model with the resolved count (``flow`` auto-solidifies a lazy ``TimmModel``
+           backbone so its parameters exist before ``configure_optimizers``) and flow each
+           single-metric template into per-split ``MetricCollection``s.
+
+        Called explicitly from :meth:`run` (NOT the auto-fired confluid ``solidify`` hook) so the
+        dataset walk + model build happen at run time. Idempotent: re-running reuses the resolved
+        count, fitted map, and built metrics.
         """
-        train_ds = flow(self.train_set)
-        self.train_set = train_ds  # reuse — the base run() re-flows idempotently (no double load)
-        num_classes = self.num_classes
-        if num_classes is None and isinstance(self.model, Fluid):
-            num_classes = self.model.kwargs.get("num_classes")
-        if num_classes is None:
-            num_classes = _dataset_num_classes(train_ds)
-        if not num_classes:
+        # Normalize the wired sources to a Dataset[Sample] up front (marainer helper) so EVERYTHING
+        # below — target detection, label fitting, encoding, the loaders, collate — operates on
+        # guaranteed Sample items and never has to re-check the source shape.
+        self.train_set = ensure_sample_dataset(flow(self.train_set))
+        if self.val_set is not None:
+            self.val_set = ensure_sample_dataset(flow(self.val_set))
+        if self.test_set is not None:
+            self.test_set = ensure_sample_dataset(flow(self.test_set))
+
+        kind = detect_target_kind(self.train_set)
+        if kind == "multilabel":
+            raise NotImplementedError(
+                "LightningClassificationTrainer: multi-label string targets are not yet supported "
+                "(needs multi-hot encoding + a BCE-style loss + collate changes). See TASKS.md."
+            )
+
+        # --- Label encoding (string targets only). Walk the RAW train targets at most once. ---
+        raw_targets: Optional[List[Any]] = None
+        if kind == "str" and self.label_map is None:
+            raw_targets = self._walk_targets(self.train_set, "Fitting label encoder")
+            self.label_map = LabelMap.fit(raw_targets)
+            logger.info(f"Fitted LabelMap with {self.label_map.num_classes} classes from train targets.")
+        if kind == "str" and self.label_map is not None:
+            self.train_set = encode_flux(self.train_set, self.label_map)
+            if self.val_set is not None:
+                self.val_set = encode_flux(self.val_set, self.label_map)
+            if self.test_set is not None:
+                self.test_set = encode_flux(self.test_set, self.label_map)
+
+        # --- Resolve num_classes (concrete model is authoritative). ---
+        nc = self._resolve_num_classes(raw_targets)
+        if not nc:
             raise RuntimeError(
                 "LightningClassificationTrainer: could not determine num_classes — set it on the "
-                "trainer or the model, or wire a dataset exposing num_classes()/derived_dimensions()."
+                "trainer or the model, pass a label_map, or wire a dataset whose targets yield a count."
             )
-        self.num_classes = int(num_classes)
-        # Flow the model with the resolved count (runtime kwarg wins → model + metrics agree).
-        if isinstance(self.model, Fluid):
-            self.model = flow(self.model, num_classes=self.num_classes)
-        else:
-            self.model = flow(self.model)
-        # Realize a lazy backbone so self.parameters() is populated before configure_optimizers
-        # (a lazy model — e.g. TimmModel — builds its backbone only on first forward / realize()).
-        realize = getattr(self.model, "realize", None)
-        if callable(realize):
-            realize()
-        # Build the metric set with the resolved count — only when not already built eagerly
-        # in __init__ (the explicit-num_classes path); this covers the derived (omitted) path.
+        self.num_classes = int(nc)
+
+        # --- Balanced loss: inverse-frequency class weights from the (encoded) targets. ---
+        if self.balance_classes and self.class_weights is None:
+            self._apply_class_weights(self.num_classes, raw_targets)
+
+        # Flow the model with the resolved count (flow auto-solidifies a lazy backbone).
+        self.model = flow(self.model, num_classes=self.num_classes)
+        # Build the per-split metric collections from the shared helper (handles a dict of templates
+        # vs a ready-made MetricCollection) and clone the base per split.
         if self.train_metrics is None:
-            base = _build_classification_metrics(self.num_classes)
+            base = build_metric_collection(self.metrics, num_classes=self.num_classes)
             self.train_metrics = base.clone(prefix="train/")
             self.val_metrics = base.clone(prefix="val/")
             self.test_metrics = base.clone(prefix="test/")
 
-    def _apply_loader_knobs(self) -> None:
-        """Inject batch_size / num_workers / shuffle into the deferred loader stubs.
+    # ------------------------------------------------------------------ helpers
 
-        ``setdefault`` so an explicitly-configured loader keeps its own values.
+    def _walk_targets(self, source: Any, desc: str) -> List[Any]:
+        """Walk every target with a progress bar (target-only projection skips input construction)."""
+        src = flow(source)
+        total = len(src) if hasattr(src, "__len__") else None
+        return list(tqdm(iter_targets(src), total=total, desc=f"sonair: {desc}", unit="sample"))
+
+    def _resolve_num_classes(self, raw_targets: Optional[List[Any]]) -> Optional[int]:
+        """Resolve the class count. A concrete model's head size is authoritative."""
+        if not isinstance(self.model, Fluid):
+            model_nc = getattr(self.model, "num_classes", None)
+            if model_nc:
+                if self.num_classes is not None and int(self.num_classes) != int(model_nc):
+                    logger.warning(
+                        f"Trainer num_classes={self.num_classes} != concrete model num_classes={model_nc}; "
+                        "using the model's (its classifier head is already sized)."
+                    )
+                return int(model_nc)
+        if self.num_classes is not None:
+            return int(self.num_classes)
+        if self.label_map is not None:
+            return self.label_map.num_classes
+        if isinstance(self.model, Fluid):
+            pinned = self.model.kwargs.get("num_classes")
+            if pinned:
+                return int(pinned)
+        # Derive from the data (integer targets): max(class_id) + 1.
+        targets = raw_targets if raw_targets is not None else self._walk_targets(self.train_set, "Counting classes")
+        highest = max((_target_to_int(t) for t in targets if t is not None), default=-1)
+        return highest + 1 if highest >= 0 else None
+
+    def _apply_class_weights(self, num_classes: int, raw_targets: Optional[List[Any]]) -> None:
+        """Compute inverse-frequency class weights and inject them into the loss's ``weight``.
+
+        The loss is balance-capable only if its constructor takes a ``weight`` (see
+        :meth:`_loss_accepts_weight`); otherwise we warn and leave it unweighted. When capable, a
+        deferred (``!lazy:``) loss gets the weight FLOWED IN at construction, and a live loss gets its
+        ``weight`` buffer set.
         """
-        persistent = bool(self.persist_workers and self.num_workers > 0)
-        for loader, shuffle in ((self.train_loader, True), (self.val_loader, False), (self.test_loader, False)):
-            if isinstance(loader, Fluid):
-                loader.kwargs.setdefault("batch_size", self.batch_size)
-                loader.kwargs.setdefault("num_workers", self.num_workers)
-                loader.kwargs.setdefault("shuffle", shuffle)
-                loader.kwargs.setdefault("persistent_workers", persistent)
+        if not _loss_accepts_weight(self.loss_fn):
+            if isinstance(self.loss_fn, Fluid):
+                name: Any = getattr(self.loss_fn, "target", "loss")
+            else:
+                name = type(self.loss_fn).__name__
+            logger.warning(
+                f"balance_classes=True but the configured loss ({name}) has no 'weight' constructor "
+                "argument — it is not balance-capable; training proceeds with an unweighted loss. "
+                "Use a weight-accepting loss (e.g. CrossEntropyLoss / NLLLoss / BCEWithLogitsLoss) to balance."
+            )
+            self.class_weights = None
+            return
 
-    def _apply_lightning_knobs(self) -> None:
-        """Build a flowable Trainer ``Class`` from the knobs when ``lightning`` is the default.
+        # Encoded int targets: reuse raw_targets when we already walked them (string fit case),
+        # else walk the (now int-yielding, post-wrap) train set once.
+        if raw_targets is not None and self.label_map is not None:
+            encoded = [self.label_map.mapping[str(t)] for t in raw_targets if t is not None]
+        elif raw_targets is not None:
+            encoded = [_target_to_int(t) for t in raw_targets if t is not None]
+        else:
+            encoded = [
+                _target_to_int(t) for t in self._walk_targets(self.train_set, "Balancing classes") if t is not None
+            ]
 
-        The default ``self.lightning`` is a deferred ``LazyClass(L.Trainer)`` (protected from
-        deep-flow); the base ``run()`` flows it with no runtime kwargs, which would leave a
-        ``Lazy`` deferred. So materialise it into a concrete ``Class(L.Trainer, …)`` carrying
-        the knobs. The ``logger`` list of ``!class:`` Fluids is pre-flowed (``flow()`` does not
-        recurse into a list-valued kwarg). A caller-supplied ``lightning:`` ``Class`` is kept.
-        """
-        if isinstance(self.lightning, LazyClass):
-            kwargs: dict[str, Any] = {"max_epochs": self.max_epochs, "accelerator": "auto", "devices": 1}
-            kwargs.update(self.lightning.kwargs)
-            if self.lightning_loggers:
-                kwargs.setdefault("logger", [flow(x) if isinstance(x, Fluid) else x for x in self.lightning_loggers])
-            self.lightning = Class(L.Trainer, **kwargs)
+        counts = torch.zeros(num_classes, dtype=torch.float64)
+        for c in encoded:
+            if 0 <= c < num_classes:
+                counts[c] += 1
+        total = float(counts.sum())
+        if total <= 0:
+            return
+        # Inverse frequency, normalised so present classes average to ~1. Absent classes → 0.
+        weights = torch.where(counts > 0, total / (num_classes * counts), torch.zeros_like(counts))
+        self.class_weights = weights.to(torch.float32)
+        if isinstance(self.loss_fn, Fluid):
+            # Deferred loss — flow the weight directly into its constructor.
+            self.loss_fn = flow(self.loss_fn, weight=self.class_weights)
+        else:
+            # Live loss — `weight` is a registered buffer on weighted losses, so assignment routes
+            # into `_buffers` and Lightning moves it to device.
+            self.loss_fn.weight = self.class_weights
+        logger.info(f"Balanced loss: injected inverse-frequency class weights for {num_classes} classes.")

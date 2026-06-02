@@ -114,10 +114,12 @@ class TimmModel(nn.Module):
     ) -> None:
         super().__init__()
         # Store config ONLY — no functional work (no timm.create_model, no
-        # download, no checkpoint load). The backbone is built lazily by
-        # solidify() on first call / forward(). model_name and num_classes are
-        # validated there, NOT here, so TimmModel() is cheap and zero-arg
-        # construction works (Lazy-Init / Zero-Arg mandate).
+        # download, no checkpoint load). The backbone is built lazily on first
+        # use — via the cached `backbone` property, `forward()`, or `solidify()`
+        # (all share the one cache) — so TimmModel works whether or not it is
+        # flowed. model_name and num_classes are validated at build time, NOT
+        # here, so TimmModel() is cheap and zero-arg construction works
+        # (Lazy-Init / Zero-Arg mandate).
         self.model_name: str = model_name
         self.num_classes: int = num_classes
         self.pretrained: bool = pretrained
@@ -165,6 +167,22 @@ class TimmModel(nn.Module):
                 load_lightning_checkpoint(self, self.checkpoint_path, strict=self.checkpoint_strict)
         return cast(nn.Module, self.classifier)
 
+    @property
+    def backbone(self) -> nn.Module:
+        """The timm backbone, built + cached on first access (confluid lazy-init rule 3).
+
+        A read-only cached `@property` over the same build path as :meth:`solidify` — so a directly
+        constructed, **never-flowed** ``TimmModel`` still materializes its backbone on demand
+        (``model.backbone(x)`` / ``model.backbone.num_features`` work without going through
+        ``flow()``). ``solidify`` is retained as the explicit, configure-safe method confluid's
+        ``flow()`` auto-calls (``flow`` never touches properties — see confluid AGENTS rule 3 — so the
+        backbone must be built via the method hook for ``self.parameters()`` to be ready before
+        ``configure_optimizers``); this property just exposes the cached result. Both share the one
+        cache (the ``self.classifier`` submodule), so the heavy build happens at most once regardless
+        of which entry point triggers it.
+        """
+        return self.solidify()
+
     def forward(self, images: Tensor) -> Tensor:
         """Run the classifier and emit per-image class logits.
 
@@ -186,7 +204,7 @@ class TimmModel(nn.Module):
                 f"TimmModel was built for in_channels={self.in_channels}, " f"got images with {c} channels."
             )
 
-        logits = cast(Tensor, self.solidify()(images))
+        logits = cast(Tensor, self.backbone(images))
 
         # Per-batch diagnostic: log argmax distribution + logits range.
         # Predicting one class is normal early in training so we don't

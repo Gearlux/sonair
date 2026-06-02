@@ -10,7 +10,7 @@ Baked-in defaults (all overridable via YAML ``@configurable`` attributes):
 * ``loss_fn`` — :class:`torch.nn.CrossEntropyLoss` (override via the ``loss_fn``
   slot; any ``task="classification", role="loss"`` class is offered)
 * ``train/val/test_loader`` — built from the ``batch_size`` / ``num_workers`` knobs,
-  with :func:`~marainer.collate.collate_fn_with_metadata`
+  with :func:`~sonair.classification.classification_collate_fn`
 * ``optimizer`` — ``AdamW(lr=1e-4, weight_decay=0.05)``
 * ``lightning`` — ``pytorch_lightning.Trainer`` built from ``max_epochs`` + ``logger``
 * Metrics — the ``metrics`` dict (default top-1 ``MulticlassAccuracy`` + macro
@@ -46,13 +46,14 @@ from confluid.fluid import Fluid
 from confluid.registry import resolve_class
 from dataflux import Flux, LabelMap, iter_targets
 from logflow import get_logger
-from marainer.collate import collate_fn_with_metadata
 from marainer.trainer import LightningTrainer, build_metric_collection, ensure_sample_dataset
 from pytorch_lightning.loggers import Logger
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
 from tqdm import tqdm
+
+from sonair.classification import classification_collate_fn
 
 logger = get_logger(__name__)
 
@@ -131,7 +132,7 @@ class LightningClassificationTrainer(LightningTrainer):
     * ``loss_fn`` — :class:`torch.nn.CrossEntropyLoss`
     * ``optimizer`` — deferred ``AdamW(lr=1e-4, weight_decay=0.05)``
     * ``train/val/test_loader`` — deferred ``DataLoader`` with
-      :func:`~sonair.classification.collate_fn_with_metadata`
+      :func:`~sonair.classification.classification_collate_fn`
     * Metrics — the ``metrics`` dict of single-metric ``LazyClass`` templates
       (default top-1 ``MulticlassAccuracy`` + macro ``MulticlassF1Score``; add top-5
       etc. by extending the dict). :meth:`initialize` flows each with the resolved
@@ -220,7 +221,7 @@ class LightningClassificationTrainer(LightningTrainer):
         self.optimizer = LazyClass(torch.optim.AdamW, lr=1e-4, weight_decay=0.05)
         self.train_loader = LazyClass(
             DataLoader,
-            collate_fn=collate_fn_with_metadata,
+            collate_fn=classification_collate_fn,
             batch_size=batch_size,
             num_workers=num_workers,
             persistent_workers=num_workers != 0,
@@ -228,7 +229,7 @@ class LightningClassificationTrainer(LightningTrainer):
         )
         self.val_loader = LazyClass(
             DataLoader,
-            collate_fn=collate_fn_with_metadata,
+            collate_fn=classification_collate_fn,
             batch_size=batch_size,
             num_workers=num_workers,
             persistent_workers=num_workers != 0,
@@ -236,7 +237,7 @@ class LightningClassificationTrainer(LightningTrainer):
         )
         self.test_loader = LazyClass(
             DataLoader,
-            collate_fn=collate_fn_with_metadata,
+            collate_fn=classification_collate_fn,
             batch_size=batch_size,
             num_workers=num_workers,
             persistent_workers=num_workers != 0,
@@ -294,10 +295,21 @@ class LightningClassificationTrainer(LightningTrainer):
                 "(needs multi-hot encoding + a BCE-style loss + collate changes). See TASKS.md."
             )
 
-        # --- Label encoding (string targets only). Walk the RAW train targets at most once. ---
+        # Resolve num_classes from everything that does NOT need a data walk (a concrete model's
+        # head, an explicit arg, a given label_map, a lazy model's pinned kwarg).
+        nc = self._num_classes_without_data()
+
+        # The train targets are walked AT MOST ONCE, then reused for every consumer below — fitting
+        # the label encoder, deriving num_classes from the data, and computing balance weights.
+        want_weights = self.balance_classes and _loss_accepts_weight(self.loss_fn)
+        need_fit = kind == "str" and self.label_map is None
         raw_targets: Optional[List[Any]] = None
-        if kind == "str" and self.label_map is None:
-            raw_targets = self._walk_targets(self.train_set, "Fitting label encoder")
+        if need_fit or want_weights or nc is None:
+            raw_targets = self._walk_targets(self.train_set, "Reading targets")
+
+        # --- Label encoding (string targets). Fit from the RAW (pre-encode) targets, then wrap. ---
+        if need_fit:
+            assert raw_targets is not None
             self.label_map = LabelMap.fit(raw_targets)
             logger.info(f"Fitted LabelMap with {self.label_map.num_classes} classes from train targets.")
         if kind == "str" and self.label_map is not None:
@@ -307,8 +319,14 @@ class LightningClassificationTrainer(LightningTrainer):
             if self.test_set is not None:
                 self.test_set = encode_flux(self.test_set, self.label_map)
 
-        # --- Resolve num_classes (concrete model is authoritative). ---
-        nc = self._resolve_num_classes(raw_targets)
+        # --- Finalize num_classes from the walked targets when no non-data source supplied it. ---
+        if nc is None:
+            if self.label_map is not None:
+                nc = self.label_map.num_classes
+            else:
+                assert raw_targets is not None
+                highest = max((_target_to_int(t) for t in raw_targets if t is not None), default=-1)
+                nc = highest + 1 if highest >= 0 else None
         if not nc:
             raise RuntimeError(
                 "LightningClassificationTrainer: could not determine num_classes — set it on the "
@@ -316,9 +334,11 @@ class LightningClassificationTrainer(LightningTrainer):
             )
         self.num_classes = int(nc)
 
-        # --- Balanced loss: inverse-frequency class weights from the (encoded) targets. ---
+        # --- Balanced loss: inverse-frequency weights from the SAME walked targets (no second walk).
+        # _apply_class_weights warns + no-ops for a non-weight-capable loss; when capable, want_weights
+        # was True above so raw_targets is already populated (no second walk). ---
         if self.balance_classes and self.class_weights is None:
-            self._apply_class_weights(self.num_classes, raw_targets)
+            self._apply_class_weights(self.num_classes, kind, raw_targets)
 
         # Flow the model with the resolved count (flow auto-solidifies a lazy backbone).
         self.model = flow(self.model, num_classes=self.num_classes)
@@ -338,8 +358,13 @@ class LightningClassificationTrainer(LightningTrainer):
         total = len(src) if hasattr(src, "__len__") else None
         return list(tqdm(iter_targets(src), total=total, desc=f"sonair: {desc}", unit="sample"))
 
-    def _resolve_num_classes(self, raw_targets: Optional[List[Any]]) -> Optional[int]:
-        """Resolve the class count. A concrete model's head size is authoritative."""
+    def _num_classes_without_data(self) -> Optional[int]:
+        """Resolve the class count from sources that need NO data walk, else ``None``.
+
+        A concrete (non-``Fluid``) model's classifier head is authoritative; then an explicit trainer
+        arg, a given ``label_map``, or a lazy model's pinned ``num_classes``. Returns ``None`` when the
+        count can only come from walking the targets (left to the caller, which walks once).
+        """
         if not isinstance(self.model, Fluid):
             model_nc = getattr(self.model, "num_classes", None)
             if model_nc:
@@ -357,18 +382,15 @@ class LightningClassificationTrainer(LightningTrainer):
             pinned = self.model.kwargs.get("num_classes")
             if pinned:
                 return int(pinned)
-        # Derive from the data (integer targets): max(class_id) + 1.
-        targets = raw_targets if raw_targets is not None else self._walk_targets(self.train_set, "Counting classes")
-        highest = max((_target_to_int(t) for t in targets if t is not None), default=-1)
-        return highest + 1 if highest >= 0 else None
+        return None
 
-    def _apply_class_weights(self, num_classes: int, raw_targets: Optional[List[Any]]) -> None:
-        """Compute inverse-frequency class weights and inject them into the loss's ``weight``.
+    def _apply_class_weights(self, num_classes: int, kind: _TargetKind, raw_targets: Optional[List[Any]]) -> None:
+        """Compute inverse-frequency class weights from the ALREADY-walked ``raw_targets`` and inject them.
 
         The loss is balance-capable only if its constructor takes a ``weight`` (see
-        :meth:`_loss_accepts_weight`); otherwise we warn and leave it unweighted. When capable, a
+        :func:`_loss_accepts_weight`); otherwise we warn and leave it unweighted. When capable, a
         deferred (``!lazy:``) loss gets the weight FLOWED IN at construction, and a live loss gets its
-        ``weight`` buffer set.
+        ``weight`` buffer set. Never walks the data itself — ``raw_targets`` is the single shared walk.
         """
         if not _loss_accepts_weight(self.loss_fn):
             if isinstance(self.loss_fn, Fluid):
@@ -383,16 +405,13 @@ class LightningClassificationTrainer(LightningTrainer):
             self.class_weights = None
             return
 
-        # Encoded int targets: reuse raw_targets when we already walked them (string fit case),
-        # else walk the (now int-yielding, post-wrap) train set once.
-        if raw_targets is not None and self.label_map is not None:
+        assert raw_targets is not None  # capable ⇒ initialize() walked the targets already
+        # raw_targets are RAW (pre-encode): strings for the str path (encode via the map), ints otherwise.
+        if kind == "str":
+            assert self.label_map is not None
             encoded = [self.label_map.mapping[str(t)] for t in raw_targets if t is not None]
-        elif raw_targets is not None:
-            encoded = [_target_to_int(t) for t in raw_targets if t is not None]
         else:
-            encoded = [
-                _target_to_int(t) for t in self._walk_targets(self.train_set, "Balancing classes") if t is not None
-            ]
+            encoded = [_target_to_int(t) for t in raw_targets if t is not None]
 
         counts = torch.zeros(num_classes, dtype=torch.float64)
         for c in encoded:

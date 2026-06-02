@@ -231,9 +231,10 @@ def test_omitted_num_classes_derived_and_built_at_run(tmp_path: object) -> None:
     assert sized and all(m.num_classes == 4 for m in sized)
 
 
-def test_default_loader_uses_collate_fn_with_metadata() -> None:
+def test_default_loader_uses_classification_collate_fn() -> None:
     from confluid.fluid import Class as ConfluidClass
-    from marainer.collate import collate_fn_with_metadata
+
+    from sonair.classification import classification_collate_fn
 
     trainer = LightningClassificationTrainer(
         model=_TinyClassifier(num_classes=3),
@@ -242,7 +243,7 @@ def test_default_loader_uses_collate_fn_with_metadata() -> None:
     )
     # The train_loader is a deferred Class stub; check its kwargs contain the collate_fn.
     assert isinstance(trainer.train_loader, ConfluidClass)
-    assert trainer.train_loader.kwargs.get("collate_fn") is collate_fn_with_metadata
+    assert trainer.train_loader.kwargs.get("collate_fn") is classification_collate_fn
 
 
 # ---------------------------------------------------------------------------

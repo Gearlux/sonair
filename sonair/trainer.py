@@ -179,8 +179,8 @@ class LightningClassificationTrainer(LightningTrainer):
 
     def __init__(
         self,
-        model: nn.Module,
-        train_set: Dataset[Any],
+        model: Union[nn.Module, Fluid],
+        train_set: Union[Dataset[Any], Fluid],
         num_classes: Optional[int] = None,
         max_epochs: int = 10,
         batch_size: int = 32,

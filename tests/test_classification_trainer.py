@@ -5,6 +5,7 @@ from typing import Any, cast
 import pytest
 import torch
 import torch.nn as nn
+from confluid import LazyClass
 from dataflux import Flux
 from dataflux.sample import Sample
 from torchmetrics import MetricCollection
@@ -586,3 +587,53 @@ def test_metrics_accepts_ready_made_collection() -> None:
     assert all(str(k).startswith("train/") for k in trainer.train_metrics.keys())
     assert all(str(k).startswith("val/") for k in trainer.val_metrics.keys())
     assert all(str(k).startswith("test/") for k in trainer.test_metrics.keys())
+
+
+# ---------------------------------------------------------------------------
+# I/O contract: trained_model @output + Mandatory model/train_set inputs
+# ---------------------------------------------------------------------------
+def test_declares_trained_model_output() -> None:
+    from confluid import output_specs
+
+    specs = {s["name"]: s for s in output_specs(LightningClassificationTrainer)}
+    assert "trained_model" in specs
+    assert specs["trained_model"]["type"] == "Module"
+    # The marker rides on the getter so FluxStudio / form-spec can read it.
+    fget = LightningClassificationTrainer.__dict__["trained_model"].fget
+    assert getattr(fget, "__confluid_output__", False) is True
+
+
+def test_trained_model_is_not_a_config_field() -> None:
+    from confluid import to_pydantic
+
+    assert "trained_model" not in to_pydantic(LightningClassificationTrainer).model_fields
+
+
+def test_trained_model_raises_before_run() -> None:
+    # A lazy (!lazy:) model stays a deferred Fluid until run() flows it — the output guards this.
+    trainer = LightningClassificationTrainer(
+        model=LazyClass(_TinyClassifier, num_classes=3),
+        train_set=_make_samples(8, num_classes=3),
+    )
+    with pytest.raises(RuntimeError, match="only available after run"):
+        _ = trainer.trained_model
+
+
+def test_trained_model_returns_live_model_after_initialize() -> None:
+    model = _TinyClassifier(num_classes=3)
+    trainer = LightningClassificationTrainer(
+        model=model,
+        train_set=_make_samples(16, num_classes=3),
+        balance_classes=False,
+    )
+    trainer.initialize()  # flows the model; a concrete model passes through
+    assert isinstance(trainer.trained_model, nn.Module)
+    assert trainer.trained_model is trainer.model
+
+
+def test_model_and_train_set_are_mandatory_inputs() -> None:
+    from confluid import input_specs, mandatory_param_names
+
+    assert mandatory_param_names(LightningClassificationTrainer) == {"model", "train_set"}
+    required = {s["name"] for s in input_specs(LightningClassificationTrainer) if s["required"]}
+    assert required == {"model", "train_set"}

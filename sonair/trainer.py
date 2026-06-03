@@ -37,11 +37,11 @@ broadcasting (no nesting / ``!ref`` needed); the ``!lazy:`` model gets
 """
 
 import inspect
-from typing import Any, Iterable, List, Literal, Optional, Union
+from typing import Any, Iterable, List, Literal, Optional, Union, cast
 
 import torch
 import torch.nn as nn
-from confluid import LazyClass, configurable, flow
+from confluid import LazyClass, Mandatory, configurable, flow, output
 from confluid.fluid import Fluid
 from confluid.registry import resolve_class
 from dataflux import Flux, LabelMap, iter_targets
@@ -179,8 +179,8 @@ class LightningClassificationTrainer(LightningTrainer):
 
     def __init__(
         self,
-        model: Union[nn.Module, Fluid],
-        train_set: Union[Dataset[Any], Fluid],
+        model: Mandatory[Union[nn.Module, Fluid]],
+        train_set: Mandatory[Union[Dataset[Any], Fluid]],
         num_classes: Optional[int] = None,
         max_epochs: int = 10,
         batch_size: int = 32,
@@ -249,6 +249,26 @@ class LightningClassificationTrainer(LightningTrainer):
         """Resolve num_classes + flow the model and metrics, then run the base loop."""
         self.initialize()
         super().run()
+
+    @property
+    @output
+    def trained_model(self) -> nn.Module:
+        """The trained classification model (a live ``nn.Module``) produced by :meth:`run`.
+
+        This is the trainer's declared confluid ``@output`` (the I/O contract FluxStudio /
+        navigaitor read via :func:`confluid.output_specs`): the post-run artifact is the
+        trained model, wired downstream into an evaluator's ``model`` slot. It is the live
+        ``self.model`` that :meth:`initialize` flowed (lazy backbone solidified) and the
+        Lightning ``fit`` loop trained in place — NOT the ``model`` *input* (the ``!lazy:``
+        architecture spec). Accessing it before :meth:`run` raises, because the model is
+        still a deferred :class:`~confluid.fluid.Fluid`: it is a run OUTPUT, not a config knob.
+        """
+        if isinstance(self.model, Fluid):
+            raise RuntimeError(
+                "LightningClassificationTrainer.trained_model is only available after run(): "
+                "the model is still a deferred Fluid. Wire this output downstream of a Run node."
+            )
+        return cast(nn.Module, self.model)
 
     def initialize(self) -> None:
         """Resolve the label encoding + ``num_classes``, then flow the model + metrics with it.

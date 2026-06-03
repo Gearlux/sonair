@@ -7,13 +7,15 @@ type, no step-output dict, no per-mode forward divergence — the Trainer's
 standard ``preds = self(batch.input)`` /
 ``loss = self.loss_fn(preds, batch.target)`` flow works unchanged.
 
-Loss: the default classification loss is :class:`torch.nn.CrossEntropyLoss`,
-registered here as a confluid configurable (``task="classification",
-role="loss"``) so it's discoverable / pickable via navigaitor's task surfaces
-and usable straight from YAML (``label_smoothing`` / ``ignore_index`` /
-``reduction`` all work; per-class ``weight`` needs a tensor and isn't
-expressible in YAML). It consumes raw logits ``[N, C]`` + int64 targets ``[N]``
-directly.
+Loss: the default classification loss is :class:`torch.nn.CrossEntropyLoss`
+(raw logits ``[N, C]`` + int64 targets ``[N]``). A family of off-the-shelf
+``torch.nn`` losses is registered here (``_CLASSIFICATION_LOSSES``) as confluid
+configurables (``task="classification", role="loss"``) so they're discoverable /
+pickable via navigaitor's task surfaces, usable straight from YAML
+(``label_smoothing`` / ``ignore_index`` / ``reduction`` …; per-class ``weight``
+needs a tensor and isn't expressible in YAML), AND FluxStudio OBJECT nodes. They
+surface in FluxStudio via the ``sonair-classification`` entry point + this
+module's ``__all__`` (``scan_module`` filters by ``__module__`` = ``torch``).
 
 The one loss that needs a sonair-side class is :class:`SigmoidFocalLoss`: its
 upstream, :func:`torchvision.ops.sigmoid_focal_loss`, is a plain *function*
@@ -37,11 +39,13 @@ per-sample metadata as a list (so string-valued fields such as ``pack_id`` /
 ``iq_file`` survive collation). **No resize**: every image in a batch must already
 share spatial dims — resize (or a model-keyed transform) is a deliberate follow-up.
 
-Most torchmetrics classification metrics
-(:class:`torchmetrics.classification.MulticlassAccuracy`,
-:class:`~torchmetrics.classification.MulticlassF1Score`, ...) accept logits
-directly as ``preds`` and emit a scalar by default — no adapter is needed,
-they can be wired into ``val_metrics`` straight from YAML.
+Metrics: the useful ``torchmetrics.classification`` multiclass metrics
+(:class:`~torchmetrics.classification.MulticlassAccuracy`,
+:class:`~torchmetrics.classification.MulticlassF1Score`, …) are registered here
+(``_CLASSIFICATION_METRICS``, ``role="metric"``) — they accept logits directly as
+``preds`` and emit a scalar by default (no adapter), so they're navigaitor
+metric-slot options, FluxStudio OBJECT nodes, and wirable into ``val_metrics``
+straight from YAML. Each takes ``num_classes`` (dataset-derived at run time).
 
 Typical wiring (YAML)::
 
@@ -63,6 +67,31 @@ import torch.nn as nn
 from confluid import configurable, register
 from dataflux.sample import Sample
 from torch import Tensor
+from torch.nn import (
+    BCELoss,
+    BCEWithLogitsLoss,
+    CrossEntropyLoss,
+    HingeEmbeddingLoss,
+    MultiLabelMarginLoss,
+    MultiLabelSoftMarginLoss,
+    MultiMarginLoss,
+    SoftMarginLoss,
+)
+from torchmetrics.classification import (
+    MulticlassAccuracy,
+    MulticlassAUROC,
+    MulticlassAveragePrecision,
+    MulticlassCalibrationError,
+    MulticlassCohenKappa,
+    MulticlassConfusionMatrix,
+    MulticlassF1Score,
+    MulticlassHammingDistance,
+    MulticlassJaccardIndex,
+    MulticlassMatthewsCorrCoef,
+    MulticlassPrecision,
+    MulticlassRecall,
+    MulticlassSpecificity,
+)
 from torchvision.ops import sigmoid_focal_loss
 
 #: Closed set of reductions :func:`torchvision.ops.sigmoid_focal_loss` accepts —
@@ -70,18 +99,48 @@ from torchvision.ops import sigmoid_focal_loss
 #: navigaitor's form-spec / FluxStudio pickers straight from the annotation.
 FocalLossReduction = Literal["none", "mean", "sum"]
 
-# The classification loss IS ``torch.nn.CrossEntropyLoss`` — register it (no
-# wrapper class) so it's a pickable ``task="classification", role="loss"`` option
-# and surfaces in navigaitor's form-spec / generated configs. ``register`` tags
-# the third-party class without modifying its behaviour.
-register(nn.BCELoss, task="classification", role="loss")
-register(nn.BCEWithLogitsLoss, task="classification", role="loss")
-register(nn.HingeEmbeddingLoss, task="classification", role="loss")
-register(nn.CrossEntropyLoss, task="classification", role="loss")
-register(nn.MultiLabelSoftMarginLoss, task="classification", role="loss")
-register(nn.MultiMarginLoss, task="classification", role="loss")
-register(nn.MultiLabelMarginLoss, task="classification", role="loss")
-register(nn.SoftMarginLoss, task="classification", role="loss")
+# The classification loss IS an off-the-shelf ``torch.nn`` loss — register each (no wrapper
+# class) so it's a pickable ``task="classification", role="loss"`` option and surfaces in
+# navigaitor's form-spec / generated configs AND as a FluxStudio OBJECT node (``role="loss"`` is in
+# the bridge ``_MEMBER_ROLES``). ``register`` only tags the third-party class. They are bound to
+# module-level names AND listed in ``__all__`` (below) so FluxStudio's ``__all__``-gated discovery
+# pass surfaces them — ``scan_module`` alone would skip a ``torch.nn``-module class.
+_CLASSIFICATION_LOSSES = (
+    BCELoss,
+    BCEWithLogitsLoss,
+    CrossEntropyLoss,
+    HingeEmbeddingLoss,
+    MultiLabelSoftMarginLoss,
+    MultiMarginLoss,
+    MultiLabelMarginLoss,
+    SoftMarginLoss,
+)
+for _loss_cls in _CLASSIFICATION_LOSSES:
+    register(_loss_cls, task="classification", role="loss")
+
+# The useful ``torchmetrics`` multiclass metrics — registered ``task="classification",
+# role="metric"`` so they're navigaitor metric-slot options AND FluxStudio OBJECT nodes
+# (``role="metric"`` is in ``_MEMBER_ROLES``). All take a ``num_classes`` knob (dataset-derived at
+# run time, like the model) plus per-metric options (``top_k`` / ``average`` …). Wire a metric's
+# ``class`` output into a trainer's metrics slot (the trainer flows it with ``num_classes``), or set
+# ``num_classes`` on the node and take ``instance``. Bound to names + ``__all__`` for discovery.
+_CLASSIFICATION_METRICS = (
+    MulticlassAccuracy,
+    MulticlassF1Score,
+    MulticlassPrecision,
+    MulticlassRecall,
+    MulticlassAUROC,
+    MulticlassAveragePrecision,
+    MulticlassSpecificity,
+    MulticlassCohenKappa,
+    MulticlassMatthewsCorrCoef,
+    MulticlassConfusionMatrix,
+    MulticlassJaccardIndex,
+    MulticlassCalibrationError,
+    MulticlassHammingDistance,
+)
+for _metric_cls in _CLASSIFICATION_METRICS:
+    register(_metric_cls, task="classification", role="metric")
 
 
 @configurable(task="classification", role="loss")
@@ -218,4 +277,35 @@ def classification_collate_fn(batch: List[Sample]) -> Sample:
     return Sample(input=batched_input, target=torch.stack(targets), metadata=metas)
 
 
-__all__ = ["SigmoidFocalLoss", "classification_collate_fn"]
+# Every registered loss / metric is named in ``__all__`` so FluxStudio's ``__all__``-gated discovery
+# pass (run on this module — re-exported from ``sonair/__init__.py``) surfaces each as a node. Keep
+# this list in sync with ``_CLASSIFICATION_LOSSES`` / ``_CLASSIFICATION_METRICS`` above (a literal,
+# not a comprehension, so static analysers can read the exported-symbol set);
+# ``tests/test_classification.py::test_all_exports_registered_losses_and_metrics`` pins the sync.
+__all__ = [
+    "SigmoidFocalLoss",
+    "classification_collate_fn",
+    # losses (torch.nn) — role="loss"
+    "BCELoss",
+    "BCEWithLogitsLoss",
+    "CrossEntropyLoss",
+    "HingeEmbeddingLoss",
+    "MultiLabelSoftMarginLoss",
+    "MultiMarginLoss",
+    "MultiLabelMarginLoss",
+    "SoftMarginLoss",
+    # metrics (torchmetrics.classification) — role="metric"
+    "MulticlassAccuracy",
+    "MulticlassF1Score",
+    "MulticlassPrecision",
+    "MulticlassRecall",
+    "MulticlassAUROC",
+    "MulticlassAveragePrecision",
+    "MulticlassSpecificity",
+    "MulticlassCohenKappa",
+    "MulticlassMatthewsCorrCoef",
+    "MulticlassConfusionMatrix",
+    "MulticlassJaccardIndex",
+    "MulticlassCalibrationError",
+    "MulticlassHammingDistance",
+]

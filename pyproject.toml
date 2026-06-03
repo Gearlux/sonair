@@ -37,6 +37,10 @@ sonair = "sonair.plugin:register"
 
 [project.entry-points."confluid.configurables"]
 sonair = "sonair"
+# Scan sonair.classification directly so FluxStudio / navigaitor discovery surfaces the registered
+# classification losses (torch.nn.*) and metrics (torchmetrics.classification.Multiclass*) — their
+# __module__ is torch / torchmetrics, so they're picked up via that module's __all__-gated pass.
+sonair-classification = "sonair.classification"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -43,3 +43,36 @@ def test_task_role_enumerable_via_registry() -> None:
     assert "TimmModel" in registry.list_classes(task="classification", role="model")
     assert "CrossEntropyLoss" in registry.list_classes(task="classification", role="loss")
     assert "LightningClassificationTrainer" in registry.list_classes(task="classification", role="trainer")
+
+
+def test_all_classification_losses_registered() -> None:
+    """Every loss in ``_CLASSIFICATION_LOSSES`` (+ SigmoidFocalLoss) is a ``role="loss"`` configurable."""
+    from sonair.classification import _CLASSIFICATION_LOSSES
+
+    loss_names = get_registry().list_classes(task="classification", role="loss")
+    for cls in _CLASSIFICATION_LOSSES:
+        assert cls.__name__ in loss_names, f"{cls.__name__} not registered as a classification loss"
+    assert "SigmoidFocalLoss" in loss_names
+
+
+def test_all_classification_metrics_registered() -> None:
+    """Every metric in ``_CLASSIFICATION_METRICS`` is a ``role="metric"`` / ``classification_metric`` configurable."""
+    from sonair.classification import _CLASSIFICATION_METRICS
+
+    registry = get_registry()
+    metric_names = registry.list_classes(task="classification", role="metric")
+    for cls in _CLASSIFICATION_METRICS:
+        assert cls.__name__ in metric_names, f"{cls.__name__} not registered as a classification metric"
+    # category is derived `classification_metric`, used by navigaitor's metric-slot picker.
+    assert "MulticlassAccuracy" in registry.list_classes(category="classification_metric")
+
+
+def test_all_exports_registered_losses_and_metrics() -> None:
+    """``__all__`` must name every registered loss/metric so FluxStudio's ``__all__``-pass surfaces them.
+
+    Pins the literal ``__all__`` in sync with ``_CLASSIFICATION_LOSSES`` / ``_CLASSIFICATION_METRICS``.
+    """
+    import sonair.classification as c
+
+    for cls in (*c._CLASSIFICATION_LOSSES, *c._CLASSIFICATION_METRICS):
+        assert cls.__name__ in c.__all__, f"{cls.__name__} registered but missing from __all__ (won't surface)"

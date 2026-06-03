@@ -188,8 +188,7 @@ automatically gain marainer's default checkpoint + YAML-logging behaviour:
 a `ModelCheckpoint` (`save_last=True` + best by the first val metric) is
 auto-injected when the YAML doesn't already provide one, and the full
 config tree is logged as an artifact to every wired Lightning logger.
-Opt into the per-logger `log_all_checkpoints` flag by referencing
-`marainer.loggers.Marainer{TensorBoard,CSV,MLFlow}Logger` in YAML.
+Wire stock `pytorch_lightning.loggers.*` classes under `lightning.logger:`.
 See marainer's README → *Default checkpointing* for details.
 
 ## Dependencies

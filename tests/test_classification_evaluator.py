@@ -81,6 +81,14 @@ class _RecordingSink:
 # ---------------------------------------------------------------------------
 
 
+def test_inherits_computed_metrics_and_label_names_outputs() -> None:
+    """The base marainer evaluator outputs surface for the classification evaluator (output_specs MRO)."""
+    from confluid import output_specs
+
+    names = {s["name"] for s in output_specs(LightningClassificationEvaluator)}
+    assert {"computed_metrics", "label_names"} <= names
+
+
 def test_metrics_are_built_in_initialize() -> None:
     ev = _make_evaluator(
         model=_TinyClassifier(num_classes=3),

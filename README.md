@@ -191,6 +191,13 @@ config tree is logged as an artifact to every wired Lightning logger.
 Wire stock `pytorch_lightning.loggers.*` classes under `lightning.logger:`.
 See marainer's README → *Default checkpointing* for details.
 
+The classification trainer and evaluator also inherit marainer's post-run
+`@output` I/O contract — `computed_metrics` (`Dict[str, float]`) and
+`label_names` (`List[str]`) — so a run's scalar metrics and class names show up
+in FluxStudio's Run-node results panel automatically (the classification trainer
+adds its own wireable `trained_model` output on top). See marainer's README →
+*Outputs (the `@output` I/O contract)*.
+
 ## Dependencies
 
 | Package | Purpose |

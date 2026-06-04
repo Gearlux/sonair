@@ -603,6 +603,14 @@ def test_declares_trained_model_output() -> None:
     assert getattr(fget, "__confluid_output__", False) is True
 
 
+def test_inherits_computed_metrics_and_label_names_outputs() -> None:
+    """The base marainer outputs surface for the classification trainer via output_specs' MRO walk."""
+    from confluid import output_specs
+
+    names = {s["name"] for s in output_specs(LightningClassificationTrainer)}
+    assert {"trained_model", "computed_metrics", "label_names"} <= names
+
+
 def test_trained_model_is_not_a_config_field() -> None:
     from confluid import to_pydantic
 

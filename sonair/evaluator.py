@@ -36,7 +36,7 @@ from marainer.evaluator import LightningEvaluator
 from marainer.trainer import build_metric_collection, ensure_sample_dataset
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-from torchmetrics import MetricCollection
+from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
 
 from sonair.classification import classification_collate_fn
@@ -85,7 +85,7 @@ class LightningClassificationEvaluator(LightningEvaluator):
         experiment_name: str = "sonair_classification_eval",
         run_name: Optional[str] = None,
         label_map: Optional[LabelMap] = None,
-        metrics: dict[str, Any] = {
+        metrics: dict[str, Union[Metric, Fluid]] | MetricCollection = {
             "accuracy_top1": LazyClass(MulticlassAccuracy, top_k=1),
             "f1_macro": LazyClass(MulticlassF1Score, average="macro"),
         },

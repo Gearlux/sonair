@@ -7,7 +7,7 @@ to ``marainer classification train`` / ``marainer classification evaluate``
 """
 
 from liquifai import LiquifyApp
-from logflow import get_logger
+from loggair import get_logger
 
 from sonair.evaluator import LightningClassificationEvaluator
 from sonair.trainer import LightningClassificationTrainer

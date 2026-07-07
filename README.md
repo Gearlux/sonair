@@ -205,6 +205,6 @@ adds its own wireable `trained_model` output on top). See marainer's README →
 | `marainer` | Base Trainer / Evaluator. |
 | `confluid` | YAML-driven dependency injection (`@configurable`, `!class:`, `!ref:`). |
 | `data-flux` | Sample / Flux pipeline plumbing. |
-| `log-flow` | Structured logging. |
+| `loggair` | Structured logging. |
 | `timm` | Underlying timm classification backbones. |
 | `torch`, `torchmetrics`, `pytorch-lightning` | Standard PyTorch stack. |

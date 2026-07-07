@@ -45,7 +45,7 @@ from confluid import LazyClass, Mandatory, configurable, flow, output
 from confluid.fluid import Fluid
 from confluid.registry import resolve_class
 from dataflux import Flux, LabelMap, iter_targets
-from logflow import get_logger
+from loggair import get_logger
 from marainer.trainer import LightningTrainer, build_metric_collection, ensure_sample_dataset
 from pytorch_lightning.loggers import Logger
 from torch.utils.data import DataLoader, Dataset

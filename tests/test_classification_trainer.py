@@ -545,7 +545,7 @@ def test_balance_classes_false_leaves_loss_unweighted() -> None:
 
 def test_balance_skipped_when_loss_not_weight_capable() -> None:
     # nn.MSELoss has no `weight` constructor arg → not balance-capable: the loss is left untouched
-    # and class_weights stays None (a warning is logged via logflow).
+    # and class_weights stays None (a warning is logged via loggair).
     trainer = LightningClassificationTrainer(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16, num_classes=3),

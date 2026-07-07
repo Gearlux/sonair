@@ -31,7 +31,7 @@ from typing import Any, Optional, Union
 
 from confluid import Fluid, LazyClass, configurable, flow
 from dataflux import LabelMap
-from logflow import get_logger
+from loggair import get_logger
 from marainer.evaluator import LightningEvaluator
 from marainer.trainer import build_metric_collection, ensure_sample_dataset
 from torch import nn

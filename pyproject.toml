@@ -32,6 +32,13 @@ dev = [
 [project.scripts]
 sonair = "sonair.cli:main"
 
+# Liquifai app registration: lets `liquifai-install-completions` discover this
+# CLI via an instant entry-point metadata read instead of executing the binary
+# (subprocess probe, 15 s timeout each). Name = the app/binary name; value =
+# the LiquifyApp instance. Entry-point changes need an editable reinstall.
+[project.entry-points."liquifai.apps"]
+sonair = "sonair.cli:app"
+
 [project.entry-points."marainer.commands"]
 sonair = "sonair.plugin:register"
 

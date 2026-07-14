@@ -47,3 +47,4 @@ test-report.xml
 *.pth
 *.ckpt
 .cache/
+/pyrightconfig.json

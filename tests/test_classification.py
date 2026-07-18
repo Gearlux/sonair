@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 import torch
-from dataflux.sample import Sample
 from PIL import Image
+from sampleflux.sample import Sample
 
 from sonair.classification import classification_collate_fn
 

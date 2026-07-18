@@ -80,7 +80,7 @@ class TimmModel(nn.Module):
             fresh linear layer of this size. **Required to build** — ``0`` (the
             default) means unset. In a marainer training run **omit** it in the
             config: the classification trainer derives the count from the dataset
-            (``dataflux.num_classes``, which walks the targets) and injects it via
+            (``sampleflux.num_classes``, which walks the targets) and injects it via
             ``flow(model, num_classes=…)``. Set it explicitly to override the derived value.
         pretrained: Download timm's pretrained weights for ``model_name`` on
             first build. Defaults to ``True``. Pass ``False`` for offline CI or

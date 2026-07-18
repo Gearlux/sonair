@@ -6,8 +6,8 @@ import pytest
 import torch
 import torch.nn as nn
 from confluid import LazyClass
-from dataflux import Flux
-from dataflux.sample import Sample
+from sampleflux import Flux
+from sampleflux.sample import Sample
 from torchmetrics import MetricCollection
 
 from sonair.trainer import LightningClassificationTrainer
@@ -314,7 +314,7 @@ _FLAT_YAML = """
 trainer: !class:sonair.LightningClassificationTrainer
   run_name: x
 model: "MODEL_SENTINEL"
-train_set: !class:dataflux.Flux()
+train_set: !class:sampleflux.Flux()
 val_set: "VAL_SENTINEL"
 batch_size: 64
 num_workers: 4
@@ -451,7 +451,7 @@ def _string_samples(names: list[str], n: int = 18, input_size: int = 4) -> Flux:
 
 
 def test_string_targets_fit_encode_and_expose_map() -> None:
-    from dataflux import LabelMap
+    from sampleflux import LabelMap
 
     names = ["dog", "cat", "bird"]  # sklearn sorts -> bird=0, cat=1, dog=2
     trainer = LightningClassificationTrainer(
@@ -476,7 +476,7 @@ def test_string_targets_fit_encode_and_expose_map() -> None:
 
 
 def test_explicit_label_map_drives_encoding_and_num_classes() -> None:
-    from dataflux import LabelMap
+    from sampleflux import LabelMap
 
     lm = LabelMap(mapping={"cat": 0, "dog": 1, "bird": 2, "fish": 3})  # 4 classes, pinned
     trainer = LightningClassificationTrainer(

@@ -8,8 +8,8 @@ import pytorch_lightning as L
 import torch
 import torch.nn as nn
 from confluid import Class
-from dataflux import Flux
-from dataflux.sample import Sample
+from sampleflux import Flux
+from sampleflux.sample import Sample
 from torchmetrics import MetricCollection
 
 from sonair.evaluator import LightningClassificationEvaluator
@@ -182,7 +182,7 @@ def test_string_targets_encoded_via_checkpoint_class_names(tmp_path: Any) -> Non
 
 
 def test_string_targets_encoded_via_explicit_label_map() -> None:
-    from dataflux import LabelMap
+    from sampleflux import LabelMap
 
     lm = LabelMap(mapping={"bird": 0, "cat": 1, "dog": 2})
     ev = _make_evaluator(

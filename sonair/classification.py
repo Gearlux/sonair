@@ -65,7 +65,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from confluid import configurable, register
-from dataflux.sample import Sample
+from sampleflux.sample import Sample
 from torch import Tensor
 from torch.nn import (
     BCELoss,
@@ -243,7 +243,7 @@ def _as_target_tensor(value: Any) -> Tensor:
 
 
 def classification_collate_fn(batch: List[Sample]) -> Sample:
-    """Collate classification :class:`~dataflux.sample.Sample`\\ s into one batched, Trainer-ready Sample.
+    """Collate classification :class:`~sampleflux.sample.Sample`\\ s into one batched, Trainer-ready Sample.
 
     The default DataLoader collate the sonair trainer / evaluator wire in. Per sample it **forces**
     the input to an image-like ``[3, H, W]`` float tensor (PIL / ndarray / tensor → :func:`_as_image_tensor`)

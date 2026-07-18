@@ -21,7 +21,7 @@ Minimal YAML example::
         num_classes: 37            # the model carries the class count
         pretrained: false
         checkpoint_path: ./checkpoints/last.ckpt
-      dataset: !class:dataflux.sources.HuggingFaceSource
+      dataset: !class:sampleflux.sources.HuggingFaceSource
         path: kitofrank/RFUAV
         split: validation
 """
@@ -30,10 +30,10 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 from confluid import Fluid, LazyClass, configurable, flow
-from dataflux import LabelMap
 from loggair import get_logger
 from marainer.evaluator import LightningEvaluator
 from marainer.trainer import build_metric_collection, ensure_sample_dataset
+from sampleflux import LabelMap
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics import Metric, MetricCollection
@@ -69,7 +69,7 @@ class LightningClassificationEvaluator(LightningEvaluator):
         experiment_name: MLflow experiment name.
         run_name: MLflow run name. ``None`` (default) auto-generates a random slug like
             ``evaluate_funny_rabbit`` (via the base; see :func:`marainer.run_names.generate_run_name`).
-        label_map: Optional :class:`~dataflux.LabelMap` (name→id) pinning the class encoding. When
+        label_map: Optional :class:`~sampleflux.LabelMap` (name→id) pinning the class encoding. When
             the eval dataset's targets are *strings* it is used to encode them to ids (mirroring the
             trainer). When omitted, it is reloaded from the ``class_names.json`` written next to the
             model's checkpoint at train time (via ``LabelMap.load``). Integer targets need no map.
@@ -116,7 +116,7 @@ class LightningClassificationEvaluator(LightningEvaluator):
         ``num_classes`` knob: the model is the single source of truth.
 
         When the eval dataset's targets are *strings*, they are encoded to class ids through the
-        pinned :class:`~dataflux.LabelMap` — ``self.label_map`` if given, else reloaded from the
+        pinned :class:`~sampleflux.LabelMap` — ``self.label_map`` if given, else reloaded from the
         ``class_names.json`` next to the model's checkpoint (the file marainer wrote at train time).
         We never refit on eval data: the training-time ordering is authoritative. The single-metric
         templates in ``self.metrics`` are then built into a ``test/``-prefixed ``MetricCollection``.
@@ -164,7 +164,7 @@ class LightningClassificationEvaluator(LightningEvaluator):
             self.metrics = base.clone(prefix="test/")
 
     def _load_pinned_label_map(self) -> Optional[LabelMap]:
-        """Reload the training-time :class:`~dataflux.LabelMap` from a checkpoint-adjacent class_names.json."""
+        """Reload the training-time :class:`~sampleflux.LabelMap` from a checkpoint-adjacent class_names.json."""
         ckpt_path = getattr(self.model, "checkpoint_path", None)
         if not ckpt_path:
             return None

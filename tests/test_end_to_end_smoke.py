@@ -13,9 +13,9 @@ from typing import Any, Dict, List
 
 import torch
 import torch.nn as nn
-from dataflux.sample import Sample
 from marainer.collate import collate_fn_with_metadata
 from PIL import Image
+from sampleflux.sample import Sample
 from torch.utils.data import DataLoader
 
 from sonair.timm_classifier import TimmModel
@@ -27,7 +27,7 @@ class _FakeFeature:
 
 
 class _FakeHFDataset:
-    """Fake HF dataset that returns dataflux Samples (same interface as HuggingFaceSource)."""
+    """Fake HF dataset that returns sampleflux Samples (same interface as HuggingFaceSource)."""
 
     def __init__(self, n_per_class: int = 4, n_classes: int = 3, image_size: int = 64) -> None:
         self._items: List[Dict[str, Any]] = []
@@ -71,7 +71,7 @@ def test_full_train_step_runs_end_to_end() -> None:
     # Use the fake dataset directly — HuggingFaceSource would wrap it similarly.
     fake_ds = _FakeHFDataset(n_per_class=4, n_classes=3, image_size=64)
 
-    # dataflux sources are map-style (len + getitem) but not torch Dataset
+    # sampleflux sources are map-style (len + getitem) but not torch Dataset
     # subclasses, so the stub's arg-type is stricter than DataLoader's runtime.
     loader: DataLoader = DataLoader(
         fake_ds,  # type: ignore[arg-type]

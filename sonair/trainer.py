@@ -25,10 +25,10 @@ broadcasting (no nesting / ``!ref`` needed); the ``!lazy:`` model gets
     model: !lazy:sonair.TimmModel
       model_name: efficientvit_b0
       pretrained: true
-    train_set: !class:dataflux.sources.HuggingFaceSource
+    train_set: !class:sampleflux.sources.HuggingFaceSource
       path: kitofrank/RFUAV
       split: train
-    val_set: !class:dataflux.sources.HuggingFaceSource
+    val_set: !class:sampleflux.sources.HuggingFaceSource
       path: kitofrank/RFUAV
       split: validation
     batch_size: 32
@@ -44,10 +44,10 @@ import torch.nn as nn
 from confluid import LazyClass, Mandatory, configurable, flow, output
 from confluid.fluid import Fluid
 from confluid.registry import resolve_class
-from dataflux import Flux, LabelMap, iter_targets
 from loggair import get_logger
 from marainer.trainer import LightningTrainer, build_metric_collection, ensure_sample_dataset
 from pytorch_lightning.loggers import Logger
+from sampleflux import Flux, LabelMap, iter_targets
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
@@ -105,7 +105,7 @@ def detect_target_kind(source: Any) -> _TargetKind:
 
 
 def encode_flux(source: Any, label_map: LabelMap) -> Flux:
-    """Wrap ``source`` in a :class:`~dataflux.Flux` applying ``label_map``'s encode op.
+    """Wrap ``source`` in a :class:`~sampleflux.Flux` applying ``label_map``'s encode op.
 
     The encoded ``target`` is a plain class-id ``int`` (``EncodeTargetOp`` is framework-agnostic);
     the DataLoader collate turns the per-batch list of ids into the target tensor. Exposes
@@ -140,9 +140,9 @@ class LightningClassificationTrainer(LightningTrainer):
       (``train/`` · ``val/`` · ``test/``). **sonair OWNS the num_classes resolution**
       (:meth:`initialize`): a concrete model's ``num_classes`` (authoritative head size) →
       explicit trainer arg → the ``label_map`` → a lazy model's pinned ``num_classes`` →
-      ``dataflux.num_classes(train_set)`` (walks integer targets); it then flows the model
+      ``sampleflux.num_classes(train_set)`` (walks integer targets); it then flows the model
       + metrics with that count directly — no generic dimension-injection layer. String
-      targets are auto-encoded via a ``dataflux.LabelMap`` and the loss is class-balanced
+      targets are auto-encoded via a ``sampleflux.LabelMap`` and the loss is class-balanced
       (see ``label_map`` / ``balance_classes`` below).
 
     **Ergonomic flat-config knobs** — ``batch_size`` / ``num_workers`` / ``max_epochs`` /
@@ -156,7 +156,7 @@ class LightningClassificationTrainer(LightningTrainer):
             :meth:`initialize` flows it with the resolved num_classes at run time).
         train_set: Training dataset or Flux pipeline.
         num_classes: Output class count; omit to resolve it from the model config or
-            ``dataflux.num_classes(train_set)`` in :meth:`initialize`.
+            ``sampleflux.num_classes(train_set)`` in :meth:`initialize`.
         max_epochs: ``pytorch_lightning.Trainer(max_epochs=...)`` (forwarded to the base Trainer).
         batch_size: DataLoader batch size baked into the default loaders in ``__init__``.
         num_workers: DataLoader worker-process count baked into the default loaders in ``__init__``.
@@ -165,7 +165,7 @@ class LightningClassificationTrainer(LightningTrainer):
         experiment_name: MLflow experiment name.
         run_name: MLflow run name. ``None`` (default) auto-generates a random slug like
             ``train_funny_rabbit`` (via the base; see :func:`marainer.run_names.generate_run_name`).
-        label_map: Optional :class:`~dataflux.LabelMap` (name→id) pinning the class encoding. When
+        label_map: Optional :class:`~sampleflux.LabelMap` (name→id) pinning the class encoding. When
             given, ``num_classes`` is taken from it and string targets are encoded through it. When
             omitted and the dataset's targets are *strings*, :meth:`initialize` fits one from the
             train set (sklearn ``LabelEncoder``). ``None`` (default) + integer targets ⇒ no encoding.
@@ -278,9 +278,9 @@ class LightningClassificationTrainer(LightningTrainer):
         1. **Detect the target kind** (cheap — peeks one target): integer class ids, class-name
            *strings*, or a sequence of names (multi-label, not yet supported).
         2. **Label encoding** — when the targets are strings: use the pinned ``label_map`` if given,
-           else fit a :class:`~dataflux.LabelMap` from the train targets (sklearn ``LabelEncoder``,
+           else fit a :class:`~sampleflux.LabelMap` from the train targets (sklearn ``LabelEncoder``,
            shown with a progress bar). The wired ``train``/``val``/``test`` sets are then wrapped in
-           a :class:`~dataflux.Flux` carrying the map's ``encode_op`` so targets become ints, and the
+           a :class:`~sampleflux.Flux` carrying the map's ``encode_op`` so targets become ints, and the
            map's ``label_names`` is exposed on the train set so marainer persists ``class_names.json``
            (which the evaluator/predict path reloads via ``LabelMap.load``).
         3. **Resolve ``num_classes``** — a **concrete (non-``Fluid``) model is authoritative**

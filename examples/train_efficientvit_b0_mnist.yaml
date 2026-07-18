@@ -14,7 +14,7 @@
 #    broadcasting** (sibling keys are injected into the same-named trainer
 #    constructor params) — no nesting or `!ref` plumbing needed.
 #  * The model is `!lazy:` so `num_classes` is **derived from the dataset**
-#    (10 for MNIST, via `dataflux.num_classes` walking the targets) and injected
+#    (10 for MNIST, via `sampleflux.num_classes` walking the targets) and injected
 #    by the trainer's `initialize()` at run time — it is NOT specified here.
 #
 # MNIST is greyscale 28x28; the dataset converts each image to RGB and resizes
@@ -31,11 +31,11 @@ model: !lazy:sonair.TimmModel
 
 # Data: HuggingFace `mnist`. MNIST exposes `train` and `test` splits (no
 # `validation`), so the held-out split is `test`.
-train_set: !class:dataflux.sources.HuggingFaceSource
+train_set: !class:sampleflux.sources.HuggingFaceSource
   path: "mnist"
   split: train
 
-val_set: !class:dataflux.sources.HuggingFaceSource
+val_set: !class:sampleflux.sources.HuggingFaceSource
   path: "mnist"
   split: test
 

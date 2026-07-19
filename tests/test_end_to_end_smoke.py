@@ -3,7 +3,7 @@ collate_fn_with_metadata + a fake dataset threaded through one full
 forward+backward step.
 
 This proves the wiring contract that the YAML configs in
-``waivefront-rfuav/config/`` exercise — the actual RFUAV training flow
+``waivefront/config/`` exercise — the actual RFUAV training flow
 just adds the HF Hub fetch in front. Useful as a CI gate so the
 classification path stays green even when HuggingFace's CDN is rate-limited
 or unreachable.

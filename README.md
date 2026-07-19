@@ -60,7 +60,7 @@ trainer: !class:marainer.trainer.LightningTrainer
 
 ### Full end-to-end example
 
-`waivefront-rfuav/config/train_efficientvit_b0.yaml` trains a 37-class
+`waivefront/config/train_efficientvit_b0.yaml` trains a 37-class
 drone-type classifier on RFUAV spectrograms. It demonstrates the typical
 pipeline:
 
@@ -79,7 +79,7 @@ pipeline:
 Run:
 
 ```bash
-marainer train waivefront-rfuav/config/train_efficientvit_b0.yaml
+marainer train waivefront/config/train_efficientvit_b0.yaml
 ```
 
 Sibling configs `evaluate_efficientvit_b0.yaml` and

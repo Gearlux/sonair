@@ -5,7 +5,12 @@ description = "Image-classification models and adapters for the Marainer trainin
 authors = [{name = "Taidal"}]
 license = {text = "MIT"}
 dependencies = [
-    "marainer>=0.1.0",
+    # marainer provides OPTIONAL experiment tracking (git/config/system-metrics/log-file) + a couple
+    # of torch utilities (ensure_sample_dataset / load_lightning_checkpoint). The [lightning] extra
+    # pulls the pl-side tracking helpers; [mlflow]/[tensorboard] add those tracker backends. sonair's
+    # LightningClassifier is a standard pl.LightningModule and trains without marainer (a couple of
+    # tracking lines would drop out).
+    "marainer[lightning,mlflow,tensorboard]>=0.2.0",
     "confluid>=0.1.0",
     "sampleflux>=0.1.0",
     "loggair>=0.1.0",
@@ -38,9 +43,6 @@ sonair = "sonair.cli:main"
 # the LiquifyApp instance. Entry-point changes need an editable reinstall.
 [project.entry-points."liquifai.apps"]
 sonair = "sonair.cli:app"
-
-[project.entry-points."marainer.commands"]
-sonair = "sonair.plugin:register"
 
 [project.entry-points."confluid.configurables"]
 sonair = "sonair"

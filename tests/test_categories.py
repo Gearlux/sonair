@@ -28,21 +28,19 @@ def test_categories_enumerable_via_registry() -> None:
 
 def test_task_role_tags() -> None:
     """task/role drive navigaitor's scan-and-generate task surfaces."""
-    from sonair.evaluator import LightningClassificationEvaluator
-    from sonair.trainer import LightningClassificationTrainer
+    from sonair.classifier import LightningClassifier
 
     assert TimmModel.__confluid_task__ == "classification"
     assert TimmModel.__confluid_role__ == "model"
-    assert LightningClassificationTrainer.__confluid_task__ == "classification"
-    assert LightningClassificationTrainer.__confluid_role__ == "trainer"
-    assert LightningClassificationEvaluator.__confluid_role__ == "evaluator"
+    assert LightningClassifier.__confluid_task__ == "classification"
+    assert LightningClassifier.__confluid_role__ == "trainer"
 
 
 def test_task_role_enumerable_via_registry() -> None:
     registry = get_registry()
     assert "TimmModel" in registry.list_classes(task="classification", role="model")
     assert "CrossEntropyLoss" in registry.list_classes(task="classification", role="loss")
-    assert "LightningClassificationTrainer" in registry.list_classes(task="classification", role="trainer")
+    assert "LightningClassifier" in registry.list_classes(task="classification", role="trainer")
 
 
 def test_all_classification_losses_registered() -> None:

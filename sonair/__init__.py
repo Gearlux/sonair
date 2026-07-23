@@ -1,13 +1,11 @@
-"""Sonair: image-classification models and adapters for the Marainer training framework."""
+"""Sonair: a standard PyTorch-Lightning image classifier, using marainer for optional tracking."""
 
-from sonair.evaluator import LightningClassificationEvaluator
+from sonair.classifier import LightningClassifier
 from sonair.timm_classifier import TimmModel
-from sonair.trainer import LightningClassificationTrainer
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "TimmModel",
-    "LightningClassificationTrainer",
-    "LightningClassificationEvaluator",
+    "LightningClassifier",
 ]

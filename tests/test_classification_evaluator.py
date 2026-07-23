@@ -1,4 +1,4 @@
-"""Tests for LightningClassificationEvaluator."""
+"""Tests for LightningClassifier in the evaluation path (task='test')."""
 
 import json
 from typing import Any, Dict, List, Sized, cast
@@ -12,39 +12,33 @@ from sampleflux import Flux
 from sampleflux.sample import Sample
 from torchmetrics import MetricCollection
 
-from sonair.evaluator import LightningClassificationEvaluator
+from sonair.classifier import LightningClassifier
 
 
-def _make_evaluator(**overrides: Any) -> LightningClassificationEvaluator:
-    """Build a LightningClassificationEvaluator, applying overrides as post-construction attributes.
+def _make_evaluator(**overrides: Any) -> LightningClassifier:
+    """Build a test-path LightningClassifier, applying overrides as post-construction attributes.
 
-    Mirrors the minimal-ctor pattern: only 'model', 'dataset', 'experiment_name', 'run_name' are
-    constructor params (num_classes is read off the model, not configured); deferred slots
-    (``loader`` / ``lightning`` / ``metrics`` / ``predictions_sink`` / ``metrics_sidecar_path`` /
-    ``class_names``) are set on the instance after construction.
+    Maps the legacy ``dataset=`` kwarg to ``test_set`` and sets ``task='test'`` (num_classes is read
+    off the model). Deferred slots (``test_loader`` / ``lightning`` / ``metrics`` / ``predictions_sink``
+    / ``metrics_sidecar_path`` / ``class_names``) are set on the instance after construction.
     """
-    _ctor_keys = (
-        "model",
-        "dataset",
-        "experiment_name",
-        "run_name",
-    )
-    ctor = {k: overrides.pop(k) for k in _ctor_keys if k in overrides}
-    ev = LightningClassificationEvaluator(**ctor)
+    ctor: Dict[str, Any] = {"task": "test"}
+    for key in ("model", "experiment_name", "run_name", "label_map"):
+        if key in overrides:
+            ctor[key] = overrides.pop(key)
+    if "dataset" in overrides:
+        ctor["test_set"] = overrides.pop("dataset")
+    overrides.pop("num_classes", None)  # eval reads num_classes off the model
+    ev = LightningClassifier(**ctor)
     for _k, _v in overrides.items():
         setattr(ev, _k, _v)
     return ev
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 class _TinyClassifier(nn.Module):
     def __init__(self, num_classes: int = 3, input_size: int = 4) -> None:
         super().__init__()
-        # Expose num_classes — the evaluator reads the count off the (trained) model.
+        # Expose num_classes — the eval path reads the count off the (trained) model.
         self.num_classes = num_classes
         self.fc = nn.Linear(input_size, num_classes)
 
@@ -54,11 +48,7 @@ class _TinyClassifier(nn.Module):
 
 def _make_flux(n: int = 8, num_classes: int = 3, input_size: int = 4) -> Flux:
     samples = [
-        Sample(
-            input=torch.randn(3, 8, 8),
-            target=torch.tensor(i % num_classes, dtype=torch.int64),
-            metadata={"idx": i},
-        )
+        Sample(input=torch.randn(3, 8, 8), target=torch.tensor(i % num_classes, dtype=torch.int64), metadata={"idx": i})
         for i in range(n)
     ]
     return Flux(source=samples)
@@ -76,38 +66,24 @@ class _RecordingSink:
         self.closed = True
 
 
-# ---------------------------------------------------------------------------
-# LightningClassificationEvaluator defaults
-# ---------------------------------------------------------------------------
-
-
-def test_inherits_computed_metrics_and_label_names_outputs() -> None:
-    """The base marainer evaluator outputs surface for the classification evaluator (output_specs MRO)."""
+def test_declares_computed_metrics_and_label_names_outputs() -> None:
     from confluid import output_specs
 
-    names = {s["name"] for s in output_specs(LightningClassificationEvaluator)}
+    names = {s["name"] for s in output_specs(LightningClassifier)}
     assert {"computed_metrics", "label_names"} <= names
 
 
-def test_metrics_are_built_in_initialize() -> None:
-    ev = _make_evaluator(
-        model=_TinyClassifier(num_classes=3),
-        dataset=_make_flux(8),
-        num_classes=3,
-    )
-    # Metrics are the template dict on construction; initialize() builds the collection.
-    assert isinstance(ev.metrics, dict)
+def test_test_metrics_are_built_in_initialize() -> None:
+    ev = _make_evaluator(model=_TinyClassifier(num_classes=3), dataset=_make_flux(8))
+    assert isinstance(ev.metrics, dict)  # the template dict on construction
     ev.initialize()
-    assert isinstance(ev.metrics, MetricCollection)
+    assert isinstance(ev.test_metrics, MetricCollection)  # built collection
 
 
-def test_metrics_have_test_prefix() -> None:
-    ev = _make_evaluator(
-        model=_TinyClassifier(num_classes=3),
-        dataset=_make_flux(8),
-    )
+def test_test_metrics_have_test_prefix() -> None:
+    ev = _make_evaluator(model=_TinyClassifier(num_classes=3), dataset=_make_flux(8))
     ev.initialize()
-    keys = list(ev.metrics.keys())
+    keys = list(ev.test_metrics.keys())
     assert all(str(k).startswith("test/") for k in keys), f"Expected test/ prefix, got: {keys}"
 
 
@@ -115,26 +91,15 @@ def test_loader_uses_classification_collate_by_default() -> None:
     from sonair.classification import classification_collate_fn
 
     ev = _make_evaluator(model=_TinyClassifier(), dataset=_make_flux())
-    # loader is a LazyClass template by default.
-    assert ev.loader.kwargs["collate_fn"] == classification_collate_fn
+    assert ev.test_loader.kwargs["collate_fn"] == classification_collate_fn
 
 
 def test_run_executes_test_loop(tmp_path: Any) -> None:
-    # Smoke run of the base loop through the classification evaluator.
-    # The classification_collate_fn expects image-like [3, H, W] tensors,
-    # but the TinyClassifier (nn.Linear) expects flattened vectors.
-    # We use a custom dataset that yields flattened vectors to bypass the image-collate check
-    # OR we make the model accept the image-like shape.
-    # For a smoke test, flattening in the model is easiest.
     class _FlattenTinyClassifier(_TinyClassifier):
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             return super().forward(x.view(x.size(0), -1))
 
-    ev = _make_evaluator(
-        model=_FlattenTinyClassifier(input_size=3 * 8 * 8),
-        dataset=_make_flux(),
-    )
-    # Configure Lightning for a fast CPU run.
+    ev = _make_evaluator(model=_FlattenTinyClassifier(input_size=3 * 8 * 8), dataset=_make_flux())
     ev.lightning = Class(
         L.Trainer,
         max_epochs=1,
@@ -147,12 +112,7 @@ def test_run_executes_test_loop(tmp_path: Any) -> None:
         default_root_dir=str(tmp_path),
     )
     ev.run()
-    assert ev.metrics is not None
-
-
-# ---------------------------------------------------------------------------
-# String target encoding
-# ---------------------------------------------------------------------------
+    assert ev.test_metrics is not None
 
 
 def _string_flux(names: List[str], n: int = 8, input_size: int = 4) -> Flux:
@@ -163,7 +123,6 @@ def _string_flux(names: List[str], n: int = 8, input_size: int = 4) -> Flux:
 
 
 def test_string_targets_encoded_via_checkpoint_class_names(tmp_path: Any) -> None:
-    # class_names.json written next to the checkpoint at train time; the evaluator reloads it.
     ckpt_dir = tmp_path / "ckpt"
     ckpt_dir.mkdir()
     (ckpt_dir / "class_names.json").write_text(json.dumps({"class_names": ["bird", "cat", "dog"], "num_classes": 3}))
@@ -174,8 +133,7 @@ def test_string_targets_encoded_via_checkpoint_class_names(tmp_path: Any) -> Non
     ev.initialize()
     assert ev.num_classes == 3
     assert ev.label_map is not None and ev.label_map.label_names == ["bird", "cat", "dog"]
-    # The dataset is now a Flux whose targets are encoded class-id ints.
-    dataset = cast(Flux, ev.dataset)
+    dataset = cast(Flux, ev.test_set)
     encoded = {dataset[i].target for i in range(len(cast(Sized, dataset)))}
     assert encoded == {0, 1, 2}
     assert all(isinstance(t, int) for t in encoded)
@@ -186,18 +144,15 @@ def test_string_targets_encoded_via_explicit_label_map() -> None:
 
     lm = LabelMap(mapping={"bird": 0, "cat": 1, "dog": 2})
     ev = _make_evaluator(
-        model=_TinyClassifier(num_classes=3),
-        dataset=_string_flux(["cat", "dog", "bird"]),
-        label_map=lm,
+        model=_TinyClassifier(num_classes=3), dataset=_string_flux(["cat", "dog", "bird"]), label_map=lm
     )
     ev.initialize()
     assert ev.label_map is lm
-    dataset = cast(Flux, ev.dataset)
+    dataset = cast(Flux, ev.test_set)
     assert dataset[0].target == 1  # "cat" -> 1
 
 
 def test_string_targets_without_any_map_raise() -> None:
-    # No label_map and no checkpoint_path → cannot encode string targets.
     ev = _make_evaluator(model=_TinyClassifier(num_classes=3), dataset=_string_flux(["a", "b", "c"]))
     with pytest.raises(RuntimeError):
         ev.initialize()

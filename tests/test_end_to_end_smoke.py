@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 
 import torch
 import torch.nn as nn
-from marainer.collate import collate_fn_with_metadata
+from marainer.torch import collate_fn_with_metadata
 from PIL import Image
 from sampleflux.sample import Sample
 from torch.utils.data import DataLoader

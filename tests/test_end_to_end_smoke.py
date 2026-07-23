@@ -1,11 +1,11 @@
 """End-to-end smoke test: TimmModel + torch.nn.CrossEntropyLoss +
-classification_collate_fn + a fake TypedSample dataset threaded through one full
+classification_collate_fn + a fake Sample dataset threaded through one full
 forward+backward step.
 
 This proves the wiring contract that the YAML configs in
 ``waivefront/config/`` exercise — the actual RFUAV training flow
 just adds the HF Hub fetch in front. The fake dataset yields the typed-bag
-``TypedSample`` that ``HuggingFaceSource`` now produces (an ``Image`` input +
+``Sample`` that ``HuggingFaceSource`` now produces (an ``Image`` input +
 ``Label`` target + aux ``Label`` metadata fields), and the batch is read back
 through the same ``_batch_input`` / ``_batch_target`` accessors the classifier uses.
 Useful as a CI gate so the classification path stays green even when
@@ -17,7 +17,7 @@ from typing import Any, Dict, List
 import numpy as np
 import torch
 import torch.nn as nn
-from sampleflux import Image, Label, TypedSample
+from sampleflux import Image, Label, Sample
 from torch.utils.data import DataLoader
 
 from sonair.classification import classification_collate_fn
@@ -31,7 +31,7 @@ class _FakeFeature:
 
 
 class _FakeHFDataset:
-    """Fake HF dataset that returns typed-bag TypedSamples (same interface as HuggingFaceSource)."""
+    """Fake HF dataset that returns typed-bag Samples (same interface as HuggingFaceSource)."""
 
     def __init__(self, n_per_class: int = 4, n_classes: int = 3, image_size: int = 64) -> None:
         self._items: List[Dict[str, Any]] = []
@@ -48,11 +48,11 @@ class _FakeHFDataset:
     def __len__(self) -> int:
         return len(self._items)
 
-    def __getitem__(self, idx: int) -> TypedSample:
+    def __getitem__(self, idx: int) -> Sample:
         item = self._items[idx]
         label = item["label"]
         # HWC uint8 image (Image), int-id target (Label), plus aux Label metadata fields.
-        return TypedSample(
+        return Sample(
             {
                 "image": Image(item["image"]),
                 "class": Label(label),

@@ -3,14 +3,14 @@
 import numpy as np
 import pytest
 import torch
-from sampleflux import Image, Label, TypedSample, item_data, primary
+from sampleflux import Image, Label, Sample, item_data, primary
 
 from sonair.classification import classification_collate_fn
 from sonair.classifier import _batch_input, _batch_target
 
 
-def _sample(input_value: object, target: object, **meta: object) -> TypedSample:
-    """A per-sample TypedSample shaped like HuggingFaceSource output: Image input + Label target + aux."""
+def _sample(input_value: object, target: object, **meta: object) -> Sample:
+    """A per-sample Sample shaped like HuggingFaceSource output: Image input + Label target + aux."""
     fields: dict = {
         "image": Image(np.asarray(input_value)) if not isinstance(input_value, torch.Tensor) else input_value
     }
@@ -19,7 +19,7 @@ def _sample(input_value: object, target: object, **meta: object) -> TypedSample:
     for key, value in meta.items():
         fields[key] = Label(value)
         roles[key] = "aux"
-    return TypedSample(fields, roles)
+    return Sample(fields, roles)
 
 
 def _gray(size: int = 8) -> np.ndarray:
@@ -33,7 +33,7 @@ def _rgb(size: int = 8) -> np.ndarray:
 def test_grayscale_becomes_3channel_float_batch() -> None:
     batch = [_sample(_gray(), i % 3, i=i) for i in range(4)]
     out = classification_collate_fn(batch)
-    assert isinstance(out, TypedSample)
+    assert isinstance(out, Sample)
     x = _batch_input(out)
     assert x.shape == (4, 3, 8, 8)  # grayscale expanded to 3 channels
     assert x.dtype == torch.float32

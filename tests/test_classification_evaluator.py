@@ -8,11 +8,37 @@ import pytorch_lightning as L
 import torch
 import torch.nn as nn
 from confluid import Class
-from sampleflux import Flux
-from sampleflux.sample import Sample
+from sampleflux import Flux, Label, Sample
 from torchmetrics import MetricCollection
 
 from sonair.classifier import LightningClassifier
+
+
+def _ts(inp: Any, tgt: Any, **meta: Any) -> Sample:
+    """Build a typed-bag Sample: raw `input` field, a Label `class` target, aux meta fields."""
+    fields: dict = {"input": inp, "class": Label(tgt)}
+    roles: dict = {"class": "target"}
+    for _k, _v in meta.items():
+        fields[_k] = Label(_v)
+        roles[_k] = "aux"
+    return Sample(fields, roles)
+
+
+def _stack_collate(batch: list) -> Sample:
+    """A typed-bag DataLoader collate that stacks raw feature/target tensors (replaces the
+    legacy marainer.torch.collate_fn_with_metadata, which read the removed Sample triple)."""
+    from sampleflux import Label, item_data, primary
+
+    xs = torch.stack([torch.as_tensor(item_data(primary(s, "input")[1])) for s in batch])
+    ys = torch.stack([torch.as_tensor(primary(s, "target")[1].value) for s in batch])
+    metas: list = []
+    for s in batch:
+        ik = primary(s, "input")[0]
+        tk = primary(s, "target")[0]
+        metas.append({k: (v.value if isinstance(v, Label) else v) for k, v in s.items() if k not in (ik, tk)})
+    return Sample(
+        {"input": xs, "class": Label(value=ys), "metadata": metas}, roles={"class": "target", "metadata": "aux"}
+    )
 
 
 def _make_evaluator(**overrides: Any) -> LightningClassifier:
@@ -47,10 +73,7 @@ class _TinyClassifier(nn.Module):
 
 
 def _make_flux(n: int = 8, num_classes: int = 3, input_size: int = 4) -> Flux:
-    samples = [
-        Sample(input=torch.randn(3, 8, 8), target=torch.tensor(i % num_classes, dtype=torch.int64), metadata={"idx": i})
-        for i in range(n)
-    ]
+    samples = [_ts(torch.randn(3, 8, 8), torch.tensor(i % num_classes, dtype=torch.int64), idx=i) for i in range(n)]
     return Flux(source=samples)
 
 
@@ -95,7 +118,6 @@ def test_loader_uses_classification_collate_by_default() -> None:
 
 
 def test_run_executes_test_loop(tmp_path: Any) -> None:
-    from marainer.torch import collate_fn_with_metadata
     from torch.utils.data import DataLoader
 
     class _FlattenTinyClassifier(_TinyClassifier):
@@ -106,7 +128,7 @@ def test_run_executes_test_loop(tmp_path: Any) -> None:
     # _make_flux yields legacy Samples (the eval initialize() target-walk is legacy-only in this
     # migration stage), so collate them with the legacy marainer collate; the classifier's step
     # functions read the legacy Sample batch through the same _batch_input / _batch_target accessors.
-    ev.test_loader = Class(DataLoader, batch_size=8, collate_fn=collate_fn_with_metadata)
+    ev.test_loader = Class(DataLoader, batch_size=8, collate_fn=_stack_collate)
     ev.lightning = Class(
         L.Trainer,
         max_epochs=1,
@@ -123,9 +145,7 @@ def test_run_executes_test_loop(tmp_path: Any) -> None:
 
 
 def _string_flux(names: List[str], n: int = 8, input_size: int = 4) -> Flux:
-    samples = [
-        Sample(input=torch.randn(input_size), target=names[i % len(names)], metadata={"idx": i}) for i in range(n)
-    ]
+    samples = [_ts(torch.randn(input_size), names[i % len(names)], idx=i) for i in range(n)]
     return Flux(source=samples)
 
 
@@ -140,8 +160,11 @@ def test_string_targets_encoded_via_checkpoint_class_names(tmp_path: Any) -> Non
     ev.initialize()
     assert ev.num_classes == 3
     assert ev.label_map is not None and ev.label_map.label_names == ["bird", "cat", "dog"]
+    from sampleflux import iter_targets
+
     dataset = cast(Flux, ev.test_set)
-    encoded = {dataset[i].target for i in range(len(cast(Sized, dataset)))}
+    assert len(cast(Sized, dataset))  # touch len for parity with the old index-walk
+    encoded = set(iter_targets(dataset))
     assert encoded == {0, 1, 2}
     assert all(isinstance(t, int) for t in encoded)
 
@@ -155,8 +178,10 @@ def test_string_targets_encoded_via_explicit_label_map() -> None:
     )
     ev.initialize()
     assert ev.label_map is lm
+    from sampleflux import iter_targets
+
     dataset = cast(Flux, ev.test_set)
-    assert dataset[0].target == 1  # "cat" -> 1
+    assert next(iter(iter_targets(dataset))) == 1  # "cat" -> 1
 
 
 def test_string_targets_without_any_map_raise() -> None:

@@ -1,26 +1,25 @@
 # Minimal flat sonair classification config — MNIST (10-class digit) edition.
 #
-#   marainer train -c examples/train_efficientvit_b0_mnist.yaml
-#
-# Adapted from waivefront-rfuav/config/train_efficientvit_b0_sonair.yaml (the
-# 37-class RFUAV drone config) — only the dataset changed to `mnist`.
+#   sonair train examples/train_efficientvit_b0_mnist.yaml
+#   # (or the generic runner: `sampleflux run examples/train_efficientvit_b0_mnist.yaml`)
 #
 # How it stays this small:
-#  * `sonair.LightningClassificationTrainer` bakes loss (CrossEntropy), collate,
-#    optimizer (AdamW), and metrics (top1/f1). It also exposes ergonomic knobs
-#    (batch_size / num_workers / max_epochs / logger) that build the DataLoaders
-#    + the pytorch_lightning.Trainer for you.
-#  * Every top-level key below is wired into the trainer by **Confluid
-#    broadcasting** (sibling keys are injected into the same-named trainer
-#    constructor params) — no nesting or `!ref` plumbing needed.
+#  * `sonair.LightningClassifier` (a standard pl.LightningModule) bakes loss
+#    (CrossEntropy), collate, optimizer (AdamW), and metrics (top1/f1). It also
+#    exposes ergonomic knobs (batch_size / num_workers / max_epochs / logger) that
+#    build the DataLoaders + the pytorch_lightning.Trainer for you.
+#  * Every top-level key below is wired into the classifier by **Confluid
+#    broadcasting** (sibling keys are injected into the same-named constructor
+#    params) — no nesting or `!ref` plumbing needed.
 #  * The model is `!lazy:` so `num_classes` is **derived from the dataset**
-#    (10 for MNIST, via `sampleflux.num_classes` walking the targets) and injected
-#    by the trainer's `initialize()` at run time — it is NOT specified here.
+#    (10 for MNIST, walking the targets) and injected by `initialize()` at run
+#    time — it is NOT specified here.
 #
 # MNIST is greyscale 28x28; the dataset converts each image to RGB and resizes
 # to the model's expected size, so the 3-channel efficientvit backbone works.
 
-trainer: !class:sonair.LightningClassificationTrainer
+runnable: !class:sonair.LightningClassifier
+  task: fit
   experiment_name: mnist_classification
   run_name: efficientvit_b0_mnist
 

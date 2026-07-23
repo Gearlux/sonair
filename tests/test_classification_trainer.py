@@ -1,4 +1,4 @@
-"""Tests for LightningClassificationTrainer."""
+"""Tests for LightningClassifier."""
 
 from typing import Any, cast
 
@@ -10,7 +10,7 @@ from sampleflux import Flux
 from sampleflux.sample import Sample
 from torchmetrics import MetricCollection
 
-from sonair.trainer import LightningClassificationTrainer
+from sonair.classifier import LightningClassifier
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,12 +40,12 @@ def _make_samples(n: int = 16, num_classes: int = 3, input_size: int = 4) -> Flu
 
 
 # ---------------------------------------------------------------------------
-# LightningClassificationTrainer defaults
+# LightningClassifier defaults
 # ---------------------------------------------------------------------------
 
 
 def test_loss_fn_defaults_to_cross_entropy() -> None:
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16),
         num_classes=3,
@@ -54,7 +54,7 @@ def test_loss_fn_defaults_to_cross_entropy() -> None:
 
 
 def test_initialize_wires_metrics_with_correct_prefixes() -> None:
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16),
         num_classes=3,
@@ -77,7 +77,7 @@ def test_initialize_wires_metrics_with_correct_prefixes() -> None:
 
 def test_default_metrics_have_no_top5() -> None:
     # top-5 is no longer auto-added; the default metrics dict is top-1 + macro F1.
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=10),
         train_set=_make_samples(16, num_classes=10),
         num_classes=10,
@@ -93,7 +93,7 @@ def test_top5_opt_in_via_metrics_dict() -> None:
     from confluid import LazyClass
     from torchmetrics.classification import MulticlassAccuracy
 
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=10),
         train_set=_make_samples(16, num_classes=10),
         num_classes=10,
@@ -114,7 +114,7 @@ def test_top5_opt_in_via_metrics_dict() -> None:
 
 
 def test_training_step_returns_scalar_loss() -> None:
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16),
         num_classes=3,
@@ -127,7 +127,7 @@ def test_training_step_returns_scalar_loss() -> None:
 
 
 def test_validation_step_returns_scalar_loss() -> None:
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16),
         num_classes=3,
@@ -139,7 +139,7 @@ def test_validation_step_returns_scalar_loss() -> None:
 
 
 def test_metrics_update_on_training_step() -> None:
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16),
         num_classes=3,
@@ -186,7 +186,7 @@ def test_omitted_num_classes_leaves_metrics_none_until_run() -> None:
     """With num_classes omitted, metrics stay None post-construction — sonair builds them
     in run() once it derives the count (see test_omitted_num_classes_derived_and_built_at_run),
     rather than carrying a deferred Lazy fluid."""
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=4),
         train_set=_make_samples(16, num_classes=4),
     )
@@ -215,11 +215,11 @@ def _cpu_lightning(tmp_path: object) -> Any:
 
 def test_omitted_num_classes_derived_and_built_at_run(tmp_path: object) -> None:
     from confluid import Class as ConfluidClass
-    from marainer.collate import collate_fn_with_metadata
+    from marainer.torch import collate_fn_with_metadata
     from torch.utils.data import DataLoader
 
     # Minimal constructor; everything else configured post-construction (the paradigm).
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=4),
         train_set=_DimsDataset(16, num_classes=4),
         # num_classes omitted -> derived from the dataset
@@ -237,7 +237,7 @@ def test_default_loader_uses_classification_collate_fn() -> None:
 
     from sonair.classification import classification_collate_fn
 
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16),
         num_classes=3,
@@ -258,7 +258,7 @@ def test_ergonomic_knobs_reach_loader_and_lightning_stubs() -> None:
 
     # batch_size / num_workers are ctor knobs baked into the deferred loader stub in
     # __init__ (the constructor stays side-effect-free — LazyClass defers construction).
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16),
         num_classes=3,
@@ -278,7 +278,7 @@ def test_ergonomic_knobs_reach_loader_and_lightning_stubs() -> None:
 def test_persistent_workers_guarded_when_num_workers_zero() -> None:
     # persistent_workers=True is meaningless (and raises in torch) when num_workers=0,
     # so __init__ derives it as `num_workers != 0`.
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16),
         num_classes=3,
@@ -292,7 +292,7 @@ def test_explicit_loader_override_is_respected() -> None:
     from torch.utils.data import DataLoader
 
     # __init__ bakes the ctor batch_size into the default loader stub...
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16),
         num_classes=3,
@@ -311,7 +311,7 @@ def test_explicit_loader_override_is_respected() -> None:
 
 
 _FLAT_YAML = """
-trainer: !class:sonair.LightningClassificationTrainer
+trainer: !class:sonair.LightningClassifier
   run_name: x
 model: "MODEL_SENTINEL"
 train_set: !class:sampleflux.Flux()
@@ -377,11 +377,11 @@ def test_logger_broadcasts_and_flows_into_lightning() -> None:
 def test_lazy_model_gets_num_classes_injected_at_run(tmp_path: object) -> None:
     from confluid import Class as ConfluidClass
     from confluid import LazyClass
-    from marainer.collate import collate_fn_with_metadata
+    from marainer.torch import collate_fn_with_metadata
     from torch.utils.data import DataLoader
 
     # Model declared !lazy: WITHOUT num_classes -> derived from the dataset (4).
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=LazyClass(_TinyClassifier),  # no num_classes; default 3 would be wrong
         train_set=_DimsDataset(16, num_classes=4),
     )
@@ -413,7 +413,7 @@ class _NCClassifier(nn.Module):
 def test_concrete_model_num_classes_is_authoritative() -> None:
     # Model head sized to 5; the dataset only has 3 classes. The concrete model wins —
     # walking the data would mis-size the metrics against the head.
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_NCClassifier(num_classes=5),
         train_set=_make_samples(16, num_classes=3),
         balance_classes=False,
@@ -428,7 +428,7 @@ def test_concrete_model_num_classes_is_authoritative() -> None:
 def test_concrete_model_num_classes_overrides_mismatched_explicit() -> None:
     # An explicit trainer num_classes that disagrees with the concrete model is overridden
     # by the model (and a warning is logged).
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_NCClassifier(num_classes=5),
         train_set=_make_samples(16, num_classes=3),
         num_classes=9,
@@ -454,7 +454,7 @@ def test_string_targets_fit_encode_and_expose_map() -> None:
     from sampleflux import LabelMap
 
     names = ["dog", "cat", "bird"]  # sklearn sorts -> bird=0, cat=1, dog=2
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),  # no num_classes attr -> nc from the fitted map
         train_set=_string_samples(names),
         balance_classes=False,
@@ -479,7 +479,7 @@ def test_explicit_label_map_drives_encoding_and_num_classes() -> None:
     from sampleflux import LabelMap
 
     lm = LabelMap(mapping={"cat": 0, "dog": 1, "bird": 2, "fish": 3})  # 4 classes, pinned
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=4),
         train_set=_string_samples(["cat", "dog", "bird"]),  # only 3 appear in train
         label_map=lm,
@@ -496,7 +496,7 @@ def test_explicit_label_map_drives_encoding_and_num_classes() -> None:
 
 def test_multilabel_string_targets_raise() -> None:
     samples = [Sample(input=torch.randn(4), target=["a", "b"], metadata={}) for _ in range(8)]
-    trainer = LightningClassificationTrainer(model=_TinyClassifier(num_classes=2), train_set=Flux(source=samples))
+    trainer = LightningClassifier(model=_TinyClassifier(num_classes=2), train_set=Flux(source=samples))
     with pytest.raises(NotImplementedError):
         trainer.initialize()
 
@@ -513,7 +513,7 @@ def test_balance_classes_injects_class_weights() -> None:
         + [Sample(input=torch.randn(4), target=1, metadata={}) for _ in range(3)]
         + [Sample(input=torch.randn(4), target=2, metadata={}) for _ in range(3)]
     )
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=Flux(source=samples),
         num_classes=3,
@@ -532,7 +532,7 @@ def test_balance_classes_injects_class_weights() -> None:
 
 
 def test_balance_classes_false_leaves_loss_unweighted() -> None:
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16, num_classes=3),
         num_classes=3,
@@ -546,7 +546,7 @@ def test_balance_classes_false_leaves_loss_unweighted() -> None:
 def test_balance_skipped_when_loss_not_weight_capable() -> None:
     # nn.MSELoss has no `weight` constructor arg → not balance-capable: the loss is left untouched
     # and class_weights stays None (a warning is logged via loggair).
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16, num_classes=3),
         num_classes=3,
@@ -562,7 +562,7 @@ def test_loss_accepts_weight_checks_constructor() -> None:
     # The confluid-aware balance-capability check, on both live and deferred (lazy/Fluid) losses.
     from confluid import LazyClass
 
-    from sonair.trainer import _loss_accepts_weight
+    from sonair.classifier import _loss_accepts_weight
 
     assert _loss_accepts_weight(nn.CrossEntropyLoss()) is True  # live, weight in ctor
     assert _loss_accepts_weight(nn.MSELoss()) is False  # live, no weight arg
@@ -575,7 +575,7 @@ def test_metrics_accepts_ready_made_collection() -> None:
     from torchmetrics.classification import MulticlassAccuracy
 
     coll = MetricCollection({"top1": MulticlassAccuracy(num_classes=3, top_k=1)})
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_samples(16, num_classes=3),
         num_classes=3,
@@ -595,11 +595,11 @@ def test_metrics_accepts_ready_made_collection() -> None:
 def test_declares_trained_model_output() -> None:
     from confluid import output_specs
 
-    specs = {s["name"]: s for s in output_specs(LightningClassificationTrainer)}
+    specs = {s["name"]: s for s in output_specs(LightningClassifier)}
     assert "trained_model" in specs
     assert specs["trained_model"]["type"] == "Module"
     # The marker rides on the getter so FluxStudio / form-spec can read it.
-    fget = LightningClassificationTrainer.__dict__["trained_model"].fget
+    fget = LightningClassifier.__dict__["trained_model"].fget
     assert getattr(fget, "__confluid_output__", False) is True
 
 
@@ -607,19 +607,19 @@ def test_inherits_computed_metrics_and_label_names_outputs() -> None:
     """The base marainer outputs surface for the classification trainer via output_specs' MRO walk."""
     from confluid import output_specs
 
-    names = {s["name"] for s in output_specs(LightningClassificationTrainer)}
+    names = {s["name"] for s in output_specs(LightningClassifier)}
     assert {"trained_model", "computed_metrics", "label_names"} <= names
 
 
 def test_trained_model_is_not_a_config_field() -> None:
     from confluid import to_pydantic
 
-    assert "trained_model" not in to_pydantic(LightningClassificationTrainer).model_fields
+    assert "trained_model" not in to_pydantic(LightningClassifier).model_fields
 
 
 def test_trained_model_raises_before_run() -> None:
     # A lazy (!lazy:) model stays a deferred Fluid until run() flows it — the output guards this.
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=LazyClass(_TinyClassifier, num_classes=3),
         train_set=_make_samples(8, num_classes=3),
     )
@@ -629,7 +629,7 @@ def test_trained_model_raises_before_run() -> None:
 
 def test_trained_model_returns_live_model_after_initialize() -> None:
     model = _TinyClassifier(num_classes=3)
-    trainer = LightningClassificationTrainer(
+    trainer = LightningClassifier(
         model=model,
         train_set=_make_samples(16, num_classes=3),
         balance_classes=False,
@@ -639,9 +639,11 @@ def test_trained_model_returns_live_model_after_initialize() -> None:
     assert trainer.trained_model is trainer.model
 
 
-def test_model_and_train_set_are_mandatory_inputs() -> None:
+def test_model_is_mandatory_input() -> None:
+    # Only `model` is mandatory now — train_set/test_set are optional (predict/test need only a model
+    # + test_set), so a single class serves fit/evaluate/test/predict.
     from confluid import input_specs, mandatory_param_names
 
-    assert mandatory_param_names(LightningClassificationTrainer) == {"model", "train_set"}
-    required = {s["name"] for s in input_specs(LightningClassificationTrainer) if s["required"]}
-    assert required == {"model", "train_set"}
+    assert mandatory_param_names(LightningClassifier) == {"model"}
+    required = {s["name"] for s in input_specs(LightningClassifier) if s["required"]}
+    assert required == {"model"}

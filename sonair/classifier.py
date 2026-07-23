@@ -31,6 +31,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Optional, Union, cast
 
+import numpy as np
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
@@ -49,7 +50,7 @@ from marainer.run_names import generate_run_name
 from marainer.torch import ensure_sample_dataset
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
-from sampleflux import Flux, LabelMap, iter_targets
+from sampleflux import Flux, Label, LabelMap, TypedSample, item_data, iter_targets, primary
 from sampleflux.runnable import ProgressReporting, TorchRunner, entrypoint
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics import Metric, MetricCollection
@@ -107,6 +108,36 @@ def encode_flux(source: Any, label_map: LabelMap) -> Flux:
     flux = Flux(source=flow(source), ops=[label_map.encode_op()])
     flux.label_names = label_map.label_names  # type: ignore[attr-defined]
     return flux
+
+
+def _batch_input(batch: Any) -> torch.Tensor:
+    """The ``[N, 3, H, W]`` input tensor from a collated batch.
+
+    The typed collate (``sonair.classification.classification_collate_fn``) returns a batched
+    :class:`~sampleflux.TypedSample` whose primary ``input`` item is an :class:`~sampleflux.Image`; an
+    Image cannot hold a live tensor (``NDArrayItem.__new__`` runs ``np.asarray``), so its payload comes
+    back as an ndarray and is converted to a tensor with a cheap, memory-sharing ``torch.as_tensor``. A
+    legacy ``Sample`` batch (produced by ``marainer.torch.collate_fn_with_metadata``, still used while the
+    trainer's dataset-walk path is legacy-only) exposes its stacked tensor as ``.input`` directly.
+    """
+    if isinstance(batch, TypedSample):
+        _, item = primary(batch, "input")
+        data = item_data(item)
+        return data if isinstance(data, torch.Tensor) else torch.as_tensor(np.asarray(data))
+    return cast(torch.Tensor, batch.input)
+
+
+def _batch_target(batch: Any) -> torch.Tensor:
+    """The ``[N]`` int64 target tensor from a collated batch (typed bag or legacy ``Sample``).
+
+    In the typed bag the primary ``target`` field is a :class:`~sampleflux.Label` whose ``.value`` holds
+    the stacked tensor (a dataclass wrapper keeps a live tensor, unlike an array item).
+    """
+    if isinstance(batch, TypedSample):
+        _, item = primary(batch, "target")
+        value = item.value if isinstance(item, Label) else item_data(item)
+        return value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+    return cast(torch.Tensor, batch.target)
 
 
 @configurable(task="classification", role="trainer")
@@ -211,11 +242,12 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
 
     # ---- standard Lightning step functions ---------------------------------- #
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        preds = self(batch.input)
-        loss: torch.Tensor = self.loss_fn(preds, batch.target)
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch.input.shape[0])
+        x, y = _batch_input(batch), _batch_target(batch)
+        preds = self(x)
+        loss: torch.Tensor = self.loss_fn(preds, y)
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
         if isinstance(self.train_metrics, MetricCollection):
-            self.train_metrics(preds, batch.target)
+            self.train_metrics(preds, y)
             self.log_dict(self.train_metrics, on_step=True, on_epoch=False)
         return loss
 
@@ -224,25 +256,27 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             self.train_metrics.reset()
 
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        preds = self(batch.input)
-        loss: torch.Tensor = self.loss_fn(preds, batch.target)
-        self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=batch.input.shape[0])
+        x, y = _batch_input(batch), _batch_target(batch)
+        preds = self(x)
+        loss: torch.Tensor = self.loss_fn(preds, y)
+        self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
         if isinstance(self.val_metrics, MetricCollection):
-            self.val_metrics.update(preds, batch.target)
-            self.log_dict(self.val_metrics, on_step=False, on_epoch=True, batch_size=batch.input.shape[0])
+            self.val_metrics.update(preds, y)
+            self.log_dict(self.val_metrics, on_step=False, on_epoch=True, batch_size=x.shape[0])
         return loss
 
     def test_step(self, batch: Any, batch_idx: int) -> Any:
-        preds = self(batch.input)
+        x = _batch_input(batch)
+        preds = self(x)
         if isinstance(self.test_metrics, MetricCollection):
-            self.test_metrics.update(preds, batch.target)
-            self.log_dict(self.test_metrics, on_step=False, on_epoch=True, batch_size=batch.input.shape[0])
+            self.test_metrics.update(preds, _batch_target(batch))
+            self.log_dict(self.test_metrics, on_step=False, on_epoch=True, batch_size=x.shape[0])
         if self.predictions_sink is not None:
             self._write_predictions(preds, batch)
         return preds
 
     def predict_step(self, batch: Any, batch_idx: int) -> Any:
-        preds = self(batch.input)
+        preds = self(_batch_input(batch))
         if self.predictions_sink is not None:
             self._write_predictions(preds, batch)
         return preds
@@ -485,11 +519,15 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
     # ---- predictions + tracking-side helpers -------------------------------- #
     def _write_predictions(self, preds: Any, batch: Any) -> None:
         per_sample_meta = None
-        meta = getattr(batch, "metadata", None)
-        if isinstance(meta, list):
-            per_sample_meta = meta
-        elif isinstance(meta, dict):
-            per_sample_meta = meta.get("per_sample")
+        if isinstance(batch, TypedSample):
+            # The typed collate stashes the per-sample metadata dicts under a "metadata" field.
+            per_sample_meta = batch["metadata"] if "metadata" in batch else None
+        else:
+            meta = getattr(batch, "metadata", None)
+            if isinstance(meta, list):
+                per_sample_meta = meta
+            elif isinstance(meta, dict):
+                per_sample_meta = meta.get("per_sample")
         items = (
             preds["predictions"]
             if isinstance(preds, dict) and "predictions" in preds

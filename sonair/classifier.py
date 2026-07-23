@@ -50,7 +50,7 @@ from marainer.run_names import generate_run_name
 from marainer.torch import ensure_sample_dataset
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
-from sampleflux import Flux, Label, LabelMap, TypedSample, item_data, iter_targets, primary
+from sampleflux import Flux, Label, LabelMap, Sample, item_data, iter_targets, primary
 from sampleflux.runnable import ProgressReporting, TorchRunner, entrypoint
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics import Metric, MetricCollection
@@ -114,13 +114,13 @@ def _batch_input(batch: Any) -> torch.Tensor:
     """The ``[N, 3, H, W]`` input tensor from a collated batch.
 
     The typed collate (``sonair.classification.classification_collate_fn``) returns a batched
-    :class:`~sampleflux.TypedSample` whose primary ``input`` item is an :class:`~sampleflux.Image`; an
+    :class:`~sampleflux.Sample` whose primary ``input`` item is an :class:`~sampleflux.Image`; an
     Image cannot hold a live tensor (``NDArrayItem.__new__`` runs ``np.asarray``), so its payload comes
     back as an ndarray and is converted to a tensor with a cheap, memory-sharing ``torch.as_tensor``. A
     legacy ``Sample`` batch (produced by ``marainer.torch.collate_fn_with_metadata``, still used while the
     trainer's dataset-walk path is legacy-only) exposes its stacked tensor as ``.input`` directly.
     """
-    if isinstance(batch, TypedSample):
+    if isinstance(batch, Sample):
         _, item = primary(batch, "input")
         data = item_data(item)
         return data if isinstance(data, torch.Tensor) else torch.as_tensor(np.asarray(data))
@@ -133,7 +133,7 @@ def _batch_target(batch: Any) -> torch.Tensor:
     In the typed bag the primary ``target`` field is a :class:`~sampleflux.Label` whose ``.value`` holds
     the stacked tensor (a dataclass wrapper keeps a live tensor, unlike an array item).
     """
-    if isinstance(batch, TypedSample):
+    if isinstance(batch, Sample):
         _, item = primary(batch, "target")
         value = item.value if isinstance(item, Label) else item_data(item)
         return value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
@@ -519,7 +519,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
     # ---- predictions + tracking-side helpers -------------------------------- #
     def _write_predictions(self, preds: Any, batch: Any) -> None:
         per_sample_meta = None
-        if isinstance(batch, TypedSample):
+        if isinstance(batch, Sample):
             # The typed collate stashes the per-sample metadata dicts under a "metadata" field.
             per_sample_meta = batch["metadata"] if "metadata" in batch else None
         else:

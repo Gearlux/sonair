@@ -6,11 +6,38 @@ import pytest
 import torch
 import torch.nn as nn
 from confluid import LazyClass
-from sampleflux import Flux, Image, Label, TypedSample
-from sampleflux.sample import Sample
+from sampleflux import Flux, Image, Label, Sample
 from torchmetrics import MetricCollection
 
 from sonair.classifier import LightningClassifier
+
+
+def _ts(inp: Any, tgt: Any, **meta: Any) -> Sample:
+    """Build a typed-bag Sample: raw `input` field, a Label `class` target, aux meta fields."""
+    fields: dict = {"input": inp, "class": Label(tgt)}
+    roles: dict = {"class": "target"}
+    for _k, _v in meta.items():
+        fields[_k] = Label(_v)
+        roles[_k] = "aux"
+    return Sample(fields, roles)
+
+
+def _stack_collate(batch: list) -> Sample:
+    """A typed-bag DataLoader collate that stacks raw feature/target tensors (replaces the
+    legacy marainer.torch.collate_fn_with_metadata, which read the removed Sample triple)."""
+    from sampleflux import Label, item_data, primary
+
+    xs = torch.stack([torch.as_tensor(item_data(primary(s, "input")[1])) for s in batch])
+    ys = torch.stack([torch.as_tensor(primary(s, "target")[1].value) for s in batch])
+    metas: list = []
+    for s in batch:
+        ik = primary(s, "input")[0]
+        tk = primary(s, "target")[0]
+        metas.append({k: (v.value if isinstance(v, Label) else v) for k, v in s.items() if k not in (ik, tk)})
+    return Sample(
+        {"input": xs, "class": Label(value=ys), "metadata": metas}, roles={"class": "target", "metadata": "aux"}
+    )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -26,13 +53,13 @@ class _TinyClassifier(nn.Module):
         return self.fc(x)  # type: ignore[no-any-return]
 
 
-def _make_batch(n: int = 8, num_classes: int = 3, input_size: int = 4) -> TypedSample:
-    # A batched TypedSample shaped like classification_collate_fn output: the primary input Image holds
+def _make_batch(n: int = 8, num_classes: int = 3, input_size: int = 4) -> Sample:
+    # A batched Sample shaped like classification_collate_fn output: the primary input Image holds
     # the (pre-batched) feature tensor as an ndarray (an Image can't hold a live tensor), the target
     # Label holds the [N] int64 tensor, and per-sample metadata rides a "metadata" field.
     x = torch.randn(n, input_size)
     y = torch.randint(0, num_classes, (n,))
-    return TypedSample(
+    return Sample(
         {"image": Image(x.numpy(), layout="CHW"), "class": Label(value=y), "metadata": [{"idx": i} for i in range(n)]},
         roles={"class": "target", "metadata": "aux"},
     )
@@ -40,7 +67,7 @@ def _make_batch(n: int = 8, num_classes: int = 3, input_size: int = 4) -> TypedS
 
 def _make_samples(n: int = 16, num_classes: int = 3, input_size: int = 4) -> Flux:
     # A Flux (torch Dataset) — the trainer's train_set is typed Dataset[Any].
-    return Flux(source=[Sample(input=torch.randn(input_size), target=i % num_classes, metadata={}) for i in range(n)])
+    return Flux(source=[_ts(torch.randn(input_size), i % num_classes) for i in range(n)])
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +197,7 @@ class _DimsDataset(torch.utils.data.Dataset):
     """Map-style torch Dataset of integer-target samples."""
 
     def __init__(self, n: int, num_classes: int, input_size: int = 4) -> None:
-        self._s = [
-            Sample(input=torch.randn(input_size), target=torch.tensor(i % num_classes, dtype=torch.int64), metadata={})
-            for i in range(n)
-        ]
+        self._s = [_ts(torch.randn(input_size), torch.tensor(i % num_classes, dtype=torch.int64)) for i in range(n)]
         self._nc = num_classes
 
     def __len__(self) -> int:
@@ -219,7 +243,6 @@ def _cpu_lightning(tmp_path: object) -> Any:
 
 def test_omitted_num_classes_derived_and_built_at_run(tmp_path: object) -> None:
     from confluid import Class as ConfluidClass
-    from marainer.torch import collate_fn_with_metadata
     from torch.utils.data import DataLoader
 
     # Minimal constructor; everything else configured post-construction (the paradigm).
@@ -228,7 +251,7 @@ def test_omitted_num_classes_derived_and_built_at_run(tmp_path: object) -> None:
         train_set=_DimsDataset(16, num_classes=4),
         # num_classes omitted -> derived from the dataset
     )
-    trainer.train_loader = ConfluidClass(DataLoader, batch_size=8, collate_fn=collate_fn_with_metadata)
+    trainer.train_loader = ConfluidClass(DataLoader, batch_size=8, collate_fn=_stack_collate)
     trainer.lightning = _cpu_lightning(tmp_path)
     trainer.run()
     assert isinstance(trainer.val_metrics, MetricCollection)
@@ -381,7 +404,6 @@ def test_logger_broadcasts_and_flows_into_lightning() -> None:
 def test_lazy_model_gets_num_classes_injected_at_run(tmp_path: object) -> None:
     from confluid import Class as ConfluidClass
     from confluid import LazyClass
-    from marainer.torch import collate_fn_with_metadata
     from torch.utils.data import DataLoader
 
     # Model declared !lazy: WITHOUT num_classes -> derived from the dataset (4).
@@ -389,7 +411,7 @@ def test_lazy_model_gets_num_classes_injected_at_run(tmp_path: object) -> None:
         model=LazyClass(_TinyClassifier),  # no num_classes; default 3 would be wrong
         train_set=_DimsDataset(16, num_classes=4),
     )
-    trainer.train_loader = ConfluidClass(DataLoader, batch_size=8, collate_fn=collate_fn_with_metadata)
+    trainer.train_loader = ConfluidClass(DataLoader, batch_size=8, collate_fn=_stack_collate)
     trainer.lightning = _cpu_lightning(tmp_path)
     trainer.run()
     # The lazy model was built with the derived num_classes=4 (fc out_features).
@@ -449,9 +471,7 @@ def test_concrete_model_num_classes_overrides_mismatched_explicit() -> None:
 
 def _string_samples(names: list[str], n: int = 18, input_size: int = 4) -> Flux:
     # A Flux (torch Dataset) of string-target samples — the trainer's train_set is Dataset[Any].
-    return Flux(
-        source=[Sample(input=torch.randn(input_size), target=names[i % len(names)], metadata={}) for i in range(n)]
-    )
+    return Flux(source=[_ts(torch.randn(input_size), names[i % len(names)]) for i in range(n)])
 
 
 def test_string_targets_fit_encode_and_expose_map() -> None:
@@ -472,9 +492,12 @@ def test_string_targets_fit_encode_and_expose_map() -> None:
     # label_names so marainer persists class_names.json.
     from typing import Sized
 
+    from sampleflux import iter_targets
+
     train_set = cast(Flux, trainer.train_set)
     assert train_set.label_names == ["bird", "cat", "dog"]  # type: ignore[attr-defined]
-    encoded = {train_set[i].target for i in range(len(cast(Sized, train_set)))}
+    assert len(cast(Sized, train_set))  # touch len for parity with the old index-walk
+    encoded = set(iter_targets(train_set))
     assert encoded == {0, 1, 2}
     assert all(isinstance(t, int) for t in encoded)
 
@@ -493,13 +516,15 @@ def test_explicit_label_map_drives_encoding_and_num_classes() -> None:
     # num_classes comes from the pinned map (4), not the 3 labels that appear in the data.
     assert trainer.num_classes == 4
     assert trainer.label_map is lm
+    from sampleflux import iter_targets
+
     train_set = cast(Flux, trainer.train_set)
-    sample0 = train_set[0]
-    assert sample0.target == lm.mapping[_string_samples(["cat", "dog", "bird"])[0].target]
+    raw_name = next(iter(iter_targets(_string_samples(["cat", "dog", "bird"]))))
+    assert next(iter(iter_targets(train_set))) == lm.mapping[raw_name]
 
 
 def test_multilabel_string_targets_raise() -> None:
-    samples = [Sample(input=torch.randn(4), target=["a", "b"], metadata={}) for _ in range(8)]
+    samples = [_ts(torch.randn(4), ["a", "b"]) for _ in range(8)]
     trainer = LightningClassifier(model=_TinyClassifier(num_classes=2), train_set=Flux(source=samples))
     with pytest.raises(NotImplementedError):
         trainer.initialize()
@@ -513,9 +538,9 @@ def test_multilabel_string_targets_raise() -> None:
 def test_balance_classes_injects_class_weights() -> None:
     # Imbalanced: class 0 appears 10x, classes 1/2 appear 3x each.
     samples = (
-        [Sample(input=torch.randn(4), target=0, metadata={}) for _ in range(10)]
-        + [Sample(input=torch.randn(4), target=1, metadata={}) for _ in range(3)]
-        + [Sample(input=torch.randn(4), target=2, metadata={}) for _ in range(3)]
+        [_ts(torch.randn(4), 0) for _ in range(10)]
+        + [_ts(torch.randn(4), 1) for _ in range(3)]
+        + [_ts(torch.randn(4), 2) for _ in range(3)]
     )
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),

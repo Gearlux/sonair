@@ -23,8 +23,13 @@ def _ts(inp: Any, tgt: Any, **meta: Any) -> Sample:
 
 
 def _stack_collate(batch: list) -> Sample:
-    """A typed-bag DataLoader collate that stacks raw feature/target tensors (replaces the
-    legacy marainer.torch.collate_fn_with_metadata, which read the removed Sample triple)."""
+    """A test-only collate that stacks raw feature/target tensors.
+
+    These synthetic trainer tests use a tiny ``nn.Linear`` model over 1-D feature vectors carried as
+    BARE-tensor ``input`` fields, which ``sampleflux.typed_collate`` cannot collate (it only handles
+    item-typed payloads — Image/Label/Mask/Regions). Real image samples ARE item-typed and use
+    ``typed_collate`` (the default loader collate + the ``test_classification`` / smoke tests); this
+    shim only bridges the non-image synthetic fixtures."""
     from sampleflux import Label, item_data, primary
 
     xs = torch.stack([torch.as_tensor(item_data(primary(s, "input")[1])) for s in batch])
@@ -54,8 +59,8 @@ class _TinyClassifier(nn.Module):
 
 
 def _make_batch(n: int = 8, num_classes: int = 3, input_size: int = 4) -> Sample:
-    # A batched Sample shaped like classification_collate_fn output: the primary input Image holds
-    # the (pre-batched) feature tensor as an ndarray (an Image can't hold a live tensor), the target
+    # A batched Sample shaped like typed_collate output: the primary input Image holds the
+    # (pre-batched) feature tensor as an ndarray (an Image can't hold a live tensor), the target
     # Label holds the [N] int64 tensor, and per-sample metadata rides a "metadata" field.
     x = torch.randn(n, input_size)
     y = torch.randint(0, num_classes, (n,))
@@ -259,10 +264,9 @@ def test_omitted_num_classes_derived_and_built_at_run(tmp_path: object) -> None:
     assert sized and all(m.num_classes == 4 for m in sized)
 
 
-def test_default_loader_uses_classification_collate_fn() -> None:
+def test_default_loader_uses_typed_collate() -> None:
     from confluid.fluid import Class as ConfluidClass
-
-    from sonair.classification import classification_collate_fn
+    from sampleflux import typed_collate
 
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
@@ -271,7 +275,7 @@ def test_default_loader_uses_classification_collate_fn() -> None:
     )
     # The train_loader is a deferred Class stub; check its kwargs contain the collate_fn.
     assert isinstance(trainer.train_loader, ConfluidClass)
-    assert trainer.train_loader.kwargs.get("collate_fn") is classification_collate_fn
+    assert trainer.train_loader.kwargs.get("collate_fn") is typed_collate
 
 
 # ---------------------------------------------------------------------------

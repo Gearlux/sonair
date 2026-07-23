@@ -1,14 +1,18 @@
 # Sonair
 
-Image-classification models and adapters for the [Marainer](https://github.com/Gearlux/marainer) training framework.
+Image-classification models and a self-contained Lightning classifier, wired with
+[Confluid](https://github.com/Gearlux/confluid) and configured from YAML.
 
 Sonair provides a thin, Confluid-configurable wrapper around
 [`timm`](https://github.com/huggingface/pytorch-image-models)
-so any of timm's ~1000 pretrained backbones plug into the **unchanged** base
-`marainer.trainer.LightningTrainer` — no subclassing, no overridden step functions, no
-custom Lightning module. The Trainer's standard
+so any of timm's ~1000 pretrained backbones drop into **`sonair.LightningClassifier`** —
+ONE standard `pytorch_lightning.LightningModule` with its own
+`training_step` / `validation_step` / `test_step` / `predict_step` /
+`configure_optimizers`, and a `run()` that dispatches on a `task` knob
+(`fit` / `evaluate` / `test` / `predict`). Its standard
 `preds = self(batch.input); loss = self.loss_fn(preds, batch.target)` flow
-fits classification natively.
+fits classification natively. Marainer is now used only for OPTIONAL experiment
+tracking plus a couple of torch utilities.
 
 The first-class model is **TimmModel**, a generic wrapper that
 takes any `model_name` from timm's catalogue (efficientvit, resnet, vit,
@@ -47,9 +51,10 @@ val_metrics: !class:torchmetrics.classification.MulticlassAccuracy
 train_loader: !lazy:torch.utils.data.DataLoader
   batch_size: 32
   shuffle: true
-  collate_fn: !ref:sonair.classification.classification_collate_fn
+  collate_fn: !ref:sampleflux.typed_collate
 
-trainer: !class:marainer.trainer.LightningTrainer
+runnable: !class:sonair.LightningClassifier
+  task: fit
   experiment_name: my_classification
   run_name: efficientvit_b0
   model: !ref:model
@@ -58,11 +63,16 @@ trainer: !class:marainer.trainer.LightningTrainer
   ...
 ```
 
+The config roots at a top-level `runnable:` key carrying a `task:` — the same
+config serves training, evaluation, and prediction by switching the task (or by
+picking the matching `sonair` verb, which wins over the YAML's `task`).
+
 ### Full end-to-end example
 
-`waivefront/config/train_efficientvit_b0.yaml` trains a 37-class
-drone-type classifier on RFUAV spectrograms. It demonstrates the typical
-pipeline:
+`examples/train_efficientvit_b0_mnist.yaml` trains an efficientvit classifier on
+MNIST from a minimal flat config. A signal-domain pipeline (e.g. a drone-type
+classifier over RFUAV spectrograms) follows the same shape and demonstrates the
+typical stages:
 
 1. `RegionsJsonSource` reads per-window annotations.
 2. Waivefront ops render the IQ → spectrogram → image tensor.
@@ -79,12 +89,15 @@ pipeline:
 Run:
 
 ```bash
-marainer train waivefront/config/train_efficientvit_b0.yaml
+sonair train examples/train_efficientvit_b0_mnist.yaml
+# or the generic runner:
+sampleflux run examples/train_efficientvit_b0_mnist.yaml
 ```
 
-Sibling configs `evaluate_efficientvit_b0.yaml` and
-`predict_efficientvit_b0.yaml` measure quality on the held-out test split
-and dump per-window classification JSON over the full RFUAV dataset.
+The `sonair evaluate <cfg>` and `sonair predict <cfg>` verbs bind the same
+`LightningClassifier` with `task: evaluate` / `test` / `predict` to measure
+quality on a held-out split or dump per-sample classification JSON — the verb
+wins over any `task:` set in the config, so one config can serve all three.
 
 ## Models
 
@@ -105,7 +118,8 @@ Recommended backbones for spectrogram classification:
 See `timm.list_models()` for the full catalogue.
 
 `TimmModel` is tagged `@configurable(task="classification", role="model")` (the
-trainer/evaluator carry `role="trainer"`/`"evaluator"`, and `torch.nn.CrossEntropyLoss`
+`LightningClassifier` carries `role="trainer"` — its per-task `run()` entry points
+declare `trainer`/`evaluator`/`predictor` roles — and `torch.nn.CrossEntropyLoss`
 is `register`-ed as `role="loss"`), so navigaitor's `list_classes(task=…, role=…)`
 scan + the visual-editor form-spec offer them — and any future classification
 model/loss — as task-scoped options. The dataset is the generic
@@ -113,7 +127,7 @@ model/loss — as task-scoped options. The dataset is the generic
 
 ## Class count: how `num_classes` is resolved
 
-`LightningClassificationTrainer.initialize()` (run at the top of `run()`) resolves the count
+`LightningClassifier.initialize()` (run at the top of `run()`) resolves the count
 in this order:
 
 1. **A concrete (already-built) model is authoritative** — its classifier head is sized, so
@@ -139,20 +153,22 @@ train_set: !class:sampleflux.sources.HuggingFaceSource
 ## String labels, encoding, and balanced loss
 
 When the dataset's `target` is a **class-name string** (a generic HF imagefolder, etc.) rather
-than an integer id, the trainer auto-encodes it:
+than an integer id, `initialize()` auto-encodes it:
 
 - **Encoding** — it fits a `sampleflux.LabelMap` from the train targets (scikit-learn
   `LabelEncoder`, shown with a progress bar), or uses a `label_map` you pass in. The wired
   `train`/`val`/`test` sets are wrapped so their targets become ids, and the map's class names are
-  persisted to `class_names.json` next to the checkpoint — which `LightningClassificationEvaluator`
-  reloads (via `sampleflux.LabelMap.load`) so eval/predict share the identical name↔id ordering.
-- **Balanced loss** — with `balance_classes: true` (the default), the trainer derives
+  persisted to `class_names.json` next to the checkpoint — which a `task: evaluate` / `test` /
+  `predict` run reloads (via `sampleflux.LabelMap.load`) so eval/predict share the identical
+  name↔id ordering.
+- **Balanced loss** — with `balance_classes: true` (the default), `initialize()` derives
   inverse-frequency class weights from the targets it walked and injects them into the loss (when
   the loss takes a `weight` tensor, e.g. `CrossEntropyLoss`). The weights are exposed on
-  `trainer.class_weights`. Set `balance_classes: false` to leave the loss unweighted.
+  `classifier.class_weights`. Set `balance_classes: false` to leave the loss unweighted.
 
 ```yaml
-trainer: !class:sonair.LightningClassificationTrainer
+runnable: !class:sonair.LightningClassifier
+  task: fit
   run_name: cats_vs_dogs
   balance_classes: true            # inverse-frequency class weights (default)
   # Optionally pin the encoding instead of fitting it:
@@ -173,36 +189,35 @@ Multi-label string targets (a *sequence* of names) are not yet supported and rai
 |--------|---------|
 | `torch.nn.CrossEntropyLoss` | The default classification loss — registered (no sonair wrapper) as `task="classification", role="loss"`; set `label_smoothing` / `ignore_index` / `reduction` from YAML. Consumes int64 class-id targets `[N]`. |
 | `SigmoidFocalLoss` | Thin `nn.Module` wrapper over `torchvision.ops.sigmoid_focal_loss` (a function, which confluid's `register` can't tag) — a pickable `task="classification", role="loss"` configurable with `alpha` / `gamma` / `reduction` knobs. Expects **float** targets the same shape as the logits (e.g. one-hot `[N, C]`), like the `BCEWithLogitsLoss` family. Defaults `reduction="mean"` (a scalar loss), not torchvision's `"none"`. |
-| `classification_collate_fn` | DataLoader collate that stacks per-sample image tensors and scalar class-id targets, preserves per-sample metadata as a list (the default collate crashes on string-valued metadata). |
-| `load_lightning_checkpoint` | Strip Lightning's `"model."` prefix when loading a `.ckpt` saved through `marainer.trainer.LightningTrainer`. |
+| `sampleflux.typed_collate` | The generic DataLoader collate the classifier wires in (no bespoke sonair collate). Stacks the already-tensorized `[3, H, W]` `Image` input to `[N, 3, H, W]` and keeps aux fields as per-sample lists; the model boundary stacks the `Label` target into an `[N]` int64 tensor. |
+| `load_lightning_checkpoint` | `marainer.torch` helper that strips Lightning's `"model."` prefix when loading a `.ckpt` saved by `sonair.LightningClassifier`. |
 
 Most torchmetrics classification metrics
 (`MulticlassAccuracy`, `MulticlassF1Score`, `MulticlassAUROC`, ...) accept
 logits directly and emit a scalar — they wire into `val_metrics` straight
 from YAML, no adapter needed.
 
-## Inherited from marainer
+## Optional tracking via marainer
 
-Sonair uses `marainer.trainer.LightningTrainer` unchanged, so training runs
-automatically gain marainer's default checkpoint + YAML-logging behaviour:
-a `ModelCheckpoint` (`save_last=True` + best by the first val metric) is
-auto-injected when the YAML doesn't already provide one, and the full
-config tree is logged as an artifact to every wired Lightning logger.
-Wire stock `pytorch_lightning.loggers.*` classes under `lightning.logger:`.
-See marainer's README → *Default checkpointing* for details.
+`LightningClassifier` is a standard `pytorch_lightning.LightningModule` that builds
+its own `pytorch_lightning.Trainer` from the `lightning` slot / ergonomic knobs. It
+uses marainer ONLY for OPTIONAL experiment tracking: when `trackers` are wired it
+attaches a `marainer.lightning.TrackingCallback` (git/config/log-file provenance),
+and `log_system_metrics: true` activates framework-free system-metric logging.
+Removing marainer would take only a few line changes. Wire stock
+`pytorch_lightning.loggers.*` classes under the `logger:` knob (a list broadcasts).
 
-The classification trainer and evaluator also inherit marainer's post-run
-`@output` I/O contract — `computed_metrics` (`Dict[str, float]`) and
-`label_names` (`List[str]`) — so a run's scalar metrics and class names show up
-in FluxStudio's Run-node results panel automatically (the classification trainer
-adds its own wireable `trained_model` output on top). See marainer's README →
-*Outputs (the `@output` I/O contract)*.
+`LightningClassifier` declares three read-only post-run `@output`s directly —
+`trained_model` (the live trained `nn.Module`), `computed_metrics`
+(`Dict[str, float]`), and `label_names` (`List[str]`) — so a run's model, scalar
+metrics, and class names show up as wireable output sockets in FluxStudio's
+Run-node results panel automatically.
 
 ## Dependencies
 
 | Package | Purpose |
 |---------|---------|
-| `marainer` | Base Trainer / Evaluator. |
+| `marainer` | Optional experiment tracking + torch utilities (`ensure_sample_dataset` / `load_lightning_checkpoint`). |
 | `confluid` | YAML-driven dependency injection (`@configurable`, `!class:`, `!ref:`). |
 | `sampleflux` | Sample / Flux pipeline plumbing. |
 | `loggair` | Structured logging. |

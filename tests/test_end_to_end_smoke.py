@@ -1,15 +1,15 @@
 """End-to-end smoke test: TimmModel + torch.nn.CrossEntropyLoss +
-classification_collate_fn + a fake Sample dataset threaded through one full
+``sampleflux.typed_collate`` + a fake Sample dataset threaded through one full
 forward+backward step.
 
 This proves the wiring contract that the YAML configs in
 ``waivefront/config/`` exercise — the actual RFUAV training flow
-just adds the HF Hub fetch in front. The fake dataset yields the typed-bag
-``Sample`` that ``HuggingFaceSource`` now produces (an ``Image`` input +
-``Label`` target + aux ``Label`` metadata fields), and the batch is read back
-through the same ``_batch_input`` / ``_batch_target`` accessors the classifier uses.
-Useful as a CI gate so the classification path stays green even when
-HuggingFace's CDN is rate-limited or unreachable.
+just adds the HF Hub fetch in front. The fake dataset yields the tensorized
+typed-bag ``Sample`` that ``HuggingFaceSource`` produces (a ``[3, H, W]`` float
+``Image`` input + ``Label`` target + aux ``Label`` metadata fields), collated by
+the generic ``typed_collate`` and read back through the same ``_batch_input`` /
+``_batch_target`` accessors the classifier uses. Useful as a CI gate so the
+classification path stays green even when HuggingFace's CDN is rate-limited.
 """
 
 from typing import Any, Dict, List
@@ -17,11 +17,10 @@ from typing import Any, Dict, List
 import numpy as np
 import torch
 import torch.nn as nn
-from sampleflux import Image, Label, Sample
+from sampleflux import Image, Label, Sample, typed_collate
 from torch.utils.data import DataLoader
 
-from sonair.classification import classification_collate_fn
-from sonair.classifier import _batch_input, _batch_target
+from sonair.classifier import _batch_input, _batch_metadata, _batch_target
 from sonair.timm_classifier import TimmModel
 
 
@@ -51,10 +50,12 @@ class _FakeHFDataset:
     def __getitem__(self, idx: int) -> Sample:
         item = self._items[idx]
         label = item["label"]
-        # HWC uint8 image (Image), int-id target (Label), plus aux Label metadata fields.
+        # The pipeline (ConvertToImage → ToTensor) has already produced a [3, H, W] float image, matching
+        # HuggingFaceSource's post-pipeline output: a CHW float Image, int-id target Label, aux Label meta.
+        chw = np.transpose(item["image"], (2, 0, 1)).astype("float32") / 255.0
         return Sample(
             {
-                "image": Image(item["image"]),
+                "image": Image(chw, layout="CHW"),
                 "class": Label(label),
                 "label_idx": Label(label),
                 "label_name": Label(f"class_{label}"),
@@ -74,7 +75,7 @@ def test_full_train_step_runs_end_to_end() -> None:
         batch_size=4,
         shuffle=True,
         num_workers=0,
-        collate_fn=classification_collate_fn,
+        collate_fn=typed_collate,
     )
     # resnet18 is small and runs in a few hundred ms; use 64x64 input so
     # this whole test stays under one second wall-clock.
@@ -116,10 +117,10 @@ def test_metadata_per_sample_survives_collation() -> None:
         fake_ds,  # type: ignore[arg-type]
         batch_size=4,
         num_workers=0,
-        collate_fn=classification_collate_fn,
+        collate_fn=typed_collate,
     )
     batch = next(iter(loader))
-    metas = batch["metadata"]
+    metas = _batch_metadata(batch)
     assert isinstance(metas, list)
     assert len(metas) == 4
     for m in metas:

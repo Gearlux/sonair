@@ -1,7 +1,7 @@
 [project]
 name = "sonair"
 version = "0.1.0"
-description = "Image-classification models and adapters for the Marainer training framework."
+description = "Image-classification models and a standard-Lightning classifier (timm-backed)."
 authors = [{name = "Taidal"}]
 license = {text = "MIT"}
 dependencies = [

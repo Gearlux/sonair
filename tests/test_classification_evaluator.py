@@ -25,8 +25,12 @@ def _ts(inp: Any, tgt: Any, **meta: Any) -> Sample:
 
 
 def _stack_collate(batch: list) -> Sample:
-    """A typed-bag DataLoader collate that stacks raw feature/target tensors (replaces the
-    legacy marainer.torch.collate_fn_with_metadata, which read the removed Sample triple)."""
+    """A test-only collate that stacks raw feature/target tensors.
+
+    These synthetic evaluator tests carry 1-D feature vectors as BARE-tensor ``input`` fields, which
+    ``sampleflux.typed_collate`` cannot collate (it only handles item-typed payloads —
+    Image/Label/Mask/Regions). Real image samples ARE item-typed and use ``typed_collate`` (the default
+    loader collate); this shim only bridges the non-image synthetic fixtures."""
     from sampleflux import Label, item_data, primary
 
     xs = torch.stack([torch.as_tensor(item_data(primary(s, "input")[1])) for s in batch])
@@ -110,11 +114,11 @@ def test_test_metrics_have_test_prefix() -> None:
     assert all(str(k).startswith("test/") for k in keys), f"Expected test/ prefix, got: {keys}"
 
 
-def test_loader_uses_classification_collate_by_default() -> None:
-    from sonair.classification import classification_collate_fn
+def test_loader_uses_typed_collate_by_default() -> None:
+    from sampleflux import typed_collate
 
     ev = _make_evaluator(model=_TinyClassifier(), dataset=_make_flux())
-    assert ev.test_loader.kwargs["collate_fn"] == classification_collate_fn
+    assert ev.test_loader.kwargs["collate_fn"] == typed_collate
 
 
 def test_run_executes_test_loop(tmp_path: Any) -> None:

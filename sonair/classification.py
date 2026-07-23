@@ -1,11 +1,11 @@
 """Image-classification adapters for Marainer.
 
-Classification is the simplest fit for the base Trainer: a classifier takes
-``[N, 3, H, W]`` images and emits ``[N, C]`` logits, and the loss / metric
-pair both consume ``(logits, target_class_ids)`` directly. No bundled batch
-type, no step-output dict, no per-mode forward divergence — the Trainer's
-standard ``preds = self(batch.input)`` /
-``loss = self.loss_fn(preds, batch.target)`` flow works unchanged.
+Classification is the simplest fit for the classifier: it takes ``[N, 3, H, W]``
+images and emits ``[N, C]`` logits, and the loss / metric pair both consume
+``(logits, target_class_ids)`` directly. No step-output dict, no per-mode forward
+divergence — the classifier recovers the input tensor + target tensor from the
+batched :class:`~sampleflux.TypedSample` (via ``_batch_input`` / ``_batch_target``)
+and its standard ``preds = self(x)`` / ``loss = self.loss_fn(preds, y)`` flow runs.
 
 Loss: the default classification loss is :class:`torch.nn.CrossEntropyLoss`
 (raw logits ``[N, C]`` + int64 targets ``[N]``). A family of off-the-shelf
@@ -29,15 +29,17 @@ loss reimplementation. Like the multi-label family (``BCEWithLogitsLoss`` /
 logits (e.g. one-hot ``[N, C]``), not int64 class ids.
 
 Collate: :func:`classification_collate_fn` is the default DataLoader collate the
-sonair trainer / evaluator wire in. Unlike the generic
-:func:`marainer.collate.collate_fn_with_metadata` (which *requires* tensor
-inputs and raises on a PIL image), it **forces each input to an image-like float
-tensor** — PIL / ndarray → ``[3, H, W]`` (grayscale expanded to 3 channels, the
-``TimmModel`` ``in_channels=3``), scaled to ``[0, 1]`` — then stacks to
-``[N, 3, H, W]``, stacks the scalar class ids to ``[N]`` int64, and preserves
-per-sample metadata as a list (so string-valued fields such as ``pack_id`` /
-``iq_file`` survive collation). **No resize**: every image in a batch must already
-share spatial dims — resize (or a model-keyed transform) is a deliberate follow-up.
+sonair classifier wires in. It consumes the typed-bag :class:`~sampleflux.TypedSample`
+that :class:`~sampleflux.sources.HuggingFaceSource` now yields — reading the primary
+``input`` item payload and the primary ``target`` :class:`~sampleflux.Label`. It
+**forces each input to an image-like float tensor** — ndarray / tensor → ``[3, H, W]``
+(grayscale expanded to 3 channels, the ``TimmModel`` ``in_channels=3``), scaled to
+``[0, 1]`` — then stacks to ``[N, 3, H, W]``, stacks the scalar class ids to ``[N]``
+int64, and preserves per-sample metadata (the non-primary fields, e.g. ``pack_id`` /
+``iq_file``) as a list under a ``"metadata"`` field so string-valued fields survive.
+The batched carrier stays a valid :class:`~sampleflux.TypedSample`. **No resize**:
+every image in a batch must already share spatial dims — resize (or a model-keyed
+transform) is a deliberate follow-up.
 
 Metrics: the useful ``torchmetrics.classification`` multiclass metrics
 (:class:`~torchmetrics.classification.MulticlassAccuracy`,
@@ -65,7 +67,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from confluid import configurable, register
-from sampleflux.sample import Sample
+from sampleflux import Image, Label, TypedSample, item_data, primary
 from torch import Tensor
 from torch.nn import (
     BCELoss,
@@ -233,7 +235,7 @@ def _as_image_tensor(value: Any) -> Tensor:
 
 
 def _as_target_tensor(value: Any) -> Tensor:
-    """Coerce a single ``Sample.target`` into a 0-D ``int64`` class-id tensor."""
+    """Coerce a single class-id target into a 0-D ``int64`` class-id tensor."""
     t = value if isinstance(value, Tensor) else torch.as_tensor(value)
     if t.dtype != torch.int64:
         t = t.long()
@@ -242,17 +244,49 @@ def _as_target_tensor(value: Any) -> Tensor:
     return t
 
 
-def classification_collate_fn(batch: List[Sample]) -> Sample:
-    """Collate classification :class:`~sampleflux.sample.Sample`\\ s into one batched, Trainer-ready Sample.
+def _label_value(item: Any) -> Any:
+    """The payload of a target field: a :class:`~sampleflux.Label`'s ``.value``, else the item verbatim.
 
-    The default DataLoader collate the sonair trainer / evaluator wire in. Per sample it **forces**
-    the input to an image-like ``[3, H, W]`` float tensor (PIL / ndarray / tensor → :func:`_as_image_tensor`)
-    and the target to a 0-D ``int64`` class id, then stacks:
+    (``item_data`` returns a :class:`~sampleflux.Label` unchanged — it has no ``data`` payload slot — so
+    the class id must be read off ``.value``; a raw-value target field is used as-is.)
+    """
+    return item.value if isinstance(item, Label) else item_data(item)
 
-    * ``.input`` → ``[N, 3, H, W]`` float;
-    * ``.target`` → ``[N]`` int64;
-    * ``.metadata`` → ``list`` of the per-sample metadata dicts (so string-valued fields survive — the
-      default torch collate would crash on them).
+
+def _sample_metadata(sample: TypedSample) -> Dict[str, Any]:
+    """Gather a :class:`~sampleflux.TypedSample`'s NON-primary fields into a plain metadata dict.
+
+    The typed bag has no free-form metadata dict — auxiliary features (``pack_id`` / ``iq_file`` / label
+    names …) ride as their own fields. This collects every field that is not the primary input or the
+    primary target into ``{name: value}`` (a :class:`~sampleflux.Label`'s ``.value``, else the item
+    payload) so string-valued fields survive collation and predictions sinks can correlate outputs.
+    """
+    input_key, _ = primary(sample, "input")
+    try:
+        target_key, _ = primary(sample, "target")
+    except KeyError:
+        target_key = None
+    return {key: _label_value(item) for key, item in sample.items() if key not in (input_key, target_key)}
+
+
+def classification_collate_fn(batch: List[TypedSample]) -> TypedSample:
+    """Collate classification :class:`~sampleflux.TypedSample`\\ s into one batched, Trainer-ready bag.
+
+    The default DataLoader collate the sonair classifier wires in. Per sample it reads the primary
+    ``input`` item's payload (``item_data(primary(s, "input"))``) and **forces** it to an image-like
+    ``[3, H, W]`` float tensor (ndarray / tensor → :func:`_as_image_tensor`), and reads the primary
+    ``target`` :class:`~sampleflux.Label`'s ``.value`` as a 0-D ``int64`` class id, then stacks into ONE
+    batched :class:`~sampleflux.TypedSample`:
+
+    * field ``"image"`` — an :class:`~sampleflux.Image` (``layout="CHW"``) over the stacked
+      ``[N, 3, H, W]`` float payload. An :class:`~sampleflux.Image` cannot hold a live ``torch.Tensor``
+      (``NDArrayItem.__new__`` runs ``np.asarray``), so the payload lands as an ndarray and the model
+      boundary (:func:`sonair.classifier._batch_input`) converts it back with a cheap, memory-sharing
+      ``torch.as_tensor``;
+    * field ``"class"`` (role ``target``) — a :class:`~sampleflux.Label` whose ``.value`` is the stacked
+      ``[N]`` int64 tensor (a dataclass wrapper DOES keep a live tensor, so no round-trip there);
+    * field ``"metadata"`` (role ``aux``) — a ``list`` of the per-sample metadata dicts
+      (:func:`_sample_metadata`, the non-primary fields) so string-valued fields survive.
 
     **No resize** — all per-sample images must already share spatial dims (``torch.stack`` requires it);
     resize / a model-keyed transform is a deliberate follow-up.
@@ -263,9 +297,11 @@ def classification_collate_fn(batch: List[Sample]) -> Sample:
     targets: List[Tensor] = []
     metas: List[Dict[str, Any]] = []
     for s in batch:
-        inputs.append(_as_image_tensor(s.input))
-        targets.append(_as_target_tensor(s.target))
-        metas.append(s.meta)  # per-sample dict (the batched output below carries the list)
+        _, image_item = primary(s, "input")
+        inputs.append(_as_image_tensor(item_data(image_item)))
+        _, label_item = primary(s, "target")
+        targets.append(_as_target_tensor(_label_value(label_item)))
+        metas.append(_sample_metadata(s))
     try:
         batched_input = torch.stack(inputs)
     except RuntimeError as exc:  # mismatched spatial dims — resize isn't wired yet
@@ -274,7 +310,14 @@ def classification_collate_fn(batch: List[Sample]) -> Sample:
             f"classification_collate_fn: cannot stack inputs with differing shapes {shapes} — every image "
             "in a batch must share spatial dims (resize upstream; per-batch resize is not wired yet)."
         ) from exc
-    return Sample(input=batched_input, target=torch.stack(targets), metadata=metas)
+    return TypedSample(
+        {
+            "image": Image(batched_input, layout="CHW"),
+            "class": Label(value=torch.stack(targets)),
+            "metadata": metas,
+        },
+        roles={"class": "target", "metadata": "aux"},
+    )
 
 
 # Every registered loss / metric is named in ``__all__`` so FluxStudio's ``__all__``-gated discovery

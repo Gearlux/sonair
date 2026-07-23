@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 from confluid import LazyClass
-from sampleflux import Flux
+from sampleflux import Flux, Image, Label, TypedSample
 from sampleflux.sample import Sample
 from torchmetrics import MetricCollection
 
@@ -26,11 +26,15 @@ class _TinyClassifier(nn.Module):
         return self.fc(x)  # type: ignore[no-any-return]
 
 
-def _make_batch(n: int = 8, num_classes: int = 3, input_size: int = 4) -> Sample:
-    return Sample(
-        input=torch.randn(n, input_size),
-        target=torch.randint(0, num_classes, (n,)),
-        metadata=[{"idx": i} for i in range(n)],
+def _make_batch(n: int = 8, num_classes: int = 3, input_size: int = 4) -> TypedSample:
+    # A batched TypedSample shaped like classification_collate_fn output: the primary input Image holds
+    # the (pre-batched) feature tensor as an ndarray (an Image can't hold a live tensor), the target
+    # Label holds the [N] int64 tensor, and per-sample metadata rides a "metadata" field.
+    x = torch.randn(n, input_size)
+    y = torch.randint(0, num_classes, (n,))
+    return TypedSample(
+        {"image": Image(x.numpy(), layout="CHW"), "class": Label(value=y), "metadata": [{"idx": i} for i in range(n)]},
+        roles={"class": "target", "metadata": "aux"},
     )
 
 

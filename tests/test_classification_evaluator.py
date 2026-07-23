@@ -95,11 +95,18 @@ def test_loader_uses_classification_collate_by_default() -> None:
 
 
 def test_run_executes_test_loop(tmp_path: Any) -> None:
+    from marainer.torch import collate_fn_with_metadata
+    from torch.utils.data import DataLoader
+
     class _FlattenTinyClassifier(_TinyClassifier):
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             return super().forward(x.view(x.size(0), -1))
 
     ev = _make_evaluator(model=_FlattenTinyClassifier(input_size=3 * 8 * 8), dataset=_make_flux())
+    # _make_flux yields legacy Samples (the eval initialize() target-walk is legacy-only in this
+    # migration stage), so collate them with the legacy marainer collate; the classifier's step
+    # functions read the legacy Sample batch through the same _batch_input / _batch_target accessors.
+    ev.test_loader = Class(DataLoader, batch_size=8, collate_fn=collate_fn_with_metadata)
     ev.lightning = Class(
         L.Trainer,
         max_epochs=1,

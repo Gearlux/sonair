@@ -1,23 +1,27 @@
 """End-to-end smoke test: TimmModel + torch.nn.CrossEntropyLoss +
-collate_fn_with_metadata + a fake dataset threaded through one full
+classification_collate_fn + a fake TypedSample dataset threaded through one full
 forward+backward step.
 
 This proves the wiring contract that the YAML configs in
 ``waivefront/config/`` exercise — the actual RFUAV training flow
-just adds the HF Hub fetch in front. Useful as a CI gate so the
-classification path stays green even when HuggingFace's CDN is rate-limited
-or unreachable.
+just adds the HF Hub fetch in front. The fake dataset yields the typed-bag
+``TypedSample`` that ``HuggingFaceSource`` now produces (an ``Image`` input +
+``Label`` target + aux ``Label`` metadata fields), and the batch is read back
+through the same ``_batch_input`` / ``_batch_target`` accessors the classifier uses.
+Useful as a CI gate so the classification path stays green even when
+HuggingFace's CDN is rate-limited or unreachable.
 """
 
 from typing import Any, Dict, List
 
+import numpy as np
 import torch
 import torch.nn as nn
-from marainer.torch import collate_fn_with_metadata
-from PIL import Image
-from sampleflux.sample import Sample
+from sampleflux import Image, Label, TypedSample
 from torch.utils.data import DataLoader
 
+from sonair.classification import classification_collate_fn
+from sonair.classifier import _batch_input, _batch_target
 from sonair.timm_classifier import TimmModel
 
 
@@ -27,48 +31,40 @@ class _FakeFeature:
 
 
 class _FakeHFDataset:
-    """Fake HF dataset that returns sampleflux Samples (same interface as HuggingFaceSource)."""
+    """Fake HF dataset that returns typed-bag TypedSamples (same interface as HuggingFaceSource)."""
 
     def __init__(self, n_per_class: int = 4, n_classes: int = 3, image_size: int = 64) -> None:
         self._items: List[Dict[str, Any]] = []
         self.image_size = image_size
         for cls_id in range(n_classes):
             for _ in range(n_per_class):
-                # Each class gets a distinct base color so the model has
-                # some signal to learn (not strictly necessary for a smoke
-                # test, but makes the loss meaningful).
+                # Each class gets a distinct base color so the model has some signal to learn.
                 color = ((cls_id * 80) % 255, (cls_id * 50) % 255, (cls_id * 30) % 255)
-                self._items.append(
-                    {
-                        "image": Image.new("RGB", (image_size, image_size), color=color),
-                        "label": cls_id,
-                    }
-                )
+                image = np.zeros((image_size, image_size, 3), dtype=np.uint8)
+                image[:, :] = color
+                self._items.append({"image": image, "label": cls_id})
         self.features = {"label": _FakeFeature([f"class_{i}" for i in range(n_classes)])}
 
     def __len__(self) -> int:
         return len(self._items)
 
-    def __getitem__(self, idx: int) -> Sample:
+    def __getitem__(self, idx: int) -> TypedSample:
         item = self._items[idx]
-        image = item["image"].resize((self.image_size, self.image_size))
-        # Convert PIL image to [3, H, W] float32 tensor in [0, 1]
-        img_array = torch.tensor(list(image.getdata()), dtype=torch.float32) / 255.0
-        img_tensor = img_array.view(self.image_size, self.image_size, 3).permute(2, 0, 1)
-
-        return Sample(
-            input=img_tensor,
-            target=torch.tensor(item["label"], dtype=torch.int64),
-            metadata={
-                "label_idx": item["label"],
-                "label_name": f"class_{item['label']}",
+        label = item["label"]
+        # HWC uint8 image (Image), int-id target (Label), plus aux Label metadata fields.
+        return TypedSample(
+            {
+                "image": Image(item["image"]),
+                "class": Label(label),
+                "label_idx": Label(label),
+                "label_name": Label(f"class_{label}"),
             },
+            roles={"class": "target", "label_idx": "aux", "label_name": "aux"},
         )
 
 
 def test_full_train_step_runs_end_to_end() -> None:
-    """One full training iteration: dataset → loader → model → loss → backward."""
-    # Use the fake dataset directly — HuggingFaceSource would wrap it similarly.
+    """One full training iteration: dataset → loader → typed collate → model → loss → backward."""
     fake_ds = _FakeHFDataset(n_per_class=4, n_classes=3, image_size=64)
 
     # sampleflux sources are map-style (len + getitem) but not torch Dataset
@@ -78,7 +74,7 @@ def test_full_train_step_runs_end_to_end() -> None:
         batch_size=4,
         shuffle=True,
         num_workers=0,
-        collate_fn=collate_fn_with_metadata,
+        collate_fn=classification_collate_fn,
     )
     # resnet18 is small and runs in a few hundred ms; use 64x64 input so
     # this whole test stays under one second wall-clock.
@@ -94,14 +90,15 @@ def test_full_train_step_runs_end_to_end() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
     batch = next(iter(loader))
-    assert batch.input.shape == (4, 3, 64, 64)
-    assert batch.target.shape == (4,)
-    assert batch.target.dtype == torch.int64
+    x, y = _batch_input(batch), _batch_target(batch)
+    assert x.shape == (4, 3, 64, 64)
+    assert y.shape == (4,)
+    assert y.dtype == torch.int64
 
-    logits = model(batch.input)
+    logits = model(x)
     assert logits.shape == (4, 3)
 
-    loss = loss_fn(logits, batch.target)
+    loss = loss_fn(logits, y)
     assert loss.dim() == 0
     assert torch.isfinite(loss)
 
@@ -113,16 +110,16 @@ def test_full_train_step_runs_end_to_end() -> None:
 
 
 def test_metadata_per_sample_survives_collation() -> None:
-    """Per-sample metadata must round-trip through collate."""
+    """Per-sample metadata must round-trip through the typed collate as a list of dicts."""
     fake_ds = _FakeHFDataset(n_per_class=2, n_classes=3, image_size=32)
     loader: DataLoader = DataLoader(
         fake_ds,  # type: ignore[arg-type]
         batch_size=4,
         num_workers=0,
-        collate_fn=collate_fn_with_metadata,
+        collate_fn=classification_collate_fn,
     )
     batch = next(iter(loader))
-    metas = batch.metadata
+    metas = batch["metadata"]
     assert isinstance(metas, list)
     assert len(metas) == 4
     for m in metas:

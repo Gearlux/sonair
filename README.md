@@ -10,8 +10,9 @@ ONE standard `pytorch_lightning.LightningModule` with its own
 `training_step` / `validation_step` / `test_step` / `predict_step` /
 `configure_optimizers`, and a `run()` that dispatches on a `task` knob
 (`fit` / `evaluate` / `test` / `predict`). Its standard
-`preds = self(batch.input); loss = self.loss_fn(preds, batch.target)` flow
-fits classification natively. Marainer is now used only for OPTIONAL experiment
+`preds = self(self._batch_input(batch)); loss = self.loss_fn(preds, self._batch_target(batch))`
+flow — reading the primary input and target-`Label` fields off the batched typed
+`Sample` — fits classification natively. Marainer is now used only for OPTIONAL experiment
 tracking plus a couple of torch utilities.
 
 The first-class model is **TimmModel**, a generic wrapper that

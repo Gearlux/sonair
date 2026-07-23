@@ -1,20 +1,29 @@
-"""Tests for sonair.classification.classification_collate_fn (typed-bag image-coercing collate)."""
+"""Tests for the classifier's use of the generic :func:`sampleflux.typed_collate`.
+
+Sonair no longer ships a bespoke classification collate: the config pipeline tensorizes the input
+(``ConvertToImageOp`` → ``ToTensorOp``) so each ``Sample``'s primary ``input`` is already a
+``[3, H, W]`` :class:`~sampleflux.Image` at collate time. ``sampleflux.typed_collate`` stacks it and
+the model boundary (``sonair.classifier._batch_input`` / ``_batch_target`` / ``_batch_metadata``)
+recovers the batched input tensor, stacks the ``Label`` target's per-sample list into an ``[N]`` int64
+tensor, and transposes the aux fields into a per-sample metadata list.
+"""
 
 import numpy as np
 import pytest
 import torch
-from sampleflux import Image, Label, Sample, item_data, primary
+from sampleflux import Image, Label, Sample, item_data, primary, typed_collate
 
-from sonair.classification import classification_collate_fn
-from sonair.classifier import _batch_input, _batch_target
+from sonair.classifier import _batch_input, _batch_metadata, _batch_target
 
 
-def _sample(input_value: object, target: object, **meta: object) -> Sample:
-    """A per-sample Sample shaped like HuggingFaceSource output: Image input + Label target + aux."""
-    fields: dict = {
-        "image": Image(np.asarray(input_value)) if not isinstance(input_value, torch.Tensor) else input_value
-    }
-    fields["class"] = Label(target)
+def _chw(size: int = 8) -> np.ndarray:
+    """A tensorized ``[3, H, W]`` float image (as the pipeline yields before collate)."""
+    return np.random.rand(3, size, size).astype("float32")
+
+
+def _sample(image: np.ndarray, target: int, **meta: object) -> Sample:
+    """A per-sample Sample shaped like the post-pipeline HuggingFaceSource output."""
+    fields: dict = {"image": Image(image, layout="CHW"), "class": Label(target)}
     roles: dict = {"class": "target"}
     for key, value in meta.items():
         fields[key] = Label(value)
@@ -22,64 +31,62 @@ def _sample(input_value: object, target: object, **meta: object) -> Sample:
     return Sample(fields, roles)
 
 
-def _gray(size: int = 8) -> np.ndarray:
-    return (np.random.rand(size, size).astype("float32") * 255).astype("uint8")
-
-
-def _rgb(size: int = 8) -> np.ndarray:
-    return (np.random.rand(size, size, 3) * 255).astype("uint8")
-
-
-def test_grayscale_becomes_3channel_float_batch() -> None:
-    batch = [_sample(_gray(), i % 3, i=i) for i in range(4)]
-    out = classification_collate_fn(batch)
-    assert isinstance(out, Sample)
-    x = _batch_input(out)
-    assert x.shape == (4, 3, 8, 8)  # grayscale expanded to 3 channels
+def test_typed_collate_stacks_tensorized_inputs() -> None:
+    batch = typed_collate([_sample(_chw(), i % 3, i=i) for i in range(4)])
+    assert isinstance(batch, Sample)
+    x = _batch_input(batch)
+    assert x.shape == (4, 3, 8, 8)
     assert x.dtype == torch.float32
-    assert 0.0 <= float(x.min()) and float(x.max()) <= 1.0  # scaled to [0,1]
 
 
-def test_rgb_batch() -> None:
-    batch = [_sample(_rgb(), 1) for _ in range(3)]
-    out = classification_collate_fn(batch)
-    assert _batch_input(out).shape == (3, 3, 8, 8)
-
-
-def test_raw_tensor_input_field_passes_through() -> None:
-    # A field holding a raw CHW tensor (not wrapped in an Image item) is used verbatim.
-    batch = [_sample(torch.rand(3, 8, 8), i) for i in range(2)]
-    out = classification_collate_fn(batch)
-    assert _batch_input(out).shape == (2, 3, 8, 8)
-
-
-def test_targets_stacked_int64_and_metadata_list() -> None:
-    batch = [_sample(_rgb(), i % 3, idx=i, name=f"s{i}") for i in range(4)]
-    out = classification_collate_fn(batch)
-    y = _batch_target(out)
+def test_target_label_list_stacked_to_int64() -> None:
+    batch = typed_collate([_sample(_chw(), i % 3) for i in range(4)])
+    # typed_collate leaves the Label target's value as a per-sample list; the boundary stacks it.
+    assert isinstance(primary(batch, "target")[1].value, list)
+    y = _batch_target(batch)
     assert y.shape == (4,) and y.dtype == torch.int64
-    metas = out["metadata"]
+
+
+def test_metadata_preserved_via_batch_metadata() -> None:
+    batch = typed_collate([_sample(_chw(), i % 3, idx=i, name=f"s{i}") for i in range(4)])
+    metas = _batch_metadata(batch)
     assert isinstance(metas, list) and len(metas) == 4
     assert metas[2]["name"] == "s2"  # string metadata preserved
+    assert metas[2]["idx"] == 2
 
 
 def test_input_field_is_image_target_is_label() -> None:
-    out = classification_collate_fn([_sample(_rgb(), 0) for _ in range(2)])
-    _, image_item = primary(out, "input")
-    _, label_item = primary(out, "target")
-    assert isinstance(image_item, Image) and image_item.layout == "CHW"
+    batch = typed_collate([_sample(_chw(), 0) for _ in range(2)])
+    _, image_item = primary(batch, "input")
+    _, label_item = primary(batch, "target")
+    assert isinstance(image_item, Image)
     # Image cannot hold a live tensor — its payload is an ndarray recovered at the model boundary.
     assert isinstance(item_data(image_item), np.ndarray)
-    assert isinstance(label_item, Label) and isinstance(label_item.value, torch.Tensor)
+    assert isinstance(label_item, Label) and isinstance(label_item.value, list)
 
 
-def test_empty_batch_raises() -> None:
+def test_batch_target_uses_prestacked_tensor_verbatim() -> None:
+    """A hand-built batch whose Label target already holds an ``[N]`` tensor is used as-is."""
+    batch = Sample(
+        {"image": Image(np.zeros((2, 3, 4, 4), dtype="float32"), layout="CHW"), "class": Label(torch.tensor([5, 7]))},
+        roles={"class": "target"},
+    )
+    y = _batch_target(batch)
+    assert y.tolist() == [5, 7]
+
+
+def test_batch_metadata_reads_legacy_metadata_field() -> None:
+    batch = Sample(
+        {
+            "image": Image(np.zeros((2, 3, 4, 4), dtype="float32"), layout="CHW"),
+            "class": Label(torch.tensor([0, 1])),
+            "metadata": [{"idx": 0}, {"idx": 1}],
+        },
+        roles={"class": "target", "metadata": "aux"},
+    )
+    assert _batch_metadata(batch) == [{"idx": 0}, {"idx": 1}]
+
+
+def test_typed_collate_rejects_empty_batch() -> None:
     with pytest.raises(ValueError):
-        classification_collate_fn([])
-
-
-def test_mismatched_spatial_dims_raise() -> None:
-    # No resize wired — differing image sizes can't be stacked.
-    batch = [_sample(_rgb(size=8), 0), _sample(_rgb(size=16), 1)]
-    with pytest.raises(ValueError):
-        classification_collate_fn(batch)
+        typed_collate([])

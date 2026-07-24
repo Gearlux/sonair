@@ -1,11 +1,11 @@
-"""timm-backed image-classification wrapper for the Marainer Trainer flow.
+"""timm-backed image-classification wrapper.
 
 Wraps :func:`timm.create_model` into a plain :class:`torch.nn.Module` whose
-``forward(images) -> logits`` signature plugs straight into the **unchanged**
-base :class:`marainer.trainer.LightningTrainer`. Marainer already calls
+``forward(images) -> logits`` signature plugs straight into
+:class:`sonair.classifier.LightningClassifier`, which calls
 ``preds = self(batch.input)`` and ``loss = self.loss_fn(preds, batch.target)``
-— for classification that's all the glue we need. No bundled batch type, no
-step-output dict, no per-mode forward divergence.
+in its ``training_step`` — for classification that's all the glue we need. No
+bundled batch type, no step-output dict, no per-mode forward divergence.
 
 The wrapper exists for three reasons:
 

@@ -77,7 +77,7 @@ typical stages:
 
 1. `RegionsJsonSource` reads per-window annotations.
 2. Waivefront ops render the IQ → spectrogram → image tensor.
-3. For a raw-spectrogram pipeline, `sampleflux.ops.torch.ToTensorOp` tensorizes
+3. For a raw-spectrogram pipeline, `sampleflux.ops.torch.ToTensor` tensorizes
    the image and `sampleflux.ops.target.MetadataToTargetOp` → `EncodeTargetOp`
    turn the metadata label into a scalar int64 class id (the declarative
    scikit-`LabelEncoder` analogue — there is no sonair/waivefront target op).

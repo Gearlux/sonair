@@ -4,7 +4,7 @@ Classification is the simplest fit for the classifier: it takes ``[N, 3, H, W]``
 images and emits ``[N, C]`` logits, and the loss / metric pair both consume
 ``(logits, target_class_ids)`` directly. No step-output dict, no per-mode forward
 divergence — the classifier recovers the input tensor + target tensor from the
-batched :class:`~sampleflux.Sample` (via ``_batch_input`` / ``_batch_target``)
+batched record dict (via ``_batch_input`` / ``_batch_target``)
 and its standard ``preds = self(x)`` / ``loss = self.loss_fn(preds, y)`` flow runs.
 
 Loss: the default classification loss is :class:`torch.nn.CrossEntropyLoss`
@@ -28,14 +28,14 @@ loss reimplementation. Like the multi-label family (``BCEWithLogitsLoss`` /
 ``MultiLabelSoftMarginLoss``) it expects **float** targets the same shape as the
 logits (e.g. one-hot ``[N, C]``), not int64 class ids.
 
-Collate: the sonair classifier wires the generic :func:`sampleflux.typed_collate` as
+Collate: the sonair classifier wires the generic :func:`sampleflux.collate_records` as
 its DataLoader collate — there is no bespoke sonair collate. The config pipeline
 tensorizes the input (``ConvertToImageOp`` → ``ToTensorOp``) so at collate time each
-sample's primary ``input`` is already a ``[3, H, W]`` :class:`~sampleflux.Image`;
-``typed_collate`` stacks it to ``[N, 3, H, W]`` and gathers the non-primary (aux)
-fields as per-sample lists. The classifier's model boundary
+record's input key is already a ``[3, H, W]`` :class:`~sampleflux.Image`;
+``collate_records`` stacks it to ``[N, 3, H, W]`` and gathers the remaining
+keys as per-record lists. The classifier's model boundary
 (:func:`sonair.classifier._batch_input` / ``_batch_target``) unwraps the batched input
-tensor and stacks the ``Label`` target's per-sample list into an ``[N]`` int64 tensor.
+tensor and stacks the ``Label`` target's per-record list into an ``[N]`` int64 tensor.
 
 Metrics: the useful ``torchmetrics.classification`` multiclass metrics
 (:class:`~torchmetrics.classification.MulticlassAccuracy`,
@@ -54,7 +54,7 @@ Typical wiring (YAML)::
       num_classes: 37
 
     train_loader: !class:torch.utils.data.DataLoader
-      collate_fn: !ref:sampleflux.typed_collate
+      collate_fn: !ref:sampleflux.collate_records
 """
 
 from typing import Literal, cast

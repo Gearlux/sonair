@@ -108,21 +108,25 @@ def encode_flux(source: Any, label_map: LabelMap) -> Flux:
     return flux
 
 
-def _batch_input(batch: Record, key: str) -> torch.Tensor:
+def _batch_input(batch: Record, key: str, device: Any = None) -> torch.Tensor:
     """The ``[N, 3, H, W]`` input tensor under ``key`` in a :func:`~sampleflux.collate_records` batch.
 
     The generic record collate stacks an array item's payload (the pipeline already tensorized the
     per-record image via ``ConvertToImage`` → ``ToTensor``) into one ndarray, but leaves a plain
     (non-item) value as a per-record list — both shapes are normalized here with a cheap,
-    memory-sharing ``torch.as_tensor``.
+    memory-sharing ``torch.as_tensor``. ``device`` (the LightningModule's) moves the result onto the
+    accelerator — a tensor built here from a per-record list is created on the CPU regardless of
+    Lightning's own batch move.
     """
     data = item_data(batch[key])
     if isinstance(data, list):
-        return torch.stack([torch.as_tensor(v) for v in data])
-    return data if isinstance(data, torch.Tensor) else torch.as_tensor(np.asarray(data))
+        tensor = torch.stack([torch.as_tensor(v) for v in data])
+    else:
+        tensor = data if isinstance(data, torch.Tensor) else torch.as_tensor(np.asarray(data))
+    return tensor if device is None else tensor.to(device)
 
 
-def _batch_target(batch: Record, key: str) -> torch.Tensor:
+def _batch_target(batch: Record, key: str, device: Any = None) -> torch.Tensor:
     """The ``[N]`` int64 target tensor under ``key`` in a :func:`~sampleflux.collate_records` batch.
 
     The target rides as a :class:`~sampleflux.Label`; the generic record collate does NOT stack a
@@ -132,8 +136,10 @@ def _batch_target(batch: Record, key: str) -> torch.Tensor:
     item = batch[key]
     value = item.value if isinstance(item, Label) else item_data(item)
     if isinstance(value, list):
-        return torch.stack([torch.as_tensor(v) for v in value])
-    return value if isinstance(value, torch.Tensor) else torch.as_tensor(np.asarray(value))
+        tensor = torch.stack([torch.as_tensor(v) for v in value])
+    else:
+        tensor = value if isinstance(value, torch.Tensor) else torch.as_tensor(np.asarray(value))
+    return tensor if device is None else tensor.to(device)
 
 
 def _batch_metadata(batch: Record, input_key: str, target_key: str) -> Optional[List[Dict[str, Any]]]:
@@ -266,7 +272,8 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
 
     # ---- standard Lightning step functions ---------------------------------- #
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        x, y = _batch_input(batch, self.input_key), _batch_target(batch, self.target_key)
+        x = _batch_input(batch, self.input_key, self.device)
+        y = _batch_target(batch, self.target_key, self.device)
         preds = self(x)
         loss: torch.Tensor = self.loss_fn(preds, y)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
@@ -280,7 +287,8 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             self.train_metrics.reset()
 
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        x, y = _batch_input(batch, self.input_key), _batch_target(batch, self.target_key)
+        x = _batch_input(batch, self.input_key, self.device)
+        y = _batch_target(batch, self.target_key, self.device)
         preds = self(x)
         loss: torch.Tensor = self.loss_fn(preds, y)
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
@@ -290,17 +298,17 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         return loss
 
     def test_step(self, batch: Any, batch_idx: int) -> Any:
-        x = _batch_input(batch, self.input_key)
+        x = _batch_input(batch, self.input_key, self.device)
         preds = self(x)
         if isinstance(self.test_metrics, MetricCollection):
-            self.test_metrics.update(preds, _batch_target(batch, self.target_key))
+            self.test_metrics.update(preds, _batch_target(batch, self.target_key, self.device))
             self.log_dict(self.test_metrics, on_step=False, on_epoch=True, batch_size=x.shape[0])
         if self.predictions_sink is not None:
             self._write_predictions(preds, batch)
         return preds
 
     def predict_step(self, batch: Any, batch_idx: int) -> Any:
-        preds = self(_batch_input(batch, self.input_key))
+        preds = self(_batch_input(batch, self.input_key, self.device))
         if self.predictions_sink is not None:
             self._write_predictions(preds, batch)
         return preds

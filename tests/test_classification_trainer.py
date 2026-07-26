@@ -6,42 +6,36 @@ import pytest
 import torch
 import torch.nn as nn
 from confluid import LazyClass
-from sampleflux import Flux, Image, Label, Sample
+from sampleflux import Flux, Image, Label, Record
 from torchmetrics import MetricCollection
 
 from sonair.classifier import LightningClassifier
 
 
-def _ts(inp: Any, tgt: Any, **meta: Any) -> Sample:
-    """Build a typed-bag Sample: raw `input` field, a Label `class` target, aux meta fields."""
-    fields: dict = {"input": inp, "class": Label(tgt)}
-    roles: dict = {"class": "target"}
-    for _k, _v in meta.items():
-        fields[_k] = Label(_v)
-        roles[_k] = "aux"
-    return Sample(fields, roles)
+def _ts(inp: Any, tgt: Any, **meta: Any) -> Record:
+    """Build a record dict: raw tensor under "image", a Label target under "class", plain meta keys."""
+    record: Record = {"image": inp, "class": Label(tgt)}
+    record.update(meta)
+    return record
 
 
-def _stack_collate(batch: list) -> Sample:
+def _stack_collate(batch: list) -> Record:
     """A test-only collate that stacks raw feature/target tensors.
 
     These synthetic trainer tests use a tiny ``nn.Linear`` model over 1-D feature vectors carried as
-    BARE-tensor ``input`` fields, which ``sampleflux.typed_collate`` cannot collate (it only handles
-    item-typed payloads — Image/Label/Mask/Regions). Real image samples ARE item-typed and use
-    ``typed_collate`` (the default loader collate + the ``test_classification`` / smoke tests); this
-    shim only bridges the non-image synthetic fixtures."""
-    from sampleflux import Label, item_data, primary
-
-    xs = torch.stack([torch.as_tensor(item_data(primary(s, "input")[1])) for s in batch])
-    ys = torch.stack([torch.as_tensor(primary(s, "target")[1].value) for s in batch])
-    metas: list = []
-    for s in batch:
-        ik = primary(s, "input")[0]
-        tk = primary(s, "target")[0]
-        metas.append({k: (v.value if isinstance(v, Label) else v) for k, v in s.items() if k not in (ik, tk)})
-    return Sample(
-        {"input": xs, "class": Label(value=ys), "metadata": metas}, roles={"class": "target", "metadata": "aux"}
+    BARE-tensor ``"image"`` values, which ``sampleflux.collate_records`` batches as a per-record LIST
+    (a plain value); this shim pre-stacks them so the steps receive one ``[N, F]`` tensor. Real image
+    records carry item-typed values and use ``collate_records`` (the default loader collate + the
+    ``test_classification`` / smoke tests); this only bridges the non-image synthetic fixtures."""
+    xs = torch.stack([torch.as_tensor(r["image"]) for r in batch])
+    ys = torch.stack(
+        [torch.as_tensor(r["class"].value if isinstance(r["class"], Label) else r["class"]) for r in batch]
     )
+    metas: list = [
+        {k: (v.value if isinstance(v, Label) else v) for k, v in r.items() if k not in ("image", "class")}
+        for r in batch
+    ]
+    return {"image": xs, "class": Label(value=ys), "metadata": metas}
 
 
 # ---------------------------------------------------------------------------
@@ -58,16 +52,17 @@ class _TinyClassifier(nn.Module):
         return self.fc(x)  # type: ignore[no-any-return]
 
 
-def _make_batch(n: int = 8, num_classes: int = 3, input_size: int = 4) -> Sample:
-    # A batched Sample shaped like typed_collate output: the primary input Image holds the
+def _make_batch(n: int = 8, num_classes: int = 3, input_size: int = 4) -> Record:
+    # A batched record shaped like collate_records output: the input Image holds the
     # (pre-batched) feature tensor as an ndarray (an Image can't hold a live tensor), the target
-    # Label holds the [N] int64 tensor, and per-sample metadata rides a "metadata" field.
+    # Label holds the [N] int64 tensor, and per-record metadata rides a "metadata" key.
     x = torch.randn(n, input_size)
     y = torch.randint(0, num_classes, (n,))
-    return Sample(
-        {"image": Image(x.numpy(), layout="CHW"), "class": Label(value=y), "metadata": [{"idx": i} for i in range(n)]},
-        roles={"class": "target", "metadata": "aux"},
-    )
+    return {
+        "image": Image(x.numpy(), layout="CHW"),
+        "class": Label(value=y),
+        "metadata": [{"idx": i} for i in range(n)],
+    }
 
 
 def _make_samples(n: int = 16, num_classes: int = 3, input_size: int = 4) -> Flux:
@@ -208,7 +203,7 @@ class _DimsDataset(torch.utils.data.Dataset):
     def __len__(self) -> int:
         return len(self._s)
 
-    def __getitem__(self, i: int) -> Sample:
+    def __getitem__(self, i: int) -> Record:
         return self._s[i]
 
     def derived_dimensions(self) -> dict:
@@ -264,9 +259,9 @@ def test_omitted_num_classes_derived_and_built_at_run(tmp_path: object) -> None:
     assert sized and all(m.num_classes == 4 for m in sized)
 
 
-def test_default_loader_uses_typed_collate() -> None:
+def test_default_loader_uses_collate_records() -> None:
     from confluid.fluid import Class as ConfluidClass
-    from sampleflux import typed_collate
+    from sampleflux import collate_records
 
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
@@ -275,7 +270,7 @@ def test_default_loader_uses_typed_collate() -> None:
     )
     # The train_loader is a deferred Class stub; check its kwargs contain the collate_fn.
     assert isinstance(trainer.train_loader, ConfluidClass)
-    assert trainer.train_loader.kwargs.get("collate_fn") is typed_collate
+    assert trainer.train_loader.kwargs.get("collate_fn") is collate_records
 
 
 # ---------------------------------------------------------------------------
@@ -496,12 +491,12 @@ def test_string_targets_fit_encode_and_expose_map() -> None:
     # label_names so marainer persists class_names.json.
     from typing import Sized
 
-    from sampleflux import iter_targets
+    from sampleflux import iter_key
 
     train_set = cast(Flux, trainer.train_set)
     assert train_set.label_names == ["bird", "cat", "dog"]  # type: ignore[attr-defined]
     assert len(cast(Sized, train_set))  # touch len for parity with the old index-walk
-    encoded = set(iter_targets(train_set))
+    encoded = set(iter_key(train_set, "class"))
     assert encoded == {0, 1, 2}
     assert all(isinstance(t, int) for t in encoded)
 
@@ -520,11 +515,11 @@ def test_explicit_label_map_drives_encoding_and_num_classes() -> None:
     # num_classes comes from the pinned map (4), not the 3 labels that appear in the data.
     assert trainer.num_classes == 4
     assert trainer.label_map is lm
-    from sampleflux import iter_targets
+    from sampleflux import iter_key
 
     train_set = cast(Flux, trainer.train_set)
-    raw_name = next(iter(iter_targets(_string_samples(["cat", "dog", "bird"]))))
-    assert next(iter(iter_targets(train_set))) == lm.mapping[raw_name]
+    raw_name = next(iter(iter_key(_string_samples(["cat", "dog", "bird"]), "class")))
+    assert next(iter(iter_key(train_set, "class"))) == lm.mapping[raw_name]
 
 
 def test_multilabel_string_targets_raise() -> None:

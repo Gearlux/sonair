@@ -12,7 +12,7 @@ ONE standard `pytorch_lightning.LightningModule` with its own
 (`fit` / `evaluate` / `test` / `predict`). Its standard
 `preds = self(self._batch_input(batch)); loss = self.loss_fn(preds, self._batch_target(batch))`
 flow — reading the primary input and target-`Label` fields off the batched typed
-`Sample` — fits classification natively. Marainer is now used only for OPTIONAL experiment
+record — a plain dict of typed values — fits classification natively. Marainer is now used only for OPTIONAL experiment
 tracking plus a couple of torch utilities.
 
 The first-class model is **TimmModel**, a generic wrapper that
@@ -52,7 +52,7 @@ val_metrics: !class:torchmetrics.classification.MulticlassAccuracy
 train_loader: !lazy:torch.utils.data.DataLoader
   batch_size: 32
   shuffle: true
-  collate_fn: !ref:sampleflux.typed_collate
+  collate_fn: !ref:sampleflux.collate_records
 
 runnable: !class:sonair.LightningClassifier
   task: fit
@@ -190,7 +190,7 @@ Multi-label string targets (a *sequence* of names) are not yet supported and rai
 |--------|---------|
 | `torch.nn.CrossEntropyLoss` | The default classification loss — registered (no sonair wrapper) as `task="classification", role="loss"`; set `label_smoothing` / `ignore_index` / `reduction` from YAML. Consumes int64 class-id targets `[N]`. |
 | `SigmoidFocalLoss` | Thin `nn.Module` wrapper over `torchvision.ops.sigmoid_focal_loss` (a function, which confluid's `register` can't tag) — a pickable `task="classification", role="loss"` configurable with `alpha` / `gamma` / `reduction` knobs. Expects **float** targets the same shape as the logits (e.g. one-hot `[N, C]`), like the `BCEWithLogitsLoss` family. Defaults `reduction="mean"` (a scalar loss), not torchvision's `"none"`. |
-| `sampleflux.typed_collate` | The generic DataLoader collate the classifier wires in (no bespoke sonair collate). Stacks the already-tensorized `[3, H, W]` `Image` input to `[N, 3, H, W]` and keeps aux fields as per-sample lists; the model boundary stacks the `Label` target into an `[N]` int64 tensor. |
+| `sampleflux.collate_records` | The generic DataLoader collate the classifier wires in (no bespoke sonair collate). Stacks the already-tensorized input under `input_key` (default `image`) to `[N, 3, H, W]` and leaves the other keys as per-record lists; the model boundary stacks the `Label` target under `target_key` (default `class`) into an `[N]` int64 tensor. |
 | `load_lightning_checkpoint` | `marainer.torch` helper that strips Lightning's `"model."` prefix when loading a `.ckpt` saved by `sonair.LightningClassifier`. |
 
 Most torchmetrics classification metrics

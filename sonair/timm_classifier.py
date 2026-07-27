@@ -61,7 +61,7 @@ class TimmModel(nn.Module):
     pretrained-weight download) is built on first use by :meth:`solidify` (called by
     :meth:`forward`, by confluid's auto-solidify on ``flow``, or explicitly) and cached
     in ``self.classifier``, so ``TimmModel()`` is cheap and does no network I/O. Tagged
-    ``lazy=True`` so a config wires it ``!lazy:`` and FluxStudio emits a deferred
+    ``lazy=True`` so a config wires it ``!lazy:`` and StreamStudio emits a deferred
     ``LazyClass`` the trainer flows with the derived ``num_classes``. ``model_name`` and
     ``num_classes`` default to the unset sentinels ``""`` / ``0`` and are validated lazily
     when the backbone is built — not in ``__init__``.
@@ -80,7 +80,7 @@ class TimmModel(nn.Module):
             fresh linear layer of this size. **Required to build** — ``0`` (the
             default) means unset. In a marainer training run **omit** it in the
             config: the classification trainer derives the count from the dataset
-            (``sampleflux.num_classes``, which walks the targets) and injects it via
+            (``recordstream.num_classes``, which walks the targets) and injects it via
             ``flow(model, num_classes=…)``. Set it explicitly to override the derived value.
         pretrained: Download timm's pretrained weights for ``model_name`` on
             first build. Defaults to ``True``. Pass ``False`` for offline CI or

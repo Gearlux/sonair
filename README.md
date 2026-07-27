@@ -52,7 +52,7 @@ val_metrics: !class:torchmetrics.classification.MulticlassAccuracy
 train_loader: !lazy:torch.utils.data.DataLoader
   batch_size: 32
   shuffle: true
-  collate_fn: !ref:sampleflux.collate_records
+  collate_fn: !ref:recordstream.collate_records
 
 runnable: !class:sonair.LightningClassifier
   task: fit
@@ -77,11 +77,11 @@ typical stages:
 
 1. `RegionsJsonSource` reads per-window annotations.
 2. Waivefront ops render the IQ → spectrogram → image tensor.
-3. For a raw-spectrogram pipeline, `sampleflux.ops.torch.ToTensor` tensorizes
-   the image and `sampleflux.ops.target.MetadataToTargetOp` → `EncodeTargetOp`
+3. For a raw-spectrogram pipeline, `recordstream.ops.torch.ToTensor` tensorizes
+   the image and `recordstream.ops.target.MetadataToTargetOp` → `EncodeTargetOp`
    turn the metadata label into a scalar int64 class id (the declarative
    scikit-`LabelEncoder` analogue — there is no sonair/waivefront target op).
-   The `sampleflux.sources.HuggingFaceSource` path skips step 3 entirely: HF's
+   The `recordstream.sources.HuggingFaceSource` path skips step 3 entirely: HF's
    `ClassLabel` feature already yields an integer label.
 4. `sonair.TimmModel` consumes the image and
    emits per-image class logits.
@@ -92,12 +92,12 @@ Run:
 ```bash
 sonair train examples/train_efficientvit_b0_mnist.yaml
 # or the generic runner:
-sampleflux run examples/train_efficientvit_b0_mnist.yaml
+recordstream run examples/train_efficientvit_b0_mnist.yaml
 ```
 
 The `sonair evaluate <cfg>` and `sonair predict <cfg>` verbs bind the same
 `LightningClassifier` with `task: evaluate` / `test` / `predict` to measure
-quality on a held-out split or dump per-sample classification JSON — the verb
+quality on a held-out split or dump per-record classification JSON — the verb
 wins over any `task:` set in the config, so one config can serve all three.
 
 ## Models
@@ -124,7 +124,7 @@ declare `trainer`/`evaluator`/`predictor` roles — and `torch.nn.CrossEntropyLo
 is `register`-ed as `role="loss"`), so navigaitor's `list_classes(task=…, role=…)`
 scan + the visual-editor form-spec offer them — and any future classification
 model/loss — as task-scoped options. The dataset is the generic
-`sampleflux.sources.HuggingFaceSource`.
+`recordstream.sources.HuggingFaceSource`.
 
 ## Class count: how `num_classes` is resolved
 
@@ -137,7 +137,7 @@ in this order:
 2. An explicit `num_classes` on the trainer.
 3. A `label_map` (see below).
 4. A `!lazy:` model's pinned `num_classes` kwarg.
-5. **Derived from the data** — `sampleflux.num_classes(train_set)` walks the (integer) targets and
+5. **Derived from the data** — `recordstream.num_classes(train_set)` walks the (integer) targets and
    returns `max(class_id) + 1`.
 
 So the canonical flat config wires the model `!lazy:` *without* `num_classes` and lets the
@@ -146,7 +146,7 @@ dataset drive it:
 ```yaml
 model: !lazy:sonair.TimmModel        # !lazy: so the derived count is injected
   model_name: efficientvit_b0
-train_set: !class:sampleflux.sources.HuggingFaceSource
+train_set: !class:recordstream.sources.HuggingFaceSource
   path: kitofrank/RFUAV
   split: train
 ```
@@ -156,11 +156,11 @@ train_set: !class:sampleflux.sources.HuggingFaceSource
 When the dataset's `target` is a **class-name string** (a generic HF imagefolder, etc.) rather
 than an integer id, `initialize()` auto-encodes it:
 
-- **Encoding** — it fits a `sampleflux.LabelMap` from the train targets (scikit-learn
+- **Encoding** — it fits a `recordstream.LabelMap` from the train targets (scikit-learn
   `LabelEncoder`, shown with a progress bar), or uses a `label_map` you pass in. The wired
   `train`/`val`/`test` sets are wrapped so their targets become ids, and the map's class names are
   persisted to `class_names.json` next to the checkpoint — which a `task: evaluate` / `test` /
-  `predict` run reloads (via `sampleflux.LabelMap.load`) so eval/predict share the identical
+  `predict` run reloads (via `recordstream.LabelMap.load`) so eval/predict share the identical
   name↔id ordering.
 - **Balanced loss** — with `balance_classes: true` (the default), `initialize()` derives
   inverse-frequency class weights from the targets it walked and injects them into the loss (when
@@ -173,11 +173,11 @@ runnable: !class:sonair.LightningClassifier
   run_name: cats_vs_dogs
   balance_classes: true            # inverse-frequency class weights (default)
   # Optionally pin the encoding instead of fitting it:
-  # label_map: !class:sampleflux.LabelMap
+  # label_map: !class:recordstream.LabelMap
   #   mapping: { cat: 0, dog: 1 }
 model: !lazy:sonair.TimmModel
   model_name: efficientvit_b0
-train_set: !class:sampleflux.sources.HuggingFaceSource
+train_set: !class:recordstream.sources.HuggingFaceSource
   path: ./my_imagefolder      # string labels — auto-encoded
   split: train
 ```
@@ -190,7 +190,7 @@ Multi-label string targets (a *sequence* of names) are not yet supported and rai
 |--------|---------|
 | `torch.nn.CrossEntropyLoss` | The default classification loss — registered (no sonair wrapper) as `task="classification", role="loss"`; set `label_smoothing` / `ignore_index` / `reduction` from YAML. Consumes int64 class-id targets `[N]`. |
 | `SigmoidFocalLoss` | Thin `nn.Module` wrapper over `torchvision.ops.sigmoid_focal_loss` (a function, which confluid's `register` can't tag) — a pickable `task="classification", role="loss"` configurable with `alpha` / `gamma` / `reduction` knobs. Expects **float** targets the same shape as the logits (e.g. one-hot `[N, C]`), like the `BCEWithLogitsLoss` family. Defaults `reduction="mean"` (a scalar loss), not torchvision's `"none"`. |
-| `sampleflux.collate_records` | The generic DataLoader collate the classifier wires in (no bespoke sonair collate). Stacks the already-tensorized input under `input_key` (default `image`) to `[N, 3, H, W]` and leaves the other keys as per-record lists; the model boundary stacks the `Label` target under `target_key` (default `class`) into an `[N]` int64 tensor. |
+| `recordstream.collate_records` | The generic DataLoader collate the classifier wires in (no bespoke sonair collate). Stacks the already-tensorized input under `input_key` (default `image`) to `[N, 3, H, W]` and leaves the other keys as per-record lists; the model boundary stacks the `Label` target under `target_key` (default `class`) into an `[N]` int64 tensor. |
 | `load_lightning_checkpoint` | `marainer.torch` helper that strips Lightning's `"model."` prefix when loading a `.ckpt` saved by `sonair.LightningClassifier`. |
 
 Most torchmetrics classification metrics
@@ -211,16 +211,16 @@ Removing marainer would take only a few line changes. Wire stock
 `LightningClassifier` declares three read-only post-run `@output`s directly —
 `trained_model` (the live trained `nn.Module`), `computed_metrics`
 (`Dict[str, float]`), and `label_names` (`List[str]`) — so a run's model, scalar
-metrics, and class names show up as wireable output sockets in FluxStudio's
+metrics, and class names show up as wireable output sockets in StreamStudio's
 Run-node results panel automatically.
 
 ## Dependencies
 
 | Package | Purpose |
 |---------|---------|
-| `marainer` | Optional experiment tracking + torch utilities (`ensure_sample_dataset` / `load_lightning_checkpoint`). |
+| `marainer` | Optional experiment tracking + torch utilities (`ensure_record_dataset` / `load_lightning_checkpoint`). |
 | `confluid` | YAML-driven dependency injection (`@configurable`, `!class:`, `!ref:`). |
-| `sampleflux` | Sample / Flux pipeline plumbing. |
+| `recordstream` | Record / Stream pipeline plumbing. |
 | `loggair` | Structured logging. |
 | `timm` | Underlying timm classification backbones. |
 | `torch`, `torchmetrics`, `pytorch-lightning` | Standard PyTorch stack. |

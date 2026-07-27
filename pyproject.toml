@@ -6,13 +6,13 @@ authors = [{name = "Taidal"}]
 license = {text = "MIT"}
 dependencies = [
     # marainer provides OPTIONAL experiment tracking (git/config/system-metrics/log-file) + a couple
-    # of torch utilities (ensure_sample_dataset / load_lightning_checkpoint). The [lightning] extra
+    # of torch utilities (ensure_record_dataset / load_lightning_checkpoint). The [lightning] extra
     # pulls the pl-side tracking helpers; [mlflow]/[tensorboard] add those tracker backends. sonair's
     # LightningClassifier is a standard pl.LightningModule and trains without marainer (a couple of
     # tracking lines would drop out).
     "marainer[lightning,mlflow,tensorboard]>=0.2.0",
     "confluid>=0.1.0",
-    "sampleflux>=0.1.0",
+    "recordstream>=0.1.0",
     "loggair>=0.1.0",
     "torch",
     "torchmetrics",
@@ -46,7 +46,7 @@ sonair = "sonair.cli:app"
 
 [project.entry-points."confluid.configurables"]
 sonair = "sonair"
-# Scan sonair.classification directly so FluxStudio / navigaitor discovery surfaces the registered
+# Scan sonair.classification directly so StreamStudio / navigaitor discovery surfaces the registered
 # classification losses (torch.nn.*) and metrics (torchmetrics.classification.Multiclass*) — their
 # __module__ is torch / torchmetrics, so they're picked up via that module's __all__-gated pass.
 sonair-classification = "sonair.classification"

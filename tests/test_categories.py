@@ -66,7 +66,7 @@ def test_all_classification_metrics_registered() -> None:
 
 
 def test_all_exports_registered_losses_and_metrics() -> None:
-    """``__all__`` must name every registered loss/metric so FluxStudio's ``__all__``-pass surfaces them.
+    """``__all__`` must name every registered loss/metric so StreamStudio's ``__all__``-pass surfaces them.
 
     Pins the literal ``__all__`` in sync with ``_CLASSIFICATION_LOSSES`` / ``_CLASSIFICATION_METRICS``.
     """

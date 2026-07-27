@@ -1,11 +1,11 @@
 """Every example config must LOAD + FLOW to a runnable — the CI safety net.
 
 CI runs ``python examples/*.py`` (an aisland-scaffolded glob), but sonair ships
-its examples as ``.yaml`` configs for ``sampleflux run``, which the glob never
+its examples as ``.yaml`` configs for ``recordstream run``, which the glob never
 executes. Without this test a stale example (a renamed class, a bad ``!class:``
 path, a wrong ``task:``) would fail only at run time and sail through CI green.
 
-This test mirrors exactly what ``sampleflux run`` does short of training: it
+This test mirrors exactly what ``recordstream run`` does short of training: it
 loads each ``examples/*.yaml``, resolves + flows the object bound under the
 top-level ``runnable:`` key (importing its ``!class:``/``!lazy:`` targets and
 constructing it — cheap, since every configurable is zero-arg / lazy per the

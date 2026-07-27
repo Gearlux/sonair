@@ -1,8 +1,8 @@
-"""Tests for the classifier's use of the generic :func:`sampleflux.collate_records`.
+"""Tests for the classifier's use of the generic :func:`recordstream.collate_records`.
 
 Sonair no longer ships a bespoke classification collate: the config pipeline tensorizes the input
 (``ConvertToImage`` → ``ToTensor``) so each record's ``input_key`` value is already a ``[3, H, W]``
-image at collate time. ``sampleflux.collate_records`` stacks it and the model boundary
+image at collate time. ``recordstream.collate_records`` stacks it and the model boundary
 (``sonair.classifier._batch_input`` / ``_batch_target`` / ``_batch_metadata``) recovers the batched
 input tensor, stacks the ``Label`` target's per-record list into an ``[N]`` int64 tensor, and
 transposes the remaining plain keys into a per-record metadata list.
@@ -11,7 +11,7 @@ transposes the remaining plain keys into a per-record metadata list.
 import numpy as np
 import pytest
 import torch
-from sampleflux import Image, Label, Record, collate_records, item_data
+from recordstream import Image, Label, Record, collate_records, item_data
 
 from sonair.classifier import _batch_input, _batch_metadata, _batch_target
 

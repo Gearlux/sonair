@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 from confluid import LazyClass
-from sampleflux import Flux, Image, Label, Record
+from recordstream import Image, Label, Record, Stream
 from torchmetrics import MetricCollection
 
 from sonair.classifier import LightningClassifier
@@ -23,7 +23,7 @@ def _stack_collate(batch: list) -> Record:
     """A test-only collate that stacks raw feature/target tensors.
 
     These synthetic trainer tests use a tiny ``nn.Linear`` model over 1-D feature vectors carried as
-    BARE-tensor ``"image"`` values, which ``sampleflux.collate_records`` batches as a per-record LIST
+    BARE-tensor ``"image"`` values, which ``recordstream.collate_records`` batches as a per-record LIST
     (a plain value); this shim pre-stacks them so the steps receive one ``[N, F]`` tensor. Real image
     records carry item-typed values and use ``collate_records`` (the default loader collate + the
     ``test_classification`` / smoke tests); this only bridges the non-image synthetic fixtures."""
@@ -65,9 +65,9 @@ def _make_batch(n: int = 8, num_classes: int = 3, input_size: int = 4) -> Record
     }
 
 
-def _make_samples(n: int = 16, num_classes: int = 3, input_size: int = 4) -> Flux:
-    # A Flux (torch Dataset) — the trainer's train_set is typed Dataset[Any].
-    return Flux(source=[_ts(torch.randn(input_size), i % num_classes) for i in range(n)])
+def _make_records(n: int = 16, num_classes: int = 3, input_size: int = 4) -> Stream:
+    # A Stream (torch Dataset) — the trainer's train_set is typed Dataset[Any].
+    return Stream(source=[_ts(torch.randn(input_size), i % num_classes) for i in range(n)])
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,7 @@ def _make_samples(n: int = 16, num_classes: int = 3, input_size: int = 4) -> Flu
 def test_loss_fn_defaults_to_cross_entropy() -> None:
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=_make_samples(16),
+        train_set=_make_records(16),
         num_classes=3,
     )
     assert isinstance(trainer.loss_fn, nn.CrossEntropyLoss)
@@ -87,7 +87,7 @@ def test_loss_fn_defaults_to_cross_entropy() -> None:
 def test_initialize_wires_metrics_with_correct_prefixes() -> None:
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=_make_samples(16),
+        train_set=_make_records(16),
         num_classes=3,
     )
     # Metrics are built in initialize() (not __init__) from the `metrics` dict.
@@ -110,7 +110,7 @@ def test_default_metrics_have_no_top5() -> None:
     # top-5 is no longer auto-added; the default metrics dict is top-1 + macro F1.
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=10),
-        train_set=_make_samples(16, num_classes=10),
+        train_set=_make_records(16, num_classes=10),
         num_classes=10,
     )
     trainer.initialize()
@@ -126,7 +126,7 @@ def test_top5_opt_in_via_metrics_dict() -> None:
 
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=10),
-        train_set=_make_samples(16, num_classes=10),
+        train_set=_make_records(16, num_classes=10),
         num_classes=10,
         metrics={
             "accuracy_top1": LazyClass(MulticlassAccuracy, top_k=1),
@@ -147,7 +147,7 @@ def test_top5_opt_in_via_metrics_dict() -> None:
 def test_training_step_returns_scalar_loss() -> None:
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=_make_samples(16),
+        train_set=_make_records(16),
         num_classes=3,
     )
     batch = _make_batch(n=8, num_classes=3)
@@ -160,7 +160,7 @@ def test_training_step_returns_scalar_loss() -> None:
 def test_validation_step_returns_scalar_loss() -> None:
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=_make_samples(16),
+        train_set=_make_records(16),
         num_classes=3,
     )
     batch = _make_batch(n=8, num_classes=3)
@@ -172,7 +172,7 @@ def test_validation_step_returns_scalar_loss() -> None:
 def test_metrics_update_on_training_step() -> None:
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=_make_samples(16),
+        train_set=_make_records(16),
         num_classes=3,
     )
     trainer.initialize()  # build metrics from the `metrics` dict (no longer eager in __init__)
@@ -194,7 +194,7 @@ def test_metrics_update_on_training_step() -> None:
 
 
 class _DimsDataset(torch.utils.data.Dataset):
-    """Map-style torch Dataset of integer-target samples."""
+    """Map-style torch Dataset of integer-target records."""
 
     def __init__(self, n: int, num_classes: int, input_size: int = 4) -> None:
         self._s = [_ts(torch.randn(input_size), torch.tensor(i % num_classes, dtype=torch.int64)) for i in range(n)]
@@ -216,7 +216,7 @@ def test_omitted_num_classes_leaves_metrics_none_until_run() -> None:
     rather than carrying a deferred Lazy fluid."""
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=4),
-        train_set=_make_samples(16, num_classes=4),
+        train_set=_make_records(16, num_classes=4),
     )
     assert trainer.num_classes is None
     assert trainer.train_metrics is None
@@ -261,11 +261,11 @@ def test_omitted_num_classes_derived_and_built_at_run(tmp_path: object) -> None:
 
 def test_default_loader_uses_collate_records() -> None:
     from confluid.fluid import Class as ConfluidClass
-    from sampleflux import collate_records
+    from recordstream import collate_records
 
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=_make_samples(16),
+        train_set=_make_records(16),
         num_classes=3,
     )
     # The train_loader is a deferred Class stub; check its kwargs contain the collate_fn.
@@ -286,7 +286,7 @@ def test_ergonomic_knobs_reach_loader_and_lightning_stubs() -> None:
     # __init__ (the constructor stays side-effect-free — LazyClass defers construction).
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=_make_samples(16),
+        train_set=_make_records(16),
         num_classes=3,
         batch_size=64,
         num_workers=4,
@@ -306,7 +306,7 @@ def test_persistent_workers_guarded_when_num_workers_zero() -> None:
     # so __init__ derives it as `num_workers != 0`.
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=_make_samples(16),
+        train_set=_make_records(16),
         num_classes=3,
         num_workers=0,
     )
@@ -320,7 +320,7 @@ def test_explicit_loader_override_is_respected() -> None:
     # __init__ bakes the ctor batch_size into the default loader stub...
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=_make_samples(16),
+        train_set=_make_records(16),
         num_classes=3,
         batch_size=8,
     )
@@ -340,7 +340,7 @@ _FLAT_YAML = """
 trainer: !class:sonair.LightningClassifier
   run_name: x
 model: "MODEL_SENTINEL"
-train_set: !class:sampleflux.Flux()
+train_set: !class:recordstream.Stream()
 val_set: "VAL_SENTINEL"
 batch_size: 64
 num_workers: 4
@@ -362,7 +362,7 @@ def test_flat_broadcasting_wires_trainer_attributes_from_top_level_keys() -> Non
     t = flow(t) if isinstance(t, Fluid) else t
 
     assert t.model == "MODEL_SENTINEL"
-    assert isinstance(t.train_set, Flux)  # train_set is typed Dataset[Any] — a real Dataset, not a sentinel
+    assert isinstance(t.train_set, Stream)  # train_set is typed Dataset[Any] — a real Dataset, not a sentinel
     assert t.val_set == "VAL_SENTINEL"
     # max_epochs broadcasts into the stored attribute...
     assert t.max_epochs == 7
@@ -440,7 +440,7 @@ def test_concrete_model_num_classes_is_authoritative() -> None:
     # walking the data would mis-size the metrics against the head.
     trainer = LightningClassifier(
         model=_NCClassifier(num_classes=5),
-        train_set=_make_samples(16, num_classes=3),
+        train_set=_make_records(16, num_classes=3),
         balance_classes=False,
     )
     trainer.initialize()
@@ -455,7 +455,7 @@ def test_concrete_model_num_classes_overrides_mismatched_explicit() -> None:
     # by the model (and a warning is logged).
     trainer = LightningClassifier(
         model=_NCClassifier(num_classes=5),
-        train_set=_make_samples(16, num_classes=3),
+        train_set=_make_records(16, num_classes=3),
         num_classes=9,
         balance_classes=False,
     )
@@ -468,18 +468,18 @@ def test_concrete_model_num_classes_overrides_mismatched_explicit() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _string_samples(names: list[str], n: int = 18, input_size: int = 4) -> Flux:
-    # A Flux (torch Dataset) of string-target samples — the trainer's train_set is Dataset[Any].
-    return Flux(source=[_ts(torch.randn(input_size), names[i % len(names)]) for i in range(n)])
+def _string_records(names: list[str], n: int = 18, input_size: int = 4) -> Stream:
+    # A Stream (torch Dataset) of string-target records — the trainer's train_set is Dataset[Any].
+    return Stream(source=[_ts(torch.randn(input_size), names[i % len(names)]) for i in range(n)])
 
 
 def test_string_targets_fit_encode_and_expose_map() -> None:
-    from sampleflux import LabelMap
+    from recordstream import LabelMap
 
     names = ["dog", "cat", "bird"]  # sklearn sorts -> bird=0, cat=1, dog=2
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),  # no num_classes attr -> nc from the fitted map
-        train_set=_string_samples(names),
+        train_set=_string_records(names),
         balance_classes=False,
     )
     trainer.initialize()
@@ -487,13 +487,13 @@ def test_string_targets_fit_encode_and_expose_map() -> None:
     assert isinstance(trainer.label_map, LabelMap)
     assert trainer.label_map.label_names == ["bird", "cat", "dog"]
     assert trainer.num_classes == 3
-    # The train set is now a Flux whose targets are encoded class-id ints, and it exposes
+    # The train set is now a Stream whose targets are encoded class-id ints, and it exposes
     # label_names so marainer persists class_names.json.
     from typing import Sized
 
-    from sampleflux import iter_key
+    from recordstream import iter_key
 
-    train_set = cast(Flux, trainer.train_set)
+    train_set = cast(Stream, trainer.train_set)
     assert train_set.label_names == ["bird", "cat", "dog"]  # type: ignore[attr-defined]
     assert len(cast(Sized, train_set))  # touch len for parity with the old index-walk
     encoded = set(iter_key(train_set, "class"))
@@ -502,12 +502,12 @@ def test_string_targets_fit_encode_and_expose_map() -> None:
 
 
 def test_explicit_label_map_drives_encoding_and_num_classes() -> None:
-    from sampleflux import LabelMap
+    from recordstream import LabelMap
 
     lm = LabelMap(mapping={"cat": 0, "dog": 1, "bird": 2, "fish": 3})  # 4 classes, pinned
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=4),
-        train_set=_string_samples(["cat", "dog", "bird"]),  # only 3 appear in train
+        train_set=_string_records(["cat", "dog", "bird"]),  # only 3 appear in train
         label_map=lm,
         balance_classes=False,
     )
@@ -515,16 +515,16 @@ def test_explicit_label_map_drives_encoding_and_num_classes() -> None:
     # num_classes comes from the pinned map (4), not the 3 labels that appear in the data.
     assert trainer.num_classes == 4
     assert trainer.label_map is lm
-    from sampleflux import iter_key
+    from recordstream import iter_key
 
-    train_set = cast(Flux, trainer.train_set)
-    raw_name = next(iter(iter_key(_string_samples(["cat", "dog", "bird"]), "class")))
+    train_set = cast(Stream, trainer.train_set)
+    raw_name = next(iter(iter_key(_string_records(["cat", "dog", "bird"]), "class")))
     assert next(iter(iter_key(train_set, "class"))) == lm.mapping[raw_name]
 
 
 def test_multilabel_string_targets_raise() -> None:
-    samples = [_ts(torch.randn(4), ["a", "b"]) for _ in range(8)]
-    trainer = LightningClassifier(model=_TinyClassifier(num_classes=2), train_set=Flux(source=samples))
+    records = [_ts(torch.randn(4), ["a", "b"]) for _ in range(8)]
+    trainer = LightningClassifier(model=_TinyClassifier(num_classes=2), train_set=Stream(source=records))
     with pytest.raises(NotImplementedError):
         trainer.initialize()
 
@@ -536,14 +536,14 @@ def test_multilabel_string_targets_raise() -> None:
 
 def test_balance_classes_injects_class_weights() -> None:
     # Imbalanced: class 0 appears 10x, classes 1/2 appear 3x each.
-    samples = (
+    records = (
         [_ts(torch.randn(4), 0) for _ in range(10)]
         + [_ts(torch.randn(4), 1) for _ in range(3)]
         + [_ts(torch.randn(4), 2) for _ in range(3)]
     )
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=Flux(source=samples),
+        train_set=Stream(source=records),
         num_classes=3,
         balance_classes=True,
     )
@@ -562,7 +562,7 @@ def test_balance_classes_injects_class_weights() -> None:
 def test_balance_classes_false_leaves_loss_unweighted() -> None:
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=_make_samples(16, num_classes=3),
+        train_set=_make_records(16, num_classes=3),
         num_classes=3,
         balance_classes=False,
     )
@@ -576,7 +576,7 @@ def test_balance_skipped_when_loss_not_weight_capable() -> None:
     # and class_weights stays None (a warning is logged via loggair).
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=_make_samples(16, num_classes=3),
+        train_set=_make_records(16, num_classes=3),
         num_classes=3,
         balance_classes=True,
     )
@@ -605,7 +605,7 @@ def test_metrics_accepts_ready_made_collection() -> None:
     coll = MetricCollection({"top1": MulticlassAccuracy(num_classes=3, top_k=1)})
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
-        train_set=_make_samples(16, num_classes=3),
+        train_set=_make_records(16, num_classes=3),
         num_classes=3,
         balance_classes=False,
         metrics=coll,
@@ -626,7 +626,7 @@ def test_declares_trained_model_output() -> None:
     specs = {s["name"]: s for s in output_specs(LightningClassifier)}
     assert "trained_model" in specs
     assert specs["trained_model"]["type"] == "Module"
-    # The marker rides on the getter so FluxStudio / form-spec can read it.
+    # The marker rides on the getter so StreamStudio / form-spec can read it.
     fget = LightningClassifier.__dict__["trained_model"].fget
     assert getattr(fget, "__confluid_output__", False) is True
 
@@ -649,7 +649,7 @@ def test_trained_model_raises_before_run() -> None:
     # A lazy (!lazy:) model stays a deferred Fluid until run() flows it — the output guards this.
     trainer = LightningClassifier(
         model=LazyClass(_TinyClassifier, num_classes=3),
-        train_set=_make_samples(8, num_classes=3),
+        train_set=_make_records(8, num_classes=3),
     )
     with pytest.raises(RuntimeError, match="only available after run"):
         _ = trainer.trained_model
@@ -659,7 +659,7 @@ def test_trained_model_returns_live_model_after_initialize() -> None:
     model = _TinyClassifier(num_classes=3)
     trainer = LightningClassifier(
         model=model,
-        train_set=_make_samples(16, num_classes=3),
+        train_set=_make_records(16, num_classes=3),
         balance_classes=False,
     )
     trainer.initialize()  # flows the model; a concrete model passes through

@@ -1,7 +1,7 @@
 # Minimal flat sonair classification config — MNIST (10-class digit) edition.
 #
 #   sonair train examples/train_efficientvit_b0_mnist.yaml
-#   # (or the generic runner: `sampleflux run examples/train_efficientvit_b0_mnist.yaml`)
+#   # (or the generic runner: `recordstream run examples/train_efficientvit_b0_mnist.yaml`)
 #
 # How it stays this small:
 #  * `sonair.LightningClassifier` (a standard pl.LightningModule) bakes loss
@@ -30,11 +30,11 @@ model: !lazy:sonair.TimmModel
 
 # Data: HuggingFace `mnist`. MNIST exposes `train` and `test` splits (no
 # `validation`), so the held-out split is `test`.
-train_set: !class:sampleflux.sources.HuggingFaceSource
+train_set: !class:recordstream.sources.HuggingFaceSource
   path: "mnist"
   split: train
 
-val_set: !class:sampleflux.sources.HuggingFaceSource
+val_set: !class:recordstream.sources.HuggingFaceSource
   path: "mnist"
   split: test
 

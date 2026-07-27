@@ -8,7 +8,7 @@ import pytorch_lightning as L
 import torch
 import torch.nn as nn
 from confluid import Class
-from sampleflux import Flux, Label, Record
+from recordstream import Label, Record, Stream
 from torchmetrics import MetricCollection
 
 from sonair.classifier import LightningClassifier
@@ -25,7 +25,7 @@ def _stack_collate(batch: list) -> Record:
     """A test-only collate that stacks raw feature/target tensors.
 
     These synthetic evaluator tests carry 1-D feature vectors as BARE-tensor ``"image"`` values, which
-    ``sampleflux.collate_records`` batches as a per-record LIST (a plain value); this shim pre-stacks
+    ``recordstream.collate_records`` batches as a per-record LIST (a plain value); this shim pre-stacks
     them so the steps receive one ``[N, F]`` tensor. Real image records carry item-typed values and use
     ``collate_records`` (the default loader collate); this only bridges the non-image synthetic
     fixtures."""
@@ -71,9 +71,9 @@ class _TinyClassifier(nn.Module):
         return self.fc(x)  # type: ignore[no-any-return]
 
 
-def _make_flux(n: int = 8, num_classes: int = 3, input_size: int = 4) -> Flux:
-    samples = [_ts(torch.randn(3, 8, 8), torch.tensor(i % num_classes, dtype=torch.int64), idx=i) for i in range(n)]
-    return Flux(source=samples)
+def _make_stream(n: int = 8, num_classes: int = 3, input_size: int = 4) -> Stream:
+    records = [_ts(torch.randn(3, 8, 8), torch.tensor(i % num_classes, dtype=torch.int64), idx=i) for i in range(n)]
+    return Stream(source=records)
 
 
 class _RecordingSink:
@@ -96,23 +96,23 @@ def test_declares_computed_metrics_and_label_names_outputs() -> None:
 
 
 def test_test_metrics_are_built_in_initialize() -> None:
-    ev = _make_evaluator(model=_TinyClassifier(num_classes=3), dataset=_make_flux(8))
+    ev = _make_evaluator(model=_TinyClassifier(num_classes=3), dataset=_make_stream(8))
     assert isinstance(ev.metrics, dict)  # the template dict on construction
     ev.initialize()
     assert isinstance(ev.test_metrics, MetricCollection)  # built collection
 
 
 def test_test_metrics_have_test_prefix() -> None:
-    ev = _make_evaluator(model=_TinyClassifier(num_classes=3), dataset=_make_flux(8))
+    ev = _make_evaluator(model=_TinyClassifier(num_classes=3), dataset=_make_stream(8))
     ev.initialize()
     keys = list(ev.test_metrics.keys())
     assert all(str(k).startswith("test/") for k in keys), f"Expected test/ prefix, got: {keys}"
 
 
 def test_loader_uses_collate_records_by_default() -> None:
-    from sampleflux import collate_records
+    from recordstream import collate_records
 
-    ev = _make_evaluator(model=_TinyClassifier(), dataset=_make_flux())
+    ev = _make_evaluator(model=_TinyClassifier(), dataset=_make_stream())
     assert ev.test_loader.kwargs["collate_fn"] == collate_records
 
 
@@ -123,8 +123,8 @@ def test_run_executes_test_loop(tmp_path: Any) -> None:
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             return super().forward(x.view(x.size(0), -1))
 
-    ev = _make_evaluator(model=_FlattenTinyClassifier(input_size=3 * 8 * 8), dataset=_make_flux())
-    # _make_flux yields records with BARE-tensor "image" values, so collate them with the test-only
+    ev = _make_evaluator(model=_FlattenTinyClassifier(input_size=3 * 8 * 8), dataset=_make_stream())
+    # _make_stream yields records with BARE-tensor "image" values, so collate them with the test-only
     # pre-stacking collate; the classifier's step functions read the batch dict through the same
     # _batch_input / _batch_target accessors.
     ev.test_loader = Class(DataLoader, batch_size=8, collate_fn=_stack_collate)
@@ -143,9 +143,9 @@ def test_run_executes_test_loop(tmp_path: Any) -> None:
     assert ev.test_metrics is not None
 
 
-def _string_flux(names: List[str], n: int = 8, input_size: int = 4) -> Flux:
-    samples = [_ts(torch.randn(input_size), names[i % len(names)], idx=i) for i in range(n)]
-    return Flux(source=samples)
+def _string_stream(names: List[str], n: int = 8, input_size: int = 4) -> Stream:
+    records = [_ts(torch.randn(input_size), names[i % len(names)], idx=i) for i in range(n)]
+    return Stream(source=records)
 
 
 def test_string_targets_encoded_via_checkpoint_class_names(tmp_path: Any) -> None:
@@ -155,13 +155,13 @@ def test_string_targets_encoded_via_checkpoint_class_names(tmp_path: Any) -> Non
     model = _TinyClassifier(num_classes=3)
     model.checkpoint_path = str(ckpt_dir / "last.ckpt")  # type: ignore[assignment]
 
-    ev = _make_evaluator(model=model, dataset=_string_flux(["dog", "cat", "bird"]))
+    ev = _make_evaluator(model=model, dataset=_string_stream(["dog", "cat", "bird"]))
     ev.initialize()
     assert ev.num_classes == 3
     assert ev.label_map is not None and ev.label_map.label_names == ["bird", "cat", "dog"]
-    from sampleflux import iter_key
+    from recordstream import iter_key
 
-    dataset = cast(Flux, ev.test_set)
+    dataset = cast(Stream, ev.test_set)
     assert len(cast(Sized, dataset))  # touch len for parity with the old index-walk
     encoded = set(iter_key(dataset, "class"))
     assert encoded == {0, 1, 2}
@@ -169,21 +169,21 @@ def test_string_targets_encoded_via_checkpoint_class_names(tmp_path: Any) -> Non
 
 
 def test_string_targets_encoded_via_explicit_label_map() -> None:
-    from sampleflux import LabelMap
+    from recordstream import LabelMap
 
     lm = LabelMap(mapping={"bird": 0, "cat": 1, "dog": 2})
     ev = _make_evaluator(
-        model=_TinyClassifier(num_classes=3), dataset=_string_flux(["cat", "dog", "bird"]), label_map=lm
+        model=_TinyClassifier(num_classes=3), dataset=_string_stream(["cat", "dog", "bird"]), label_map=lm
     )
     ev.initialize()
     assert ev.label_map is lm
-    from sampleflux import iter_key
+    from recordstream import iter_key
 
-    dataset = cast(Flux, ev.test_set)
+    dataset = cast(Stream, ev.test_set)
     assert next(iter(iter_key(dataset, "class"))) == 1  # "cat" -> 1
 
 
 def test_string_targets_without_any_map_raise() -> None:
-    ev = _make_evaluator(model=_TinyClassifier(num_classes=3), dataset=_string_flux(["a", "b", "c"]))
+    ev = _make_evaluator(model=_TinyClassifier(num_classes=3), dataset=_string_stream(["a", "b", "c"]))
     with pytest.raises(RuntimeError):
         ev.initialize()

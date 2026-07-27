@@ -5,7 +5,7 @@ A self-contained ``pytorch_lightning.LightningModule`` — its own ``training_st
 ``run()`` that builds the loaders + ``pl.Trainer`` and calls ``fit`` / ``test`` / ``predict``
 per the ``task`` knob. It reads like a textbook Lightning example; marainer is used ONLY for
 optional experiment tracking (git / config / params / system metrics / log file) and a couple
-of small utilities (``ensure_sample_dataset``, ``build_metric_collection``). Remove marainer and
+of small utilities (``ensure_record_dataset``, ``build_metric_collection``). Remove marainer and
 this class still trains — you lose the rich tracking, not the training.
 
 Classification specifics it owns: deriving ``num_classes`` (from a concrete model head, an
@@ -18,12 +18,12 @@ Minimal flat YAML (top-level keys wired by Confluid broadcasting)::
       task: fit
       run_name: efficientvit_b0
     model: !lazy:sonair.TimmModel { model_name: efficientvit_b0, pretrained: true }
-    train_set: !class:sampleflux.sources.HuggingFaceSource { path: kitofrank/RFUAV, split: train }
-    val_set: !class:sampleflux.sources.HuggingFaceSource { path: kitofrank/RFUAV, split: validation }
+    train_set: !class:recordstream.sources.HuggingFaceSource { path: kitofrank/RFUAV, split: train }
+    val_set: !class:recordstream.sources.HuggingFaceSource { path: kitofrank/RFUAV, split: validation }
     batch_size: 32
     max_epochs: 20
 
-    sampleflux run train.yaml
+    recordstream run train.yaml
 """
 
 import inspect
@@ -47,11 +47,11 @@ from marainer.lightning import (
     scalar_metrics,
 )
 from marainer.run_names import generate_run_name
-from marainer.torch import ensure_sample_dataset
+from marainer.torch import ensure_record_dataset
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
-from sampleflux import Flux, Label, LabelMap, Record, collate_records, item_data, iter_key
-from sampleflux.runnable import ProgressReporting, TorchRunner, entrypoint
+from recordstream import Label, LabelMap, Record, Stream, collate_records, item_data, iter_key
+from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
@@ -97,19 +97,19 @@ def detect_target_kind(source: Any, target_key: str = "class") -> _TargetKind:
     return "empty"
 
 
-def encode_flux(source: Any, label_map: LabelMap) -> Flux:
-    """Wrap ``source`` in a :class:`~sampleflux.Flux` applying ``label_map``'s encode op.
+def encode_stream(source: Any, label_map: LabelMap) -> Stream:
+    """Wrap ``source`` in a :class:`~recordstream.Stream` applying ``label_map``'s encode op.
 
-    Exposes ``label_names`` on the returned Flux so :meth:`LightningClassifier._write_class_names`
+    Exposes ``label_names`` on the returned Stream so :meth:`LightningClassifier._write_class_names`
     persists ``class_names.json`` (reloaded on the eval/predict path via ``LabelMap.load``).
     """
-    flux = Flux(source=flow(source), ops=[label_map.encode_op()])
-    flux.label_names = label_map.label_names  # type: ignore[attr-defined]
-    return flux
+    stream = Stream(source=flow(source), ops=[label_map.encode_op()])
+    stream.label_names = label_map.label_names  # type: ignore[attr-defined]
+    return stream
 
 
 def _batch_input(batch: Record, key: str, device: Any = None) -> torch.Tensor:
-    """The ``[N, 3, H, W]`` input tensor under ``key`` in a :func:`~sampleflux.collate_records` batch.
+    """The ``[N, 3, H, W]`` input tensor under ``key`` in a :func:`~recordstream.collate_records` batch.
 
     The generic record collate stacks an array item's payload (the pipeline already tensorized the
     per-record image via ``ConvertToImage`` → ``ToTensor``) into one ndarray, but leaves a plain
@@ -127,9 +127,9 @@ def _batch_input(batch: Record, key: str, device: Any = None) -> torch.Tensor:
 
 
 def _batch_target(batch: Record, key: str, device: Any = None) -> torch.Tensor:
-    """The ``[N]`` int64 target tensor under ``key`` in a :func:`~sampleflux.collate_records` batch.
+    """The ``[N]`` int64 target tensor under ``key`` in a :func:`~recordstream.collate_records` batch.
 
-    The target rides as a :class:`~sampleflux.Label`; the generic record collate does NOT stack a
+    The target rides as a :class:`~recordstream.Label`; the generic record collate does NOT stack a
     wrapper item's payload — it leaves ``Label.value`` as a per-record list — so the ``[N]`` tensor is
     stacked here at the model boundary. A pre-stacked tensor value (hand-built batch) is used verbatim.
     """
@@ -143,10 +143,10 @@ def _batch_target(batch: Record, key: str, device: Any = None) -> torch.Tensor:
 
 
 def _batch_metadata(batch: Record, input_key: str, target_key: str) -> Optional[List[Dict[str, Any]]]:
-    """Per-record metadata dicts recovered from a :func:`~sampleflux.collate_records` batch.
+    """Per-record metadata dicts recovered from a :func:`~recordstream.collate_records` batch.
 
     A collated batch carries every key besides the configured input / target as its own per-record
-    list (a :class:`~sampleflux.Label`'s ``.value`` is a list, an array item a stacked payload) —
+    list (a :class:`~recordstream.Label`'s ``.value`` is a list, an array item a stacked payload) —
     transpose them into a list-of-dicts so predictions sinks can correlate outputs to source
     records. A hand-built batch that instead carries a single list-valued ``"metadata"`` key is
     returned verbatim.
@@ -171,8 +171,8 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
     Args:
         model: Classification model emitting ``[N, num_classes]`` logits (wire ``!lazy:`` so
             :meth:`initialize` flows it with the resolved num_classes at run time).
-        train_set: Training dataset / Flux (for ``task="fit"``).
-        test_set: Held-out eval dataset / Flux (for ``task="test"`` / ``"predict"``; also tested
+        train_set: Training dataset / Stream (for ``task="fit"``).
+        test_set: Held-out eval dataset / Stream (for ``task="test"`` / ``"predict"``; also tested
             after ``fit`` when set).
         num_classes: Output class count; omit to resolve from the model or the dataset.
         task: Entry point :meth:`run` dispatches to — ``"fit"`` / ``"evaluate"`` / ``"test"`` / ``"predict"``.
@@ -180,7 +180,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         experiment_name / run_name: tracking identity.
         input_key: Record key carrying the model input image (default ``"image"``).
         target_key: Record key carrying the classification target (default ``"class"``).
-        label_map: Optional pinned name→id :class:`~sampleflux.LabelMap` (fitted from the train set
+        label_map: Optional pinned name→id :class:`~recordstream.LabelMap` (fitted from the train set
             for string targets when omitted; reloaded from a checkpoint-adjacent ``class_names.json``
             on the eval path).
         balance_classes: Inject inverse-frequency class weights into a weight-capable loss (``fit``).
@@ -322,9 +322,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         logger.info(f"sonair training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("LightningClassifier.fit() requires a 'train_set'.")
-        train_ds = ensure_sample_dataset(flow(self.train_set))
-        val_ds = ensure_sample_dataset(flow(self.val_set)) if self.val_set is not None else None
-        test_ds = ensure_sample_dataset(flow(self.test_set)) if self.test_set is not None else None
+        train_ds = ensure_record_dataset(flow(self.train_set))
+        val_ds = ensure_record_dataset(flow(self.val_set)) if self.val_set is not None else None
+        test_ds = ensure_record_dataset(flow(self.test_set)) if self.test_set is not None else None
         t_loader = flow(self.train_loader, dataset=train_ds)
         v_loader = flow(self.val_loader, dataset=val_ds) if val_ds is not None else None
         trainer = self._build_trainer()
@@ -349,7 +349,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         logger.info(f"sonair predicting: {self.experiment_name} ({self.run_name})")
         if self.test_set is None:
             raise ValueError("LightningClassifier.predict() requires a 'test_set'.")
-        dataset = ensure_sample_dataset(flow(self.test_set))
+        dataset = ensure_record_dataset(flow(self.test_set))
         if self.predictions_sink is not None:
             self.predictions_sink = flow(self.predictions_sink)
         loader = flow(self.test_loader, dataset=dataset)
@@ -363,7 +363,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         source = getattr(self, dataset_slot)
         if source is None:
             raise ValueError(f"LightningClassifier.{stage}() requires a '{dataset_slot}'.")
-        dataset = ensure_sample_dataset(flow(source))
+        dataset = ensure_record_dataset(flow(source))
         if self.predictions_sink is not None:
             self.predictions_sink = flow(self.predictions_sink)
         loader = flow(getattr(self, loader_slot), dataset=dataset)
@@ -403,11 +403,11 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             self._initialize_eval()
 
     def _initialize_fit(self) -> None:
-        self.train_set = ensure_sample_dataset(flow(self.train_set))
+        self.train_set = ensure_record_dataset(flow(self.train_set))
         if self.val_set is not None:
-            self.val_set = ensure_sample_dataset(flow(self.val_set))
+            self.val_set = ensure_record_dataset(flow(self.val_set))
         if self.test_set is not None:
-            self.test_set = ensure_sample_dataset(flow(self.test_set))
+            self.test_set = ensure_record_dataset(flow(self.test_set))
 
         kind = detect_target_kind(self.train_set, self.target_key)
         if kind == "multilabel":
@@ -425,11 +425,11 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             self.label_map = LabelMap.fit(raw_targets)
             logger.info(f"Fitted LabelMap with {self.label_map.num_classes} classes from train targets.")
         if kind == "str" and self.label_map is not None:
-            self.train_set = encode_flux(self.train_set, self.label_map)
+            self.train_set = encode_stream(self.train_set, self.label_map)
             if self.val_set is not None:
-                self.val_set = encode_flux(self.val_set, self.label_map)
+                self.val_set = encode_stream(self.val_set, self.label_map)
             if self.test_set is not None:
-                self.test_set = encode_flux(self.test_set, self.label_map)
+                self.test_set = encode_stream(self.test_set, self.label_map)
 
         if nc is None:
             if self.label_map is not None:
@@ -465,7 +465,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         source = getattr(self, eval_slot)
         if source is None:
             return
-        dataset = ensure_sample_dataset(flow(source))
+        dataset = ensure_record_dataset(flow(source))
         kind = detect_target_kind(dataset, self.target_key)
         if kind == "multilabel":
             raise NotImplementedError("multi-label string targets are not yet supported.")
@@ -474,7 +474,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             if label_map is None:
                 raise RuntimeError("eval dataset has string targets but no label_map and no class_names.json found.")
             self.label_map = label_map
-            dataset = encode_flux(dataset, label_map)
+            dataset = encode_stream(dataset, label_map)
         setattr(self, eval_slot, dataset)
         metrics_slot = "val_metrics" if self.task == "evaluate" else "test_metrics"
         prefix = "val/" if self.task == "evaluate" else "test/"
@@ -485,7 +485,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
     def _walk_targets(self, source: Any) -> List[Any]:
         src = flow(source)
         total = len(src) if hasattr(src, "__len__") else None
-        return list(tqdm(iter_key(src, self.target_key), total=total, desc="sonair: reading targets", unit="sample"))
+        return list(tqdm(iter_key(src, self.target_key), total=total, desc="sonair: reading targets", unit="record"))
 
     def _num_classes_without_data(self) -> Optional[int]:
         if not isinstance(self.model, Fluid):
@@ -550,14 +550,14 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
 
     # ---- predictions + tracking-side helpers -------------------------------- #
     def _write_predictions(self, preds: Any, batch: Any) -> None:
-        per_sample_meta = _batch_metadata(batch, self.input_key, self.target_key) if isinstance(batch, dict) else None
+        per_record_meta = _batch_metadata(batch, self.input_key, self.target_key) if isinstance(batch, dict) else None
         items = (
             preds["predictions"]
             if isinstance(preds, dict) and "predictions" in preds
             else (preds if isinstance(preds, list) else [preds])
         )
         for i in range(len(items)):
-            m = per_sample_meta[i] if per_sample_meta and i < len(per_sample_meta) else {}
+            m = per_record_meta[i] if per_record_meta and i < len(per_record_meta) else {}
             self.predictions_sink.write(items[i], m)
 
     def _write_class_names(self, trainer: L.Trainer, label_names: List[str]) -> None:
@@ -633,4 +633,4 @@ def _resolve_label_names(dataset: Any) -> Optional[List[str]]:
         return None
 
 
-__all__ = ["ClassifierTask", "LightningClassifier", "detect_target_kind", "encode_flux"]
+__all__ = ["ClassifierTask", "LightningClassifier", "detect_target_kind", "encode_stream"]

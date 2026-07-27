@@ -13,8 +13,8 @@ Loss: the default classification loss is :class:`torch.nn.CrossEntropyLoss`
 configurables (``task="classification", role="loss"``) so they're discoverable /
 pickable via navigaitor's task surfaces, usable straight from YAML
 (``label_smoothing`` / ``ignore_index`` / ``reduction`` …; per-class ``weight``
-needs a tensor and isn't expressible in YAML), AND FluxStudio OBJECT nodes. They
-surface in FluxStudio via the ``sonair-classification`` entry point + this
+needs a tensor and isn't expressible in YAML), AND StreamStudio OBJECT nodes. They
+surface in StreamStudio via the ``sonair-classification`` entry point + this
 module's ``__all__`` (``scan_module`` filters by ``__module__`` = ``torch``).
 
 The one loss that needs a sonair-side class is :class:`SigmoidFocalLoss`: its
@@ -28,10 +28,10 @@ loss reimplementation. Like the multi-label family (``BCEWithLogitsLoss`` /
 ``MultiLabelSoftMarginLoss``) it expects **float** targets the same shape as the
 logits (e.g. one-hot ``[N, C]``), not int64 class ids.
 
-Collate: the sonair classifier wires the generic :func:`sampleflux.collate_records` as
+Collate: the sonair classifier wires the generic :func:`recordstream.collate_records` as
 its DataLoader collate — there is no bespoke sonair collate. The config pipeline
 tensorizes the input (``ConvertToImageOp`` → ``ToTensorOp``) so at collate time each
-record's input key is already a ``[3, H, W]`` :class:`~sampleflux.Image`;
+record's input key is already a ``[3, H, W]`` :class:`~recordstream.Image`;
 ``collate_records`` stacks it to ``[N, 3, H, W]`` and gathers the remaining
 keys as per-record lists. The classifier's model boundary
 (:func:`sonair.classifier._batch_input` / ``_batch_target``) unwraps the batched input
@@ -42,7 +42,7 @@ Metrics: the useful ``torchmetrics.classification`` multiclass metrics
 :class:`~torchmetrics.classification.MulticlassF1Score`, …) are registered here
 (``_CLASSIFICATION_METRICS``, ``role="metric"``) — they accept logits directly as
 ``preds`` and emit a scalar by default (no adapter), so they're navigaitor
-metric-slot options, FluxStudio OBJECT nodes, and wirable into ``val_metrics``
+metric-slot options, StreamStudio OBJECT nodes, and wirable into ``val_metrics``
 straight from YAML. Each takes ``num_classes`` (dataset-derived at run time).
 
 Typical wiring (YAML)::
@@ -54,7 +54,7 @@ Typical wiring (YAML)::
       num_classes: 37
 
     train_loader: !class:torch.utils.data.DataLoader
-      collate_fn: !ref:sampleflux.collate_records
+      collate_fn: !ref:recordstream.collate_records
 """
 
 from typing import Literal, cast
@@ -91,14 +91,14 @@ from torchvision.ops import sigmoid_focal_loss
 
 #: Closed set of reductions :func:`torchvision.ops.sigmoid_focal_loss` accepts —
 #: typed as a ``Literal`` so the value is statically checkable and enumerable by
-#: navigaitor's form-spec / FluxStudio pickers straight from the annotation.
+#: navigaitor's form-spec / StreamStudio pickers straight from the annotation.
 FocalLossReduction = Literal["none", "mean", "sum"]
 
 # The classification loss IS an off-the-shelf ``torch.nn`` loss — register each (no wrapper
 # class) so it's a pickable ``task="classification", role="loss"`` option and surfaces in
-# navigaitor's form-spec / generated configs AND as a FluxStudio OBJECT node (``role="loss"`` is in
+# navigaitor's form-spec / generated configs AND as a StreamStudio OBJECT node (``role="loss"`` is in
 # the bridge ``_MEMBER_ROLES``). ``register`` only tags the third-party class. They are bound to
-# module-level names AND listed in ``__all__`` (below) so FluxStudio's ``__all__``-gated discovery
+# module-level names AND listed in ``__all__`` (below) so StreamStudio's ``__all__``-gated discovery
 # pass surfaces them — ``scan_module`` alone would skip a ``torch.nn``-module class.
 _CLASSIFICATION_LOSSES = (
     BCELoss,
@@ -114,7 +114,7 @@ for _loss_cls in _CLASSIFICATION_LOSSES:
     register(_loss_cls, task="classification", role="loss")
 
 # The useful ``torchmetrics`` multiclass metrics — registered ``task="classification",
-# role="metric"`` so they're navigaitor metric-slot options AND FluxStudio OBJECT nodes
+# role="metric"`` so they're navigaitor metric-slot options AND StreamStudio OBJECT nodes
 # (``role="metric"`` is in ``_MEMBER_ROLES``). All take a ``num_classes`` knob (dataset-derived at
 # run time, like the model) plus per-metric options (``top_k`` / ``average`` …). Wire a metric's
 # ``class`` output into a trainer's metrics slot (the trainer flows it with ``num_classes``), or set
@@ -198,7 +198,7 @@ class SigmoidFocalLoss(nn.Module):
         )
 
 
-# Every registered loss / metric is named in ``__all__`` so FluxStudio's ``__all__``-gated discovery
+# Every registered loss / metric is named in ``__all__`` so StreamStudio's ``__all__``-gated discovery
 # pass (run on this module — re-exported from ``sonair/__init__.py``) surfaces each as a node. Keep
 # this list in sync with ``_CLASSIFICATION_LOSSES`` / ``_CLASSIFICATION_METRICS`` above (a literal,
 # not a comprehension, so static analysers can read the exported-symbol set);

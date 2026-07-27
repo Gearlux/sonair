@@ -1,5 +1,5 @@
 """End-to-end smoke test: TimmModel + torch.nn.CrossEntropyLoss +
-``sampleflux.collate_records`` + a fake record dataset threaded through one full
+``recordstream.collate_records`` + a fake record dataset threaded through one full
 forward+backward step.
 
 This proves the wiring contract that the YAML configs in
@@ -18,7 +18,7 @@ from typing import Any, Dict, List
 import numpy as np
 import torch
 import torch.nn as nn
-from sampleflux import Image, Label, Record, collate_records
+from recordstream import Image, Label, Record, collate_records
 from torch.utils.data import DataLoader
 
 from sonair.classifier import _batch_input, _batch_metadata, _batch_target
@@ -66,7 +66,7 @@ def test_full_train_step_runs_end_to_end() -> None:
     """One full training iteration: dataset → loader → record collate → model → loss → backward."""
     fake_ds = _FakeHFDataset(n_per_class=4, n_classes=3, image_size=64)
 
-    # sampleflux sources are map-style (len + getitem) but not torch Dataset
+    # recordstream sources are map-style (len + getitem) but not torch Dataset
     # subclasses, so the stub's arg-type is stricter than DataLoader's runtime.
     loader: DataLoader = DataLoader(
         fake_ds,  # type: ignore[arg-type]
@@ -108,7 +108,7 @@ def test_full_train_step_runs_end_to_end() -> None:
     optimizer.step()
 
 
-def test_metadata_per_sample_survives_collation() -> None:
+def test_metadata_per_record_survives_collation() -> None:
     """Per-record metadata must round-trip through the record collate as a list of dicts."""
     fake_ds = _FakeHFDataset(n_per_class=2, n_classes=3, image_size=32)
     loader: DataLoader = DataLoader(

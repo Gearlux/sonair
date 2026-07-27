@@ -3,7 +3,7 @@
 ``sonair train`` / ``sonair evaluate`` / ``sonair predict`` bind the single
 :class:`~sonair.classifier.LightningClassifier` (a standard Lightning module) and
 run it with the matching ``task``. The verb wins over any ``task:`` set in YAML, so
-one config can serve all three. (A generic ``sampleflux run config.yaml`` also
+one config can serve all three. (A generic ``recordstream run config.yaml`` also
 works — it just calls ``.run()`` with whatever ``task`` the YAML declares.)
 """
 

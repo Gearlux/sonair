@@ -126,19 +126,21 @@ keras: !scope:framework=keras
   model: !lazy:sonair.KerasModel
     model_name: MobileNetV3Small
     input_shape: [224, 224, 3]
+    pretrained: true
   logger:
     - !class:keras.callbacks.CSVLogger
       filename: ./keras_logs/mnist.csv
-  # The ONE data difference between the two engines, and it is a real one: Keras is
-  # channels-LAST, torch is channels-first. So the Keras chain stops after Normalize
-  # (leaving HWC) where the torch chain adds ToTensor to transpose to CHW.
+  # Two real differences from the torch chain, both about the ENGINE rather than the task:
+  #
+  #  1. Keras is channels-LAST. The torch chain ends with `ToTensor` to transpose HWC->CHW;
+  #     this one simply stops, because `ConvertToImage` already produces HWC.
+  #  2. `keras.applications` models carry their OWN preprocessing (`include_preprocessing`
+  #     defaults to True and expects raw pixels), so normalizing here would apply it twice.
+  #     timm models do not, which is why the torch chain normalizes explicitly.
   preprocess:
     - !class:recordstream.ops.image.ConvertToImage
       width: 224
       height: 224
-    - !class:albumentations.Normalize
-      mean: [0.485, 0.456, 0.406]
-      std: [0.229, 0.224, 0.225]
 
 # jax: !scope:framework=jax
 #   runnable: !class:sonair.JaxClassifier

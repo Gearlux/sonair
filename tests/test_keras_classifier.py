@@ -12,6 +12,7 @@ import pytest
 from confluid import LazyClass
 from recordstream import ClassificationPredictionsSink, Image, Label, MultiLabel, Stream
 
+from sonair._keras import keras
 from sonair.keras_classifier import KerasClassifier, RecordSequence
 from sonair.keras_model import KerasModel
 
@@ -147,7 +148,8 @@ def test_task_defaults_are_sentinels_resolved_from_the_data() -> None:
     assert clf.loss is None and clf.metrics is None
 
     clf.run()
-    assert clf.loss == "sparse_categorical_crossentropy"
+    assert isinstance(clf.loss, keras.losses.SparseCategoricalCrossentropy)
+    assert clf.loss.from_logits, "the head emits raw logits; a probability loss trains on garbage"
 
 
 def test_an_explicitly_wired_loss_is_never_replaced() -> None:
@@ -232,3 +234,49 @@ def test_probs_are_a_distribution() -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# --------------------------------------------------------------------------- #
+# from_logits — the bug that produced a NaN loss on a real MNIST run
+# --------------------------------------------------------------------------- #
+# The head is a bare Dense with no activation, matching the torch backend, whose
+# CrossEntropyLoss takes logits by definition. Keras's STRING losses default to
+# `from_logits=False`: handed logits they normalize by the row SUM instead of a softmax,
+# then CLIP rather than raise — so the loss stays finite and merely wrong, and the only
+# symptom is a model that does not learn. Caught only by watching a real run diverge.
+
+
+def test_the_head_emits_raw_logits_not_probabilities() -> None:
+    """If this ever gains a softmax, the from_logits losses below become wrong instead."""
+    model = KerasModel(model_name="MobileNetV3Small", input_shape=INPUT, num_classes=3).model
+    out = model.predict(np.random.rand(2, *INPUT).astype("float32"), verbose=0)
+
+    assert not np.allclose(out.sum(axis=-1), 1.0), "output is already normalized — head has an activation"
+
+
+def test_the_default_loss_reads_its_input_as_logits() -> None:
+    clf = _classifier(train_set=Stream(source=_records()))
+    clf.initialize()
+
+    assert clf.loss.from_logits is True
+
+
+def test_a_probability_loss_on_logits_disagrees_with_the_correct_one() -> None:
+    """The concrete cost of the string form: a different number, hence different gradients."""
+    logits = np.array([[12.0, -8.0, 3.0]], dtype="float32")
+    y = np.array([1], dtype="int64")
+
+    wrong = float(keras.losses.get("sparse_categorical_crossentropy")(y, logits))
+    right = float(keras.losses.SparseCategoricalCrossentropy(from_logits=True)(y, logits))
+
+    assert not np.isclose(wrong, right), "if these agree, the from_logits distinction has changed"
+
+
+def test_the_multilabel_default_is_also_from_logits() -> None:
+    records = [
+        {"image": Image(np.zeros(INPUT, "float32"), layout="HWC"), "class": MultiLabel([0, 2])} for _ in range(4)
+    ]
+    clf = _classifier(train_set=Stream(source=records), num_classes=3)
+    clf.initialize()
+
+    assert isinstance(clf.loss, keras.losses.BinaryCrossentropy) and clf.loss.from_logits is True

@@ -296,9 +296,22 @@ class KerasClassifier(ProgressReporting):
         self._class_names = class_names(dataset)
 
     def _resolve_task_defaults(self) -> None:
-        """Fill the unset (``None``) task-shaped slots. Idempotent; never overwrites."""
+        """Fill the unset (``None``) task-shaped slots. Idempotent; never overwrites.
+
+        ``from_logits=True`` is not optional here. The head is a bare ``Dense`` with no
+        activation — raw logits, matching the torch backend, whose ``CrossEntropyLoss`` takes
+        logits by definition. Keras's STRING losses default to ``from_logits=False``, i.e.
+        they expect probabilities, and handed logits they normalize by the row SUM instead of
+        a softmax. Keras clips the result rather than raising, so the loss stays finite and
+        merely wrong — the failure shows up as a model that does not learn, which is why this
+        is spelled out rather than left to a string.
+        """
         if self.loss is None:
-            self.loss = "binary_crossentropy" if self.multilabel else "sparse_categorical_crossentropy"
+            self.loss = (
+                keras.losses.BinaryCrossentropy(from_logits=True)
+                if self.multilabel
+                else keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+            )
         if self.metrics is None:
             self.metrics = ["binary_accuracy"] if self.multilabel else ["accuracy"]
 

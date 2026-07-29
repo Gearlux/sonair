@@ -486,9 +486,17 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             setattr(self, metrics_slot, base.clone(prefix=prefix))
 
     def _walk_targets(self, source: Any) -> List[Any]:
-        src = flow(source)
-        total = len(src) if hasattr(src, "__len__") else None
-        return list(tqdm(iter_key(src, self.target_key), total=total, desc="sonair: reading targets", unit="record"))
+        """Materialize the target column once, with a progress bar.
+
+        Everything here except the bar is recordstream's: ``iter_key`` projects, so a
+        projection-aware source never builds the values this does not ask for, and it
+        materializes a deferred source itself. What remains is the PROGRESS — reading 60k
+        labels is a visible pause a user needs feedback on — which is a presentation choice
+        a data engine should not make (recordstream has no tqdm dependency, and its own
+        progress surface is the ``ProgressReporting`` callback, not a bar).
+        """
+        total = len(source) if hasattr(source, "__len__") else None
+        return list(tqdm(iter_key(source, self.target_key), total=total, desc="sonair: reading targets", unit="record"))
 
     def _num_classes_without_data(self) -> Optional[int]:
         if not isinstance(self.model, Fluid):

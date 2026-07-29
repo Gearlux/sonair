@@ -27,8 +27,6 @@ Minimal flat YAML (top-level keys wired by Confluid broadcasting)::
 """
 
 import inspect
-import json
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Optional, Union, cast
 
 import numpy as np
@@ -38,12 +36,13 @@ import torch.nn as nn
 from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, get_hierarchy_from_instance, output
 from confluid.registry import resolve_class
 from loggair import get_logger
+from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
 from marainer.lightning import (
     TrackingCallback,
     activate_for_lightning,
     attach_lightning_progress,
     build_metric_collection,
-    coerce_metric_value,
+    checkpoint_dir,
     scalar_metrics,
 )
 from marainer.run_names import generate_run_name
@@ -54,9 +53,9 @@ from recordstream import (
     LabelMap,
     PredictionsSink,
     RecordSource,
-    Stream,
     batch_metadata,
     batch_tensor,
+    class_names,
     classification_output,
     collate_records,
     ensure_record_dataset,
@@ -91,20 +90,6 @@ def _first_target(source: Any, target_key: str) -> Any:
     return None
 
 
-def encode_stream(source: Any, label_map: LabelMap) -> Stream:
-    """``label_map.encode(source)`` plus the ``label_names`` handoff marainer reads.
-
-    The Stream wrap itself is recordstream's (:meth:`~recordstream.LabelMap.encode`). What
-    stays here is the one sonair-specific line: exposing ``label_names`` on the returned
-    Stream so :meth:`LightningClassifier._write_class_names` persists ``class_names.json``
-    (reloaded on the eval/predict path via ``LabelMap.load``). That attribute is a
-    sonair<->marainer handoff, not a dataset concept, which is why it did not move down.
-    """
-    stream = label_map.encode(source)
-    stream.label_names = label_map.label_names  # type: ignore[attr-defined]
-    return stream
-
-
 def _per_record_predictions(preds: Any) -> List[Any]:
     """Split a model's prediction output into ONE entry per record.
 
@@ -130,16 +115,6 @@ def _run_prefix(task: str) -> str:
     return {"fit": "train", "predict": "predict"}.get(task, "evaluate")
 
 
-def _resolve_label_names(dataset: Any) -> Optional[List[str]]:
-    names = getattr(dataset, "label_names", None)
-    if not names:
-        return None
-    try:
-        return [str(n) for n in names]
-    except TypeError:
-        return None
-
-
 @configurable(task="classification", role="trainer", framework="torch")
 class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
     """A standard Lightning image classifier — train, evaluate, test, or predict via ``task``.
@@ -163,7 +138,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         metrics: Single-metric templates flowed per split (default top-1 accuracy + macro F1).
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``optimizer``, ``train/val/test_loader``,
-    ``lightning``, ``loss_fn``, ``predictions_sink``, ``metrics_sidecar_path``, ``class_names``,
+    ``lightning``, ``loss_fn``, ``predictions_sink``, ``metrics_sidecar_path``,
     ``trackers`` (optional marainer :class:`~marainer.tracking.base.Tracker` list), ``log_system_metrics``.
     """
 
@@ -239,10 +214,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self.test_metrics: Any = None
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
-        self.class_names: Optional[Union[List[str], str]] = None
         self.trackers: Optional[List[Tracker]] = None
         self.log_system_metrics: bool = True
-        self._label_names: Optional[List[str]] = None
+        self._class_names: Optional[List[str]] = None
         self._trackers: List[Tracker] = []
 
     @property
@@ -261,6 +235,21 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         return cast(torch.Tensor, cast(nn.Module, self.model)(x))
 
     # ---- standard Lightning step functions ---------------------------------- #
+    def _targets(self, batch: Any) -> torch.Tensor:
+        """The target tensor this task's loss expects — the ONLY task-shaped choice left.
+
+        Both branches are recordstream calls; what is classification-specific is WHICH one and
+        the dtype named for it. Multi-label wants an ``[N, C]`` float multi-hot (what
+        ``BCEWithLogitsLoss`` and friends consume), single-label an ``[N]`` int64 class-id
+        vector — ``int64`` explicitly, because a dataset yielding int32 label tensors is legal
+        and ``CrossEntropyLoss`` rejects it with *"expected scalar type Long but found Int"*.
+        """
+        if self.multilabel:
+            if not self.num_classes:
+                raise RuntimeError("multi-label targets need num_classes — call initialize() first.")
+            return torch.as_tensor(multi_hot(batch, self.target_key, self.num_classes)).to(self.device)
+        return batch_tensor(batch, self.target_key, self.device, dtype=torch.int64)
+
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
         self._resolve_task_defaults()  # no-op once resolved; keeps a directly-called step working
         x = batch_tensor(batch, self.input_key, self.device)
@@ -328,9 +317,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         trainer = self._build_trainer()
         trainer.fit(model=self, train_dataloaders=t_loader, val_dataloaders=v_loader)
         logger.info("Training complete.")
-        self._label_names = _resolve_label_names(train_ds)
-        if self._label_names:
-            self._write_class_names(trainer, self._label_names)
+        self._class_names = class_names(train_ds, val_ds, test_ds)
+        save_class_names(self._class_names, checkpoint_dir(trainer), self._trackers)
+
         if test_ds is not None:
             trainer.test(model=self, dataloaders=flow(self.test_loader, dataset=test_ds))
 
@@ -370,7 +359,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         runner(model=self, dataloaders=loader)
         if self.predictions_sink is not None and hasattr(self.predictions_sink, "close"):
             self.predictions_sink.close()
-        self._finalize_metrics(getattr(self, metrics_slot))
+        self._write_metrics_sidecar(getattr(self, metrics_slot))
 
     def _build_trainer(self) -> L.Trainer:
         """Flow the ``pl.Trainer`` and attach the OPTIONAL marainer tracking (a few lines; removable)."""
@@ -437,11 +426,11 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             self.label_map = LabelMap.fit(raw_targets)
             logger.info(f"Fitted LabelMap with {self.label_map.num_classes} classes from train targets.")
         if targets_are_names and self.label_map is not None:
-            self.train_set = encode_stream(self.train_set, self.label_map)
+            self.train_set = self.label_map.encode(self.train_set)
             if self.val_set is not None:
-                self.val_set = encode_stream(self.val_set, self.label_map)
+                self.val_set = self.label_map.encode(self.val_set)
             if self.test_set is not None:
-                self.test_set = encode_stream(self.test_set, self.label_map)
+                self.test_set = self.label_map.encode(self.test_set)
 
         if nc is None:
             if self.label_map is not None:
@@ -484,11 +473,11 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self._resolve_task_defaults()
         probe = next(iter(first), None) if self.multilabel else first
         if probe is not None and not is_class_id(probe):
-            label_map = self.label_map or self._load_pinned_label_map()
+            label_map = self.label_map or load_class_names(getattr(self.model, "checkpoint_path", None))
             if label_map is None:
                 raise RuntimeError("eval dataset has string targets but no label_map and no class_names.json found.")
             self.label_map = label_map
-            dataset = encode_stream(dataset, label_map)
+            dataset = label_map.encode(dataset)
         setattr(self, eval_slot, dataset)
         metrics_slot = "val_metrics" if self.task == "evaluate" else "test_metrics"
         prefix = "val/" if self.task == "evaluate" else "test/"
@@ -544,21 +533,6 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
                     "f1_macro": LazyClass[Metric](MulticlassF1Score, average="macro"),
                 }
             )
-
-    def _targets(self, batch: Any) -> torch.Tensor:
-        """The target tensor this task's loss expects — the ONLY task-shaped choice left.
-
-        Both branches are recordstream calls; what is classification-specific is WHICH one and
-        the dtype named for it. Multi-label wants an ``[N, C]`` float multi-hot (what
-        ``BCEWithLogitsLoss`` and friends consume), single-label an ``[N]`` int64 class-id
-        vector — ``int64`` explicitly, because a dataset yielding int32 label tensors is legal
-        and ``CrossEntropyLoss`` rejects it with *"expected scalar type Long but found Int"*.
-        """
-        if self.multilabel:
-            if not self.num_classes:
-                raise RuntimeError("multi-label targets need num_classes — call initialize() first.")
-            return torch.as_tensor(multi_hot(batch, self.target_key, self.num_classes)).to(self.device)
-        return batch_tensor(batch, self.target_key, self.device, dtype=torch.int64)
 
     def _metric_dims(self) -> dict[str, int]:
         """The sizing kwarg metric templates are flowed with.
@@ -632,21 +606,6 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             return
         self.apply_class_weights(weights)
 
-    def _load_pinned_label_map(self) -> Optional[LabelMap]:
-        ckpt_path = getattr(self.model, "checkpoint_path", None)
-        if not ckpt_path:
-            return None
-        candidate = Path(str(ckpt_path)).expanduser().parent / "class_names.json"
-        if not candidate.is_file():
-            return None
-        try:
-            label_map = LabelMap.load(candidate)
-            logger.info(f"Loaded pinned LabelMap ({label_map.num_classes} classes) from {candidate}.")
-            return label_map
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(f"Could not load LabelMap from {candidate}: {exc}")
-            return None
-
     # ---- predictions + tracking-side helpers -------------------------------- #
     def _write_predictions(self, preds: Any, batch: Any) -> None:
         """Write ONE prediction per record to the wired sink, paired with that record's metadata.
@@ -665,32 +624,16 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             m = per_record_meta[i] if per_record_meta and i < len(per_record_meta) else {}
             cast(PredictionsSink, self.predictions_sink).write(item, m)
 
-    def _write_class_names(self, trainer: L.Trainer, label_names: List[str]) -> None:
-        payload = {"class_names": label_names, "num_classes": len(label_names)}
-        cb = getattr(trainer, "checkpoint_callback", None)
-        dirpath = getattr(cb, "dirpath", None) if cb is not None else getattr(trainer, "default_root_dir", None)
-        if dirpath:
-            out_path = Path(dirpath)
-            out_path.mkdir(parents=True, exist_ok=True)
-            fname = out_path / "class_names.json"
-            fname.write_text(json.dumps(payload, indent=2, sort_keys=True))
-            logger.info(f"Wrote class_names.json to {fname}")
-            for tracker in self._trackers:
-                tracker.log_artifact(fname)
-
-    def _finalize_metrics(self, metrics: Any) -> None:
-        if not isinstance(metrics, MetricCollection) or self.metrics_sidecar_path is None:
+    def _write_metrics_sidecar(self, metrics: Any) -> None:
+        """Hand the run's final scalars to marainer, which owns where run artifacts land."""
+        if not isinstance(metrics, MetricCollection):
             return
         try:
-            payload = coerce_metric_value(metrics.compute())
+            payload = scalar_metrics(metrics.compute())
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(f"Could not compute final metrics for sidecar: {exc}")
+            logger.warning(f"Could not compute final metrics for the sidecar: {exc}")
             return
-        wrapped = {"experiment_name": self.experiment_name, "run_name": self.run_name, "metrics": payload}
-        out_path = Path(self.metrics_sidecar_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(wrapped, indent=2, sort_keys=True))
-        logger.info(f"Wrote final metrics sidecar to {out_path}")
+        write_metrics_sidecar(self.metrics_sidecar_path, payload, self.experiment_name, self.run_name)
 
     # ---- @outputs ----------------------------------------------------------- #
     @property
@@ -717,11 +660,11 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
 
     @property
     @output
-    def label_names(self) -> List[str]:
+    def class_names(self) -> List[str]:
         """Resolved class/label names for the run (post-run ``@output``), or ``[]``."""
         if self.label_map is not None:
-            return list(self.label_map.label_names)
-        return list(self._label_names or [])
+            return list(self.label_map.class_names)
+        return list(self._class_names or [])
 
 
-__all__ = ["ClassifierTask", "LightningClassifier", "encode_stream"]
+__all__ = ["ClassifierTask", "LightningClassifier"]

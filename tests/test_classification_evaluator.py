@@ -104,7 +104,7 @@ def test_declares_computed_metrics_and_label_names_outputs() -> None:
     from confluid import output_specs
 
     names = {s["name"] for s in output_specs(LightningClassifier)}
-    assert {"computed_metrics", "label_names"} <= names
+    assert {"computed_metrics", "class_names"} <= names
 
 
 def test_test_metrics_are_built_in_initialize() -> None:
@@ -171,7 +171,7 @@ def test_string_targets_encoded_via_checkpoint_class_names(tmp_path: Any) -> Non
     ev = _make_evaluator(model=model, dataset=_string_stream(["dog", "cat", "bird"]))
     ev.initialize()
     assert ev.num_classes == 3
-    assert ev.label_map is not None and ev.label_map.label_names == ["bird", "cat", "dog"]
+    assert ev.label_map is not None and ev.label_map.class_names == ["bird", "cat", "dog"]
     from recordstream import iter_key
 
     dataset = cast(Stream, ev.test_set)

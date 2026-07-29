@@ -1,7 +1,7 @@
 """The predict path: what the model emits and what the sink receives.
 
 This surface had NO coverage, which is how a real defect survived: ``predict_step`` returned
-the raw ``[N, C]`` logits tensor while ``marainer.sinks.ClassificationPredictionsSink.write``
+the raw ``[N, C]`` logits tensor while ``recordstream.predictions.ClassificationPredictionsSink.write``
 reads ``prediction.get("probs")`` — so a wired sink raised
 ``AttributeError: 'Tensor' object has no attribute 'get'`` on the first batch, and the
 list-wrapping in ``_write_predictions`` would have written ONE entry for an N-record batch
@@ -111,8 +111,8 @@ def test_each_write_is_an_unbatched_per_record_mapping() -> None:
 
 
 def test_the_real_sink_consumes_the_output() -> None:
-    """End to end against `marainer.sinks` — the exact pairing that used to raise."""
-    from marainer.sinks import ClassificationPredictionsSink
+    """End to end against `recordstream.predictions` — the exact pairing that used to raise."""
+    from recordstream import ClassificationPredictionsSink
 
     written: List[Any] = []
 

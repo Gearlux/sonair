@@ -239,7 +239,7 @@ open work (see `TASKS.md`).
 
 ## What `predict` returns
 
-`task: predict` emits a `marainer.outputs.ClassificationOutput` per batch — not raw logits:
+`task: predict` emits a `recordstream.ClassificationOutput` per batch — not raw logits:
 
 | Key | Shape | Meaning |
 |---|---|---|
@@ -255,7 +255,7 @@ paired with that record's metadata:
 ```yaml
 runnable: !class:sonair.LightningClassifier
   task: predict
-  predictions_sink: !class:marainer.sinks.ClassificationPredictionsSink
+  predictions_sink: !class:recordstream.predictions.ClassificationPredictionsSink
     top_k: 3
     ops:
       - !class:recordstream.ops.sink.RecordSinkOp
@@ -300,7 +300,7 @@ Run-node results panel automatically.
 
 | Package | Purpose |
 |---------|---------|
-| `marainer` | Optional experiment tracking + torch utilities (`ensure_record_dataset` / `load_lightning_checkpoint`). |
+| `marainer` | Optional experiment tracking (`load_lightning_checkpoint` / `load_lightning_checkpoint`). |
 | `confluid` | YAML-driven dependency injection (`@configurable`, `!class:`, `!ref:`). |
 | `recordstream` | Record / Stream pipeline plumbing. |
 | `loggair` | Structured logging. |

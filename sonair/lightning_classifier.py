@@ -26,14 +26,17 @@ Minimal flat YAML (top-level keys wired by Confluid broadcasting)::
     recordstream run train.yaml
 """
 
+import inspect
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Optional, Union, cast
 
+import numpy as np
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
 from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, get_hierarchy_from_instance, output
+from confluid.registry import resolve_class
 from loggair import get_logger
 from marainer.lightning import (
     TrackingCallback,
@@ -43,19 +46,21 @@ from marainer.lightning import (
     coerce_metric_value,
     scalar_metrics,
 )
-from marainer.outputs import ClassificationOutput
 from marainer.run_names import generate_run_name
-from marainer.sinks import PredictionsSink
-from marainer.torch import RecordSource, apply_class_weights, ensure_record_dataset, loss_accepts_weight
-from marainer.torch.outputs import classification_output
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
 from recordstream import (
+    ClassificationOutput,
     LabelMap,
+    PredictionsSink,
+    RecordSource,
     Stream,
     batch_metadata,
     batch_tensor,
+    classification_output,
     collate_records,
+    ensure_record_dataset,
+    inverse_frequency_weights,
     is_class_id,
     iter_key,
     multi_hot,
@@ -106,7 +111,7 @@ def _per_record_predictions(preds: Any) -> List[Any]:
     The sink contract (``write(prediction, metadata)``) is per-record, but a classification
     model emits the whole batch at once. Handled shapes, in order: a list (already per-record),
     a ``{"predictions": [...]}`` wrapper (a detector's convention), a batched mapping such as
-    :class:`~marainer.outputs.ClassificationOutput` (sliced row-wise into N mappings), and
+    :class:`~recordstream.ClassificationOutput` (sliced row-wise into N mappings), and
     anything else (treated as ONE prediction).
     """
     if isinstance(preds, list):
@@ -211,7 +216,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         # multi-label, which is only known once `initialize()` peeks the dataset. `None` means
         # "not chosen" — a live default here could not be told apart from a user's explicit
         # CrossEntropyLoss, so a multi-label config would train silently wrong.
-        self.loss_fn: Any = None
+        # `Lazy[...]`: a `!class:` loss stays deferred until `apply_class_weights` flows it with
+        # `weight=` (a Fluid cannot be mutated in place), so this slot IS one this class flows.
+        self.loss_fn: Optional[Lazy[nn.Module]] = None
         self.optimizer: Lazy[Optimizer] = LazyClass(torch.optim.AdamW, lr=1e-4, weight_decay=0.05)
         loader_kw = dict(
             collate_fn=collate_records,
@@ -259,7 +266,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         x = batch_tensor(batch, self.input_key, self.device)
         y = self._targets(batch)
         preds = self(x)
-        loss: torch.Tensor = self.loss_fn(preds, y)
+        loss: torch.Tensor = cast(nn.Module, self.loss_fn)(preds, y)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
         if isinstance(self.train_metrics, MetricCollection):
             self.train_metrics(preds, y)
@@ -275,7 +282,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         x = batch_tensor(batch, self.input_key, self.device)
         y = self._targets(batch)
         preds = self(x)
-        loss: torch.Tensor = self.loss_fn(preds, y)
+        loss: torch.Tensor = cast(nn.Module, self.loss_fn)(preds, y)
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
         if isinstance(self.val_metrics, MetricCollection):
             self.val_metrics.update(preds, y)
@@ -293,7 +300,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         return preds
 
     def predict_step(self, batch: Any, batch_idx: int) -> ClassificationOutput[torch.Tensor]:
-        """Predict a batch as a :class:`~marainer.outputs.ClassificationOutput`.
+        """Predict a batch as a :class:`~recordstream.ClassificationOutput`.
 
         Returning the CONTRACT rather than raw logits is what makes the output consumable:
         a predictions sink reads ``probs`` / ``class_idx`` by name (it cannot softmax on the
@@ -419,7 +426,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         # unresolved `None` would report "cannot be balanced" and skip the target walk.
         self._resolve_task_defaults()
         nc = self._num_classes_without_data()
-        want_weights = self.balance_classes and loss_accepts_weight(self.loss_fn)
+        want_weights = self.balance_classes and self.accepts_class_weights()
         need_fit = targets_are_names and self.label_map is None
         raw_targets: Optional[List[Any]] = None
         if need_fit or want_weights or nc is None:
@@ -451,7 +458,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self.num_classes = int(nc)
 
         if self.balance_classes and self.class_weights is None:
-            self._apply_class_weights(self.num_classes, raw_targets)
+            self._balance_loss(self.num_classes, raw_targets)
 
         self.model = flow(self.model, num_classes=self.num_classes)
         if self.train_metrics is None:
@@ -562,28 +569,68 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         assert self.num_classes is not None
         return {"num_labels": self.num_classes} if self.multilabel else {"num_classes": self.num_classes}
 
-    def _apply_class_weights(self, num_classes: int, raw_targets: Optional[List[Any]]) -> None:
-        """Encode the walked targets to class ids, then hand the policy to marainer.
+    # ---- class balancing: the STATISTIC is recordstream's, the INJECTION is this backend's -- #
+    def accepts_class_weights(self) -> bool:
+        """Whether this backend's loss can consume per-class weights — **framework hook**.
 
-        Only the ENCODING is sonair's — it depends on this trainer's
-        :class:`~recordstream.LabelMap`. The capability check, the
-        inverse-frequency arithmetic and the injection are engine-generic and
-        live in :mod:`marainer.torch.balancing`, so a segmentation or detection
-        trainer gets them without reimplementing anything.
+        Answered for torch: ``torch.nn`` losses take a ``weight`` TENSOR in the constructor, so
+        the question is whether the loss's signature declares one. Works on a live loss OR a
+        deferred :class:`~confluid.fluid.Fluid`, which matters: :meth:`_initialize_fit` calls
+        this BEFORE the loss is built to decide whether walking the whole target stream for
+        weights is worth it at all.
+
+        Another backend overrides this together with :meth:`apply_class_weights` — Keras has no
+        ``weight=`` on its losses (it takes ``class_weight`` on ``fit()``), so its answer is a
+        different question entirely. Returning ``False`` is always safe: the run trains
+        unweighted and skips the walk.
         """
-        # `raw_targets` is None when no walk was needed — which, at this call site,
-        # means the loss is not weight-capable (`want_weights` gated the walk). Pass
-        # the empty set through rather than asserting: `apply_class_weights` does the
-        # capability check itself and emits the "loss has no 'weight' arg" warning,
-        # so the diagnostic stays in one place instead of being duplicated here.
-        # `to_ids` maps names through the fitted map AND passes already-encoded ids
-        # through, so there is no name-vs-id branch here at all. An empty LabelMap is
-        # valid for the id case — that is the contract.
-        label_map = self.label_map or LabelMap()
-        targets = [i for t in (raw_targets or []) if t is not None for i in label_map.to_ids(t)]
-        # Rebind: a deferred `!class:` loss is FLOWED with the weights, so the
-        # returned object is not the one passed in.
-        self.loss_fn, self.class_weights = apply_class_weights(self.loss_fn, targets, num_classes)
+        loss_cls = resolve_class(self.loss_fn.target) if isinstance(self.loss_fn, Fluid) else type(self.loss_fn)
+        if loss_cls is None:
+            return False
+        try:
+            return "weight" in inspect.signature(loss_cls).parameters
+        except (ValueError, TypeError):  # pragma: no cover - C-extension ctor without a signature
+            return False
+
+    def apply_class_weights(self, weights: "np.ndarray") -> None:
+        """Inject per-class ``weights`` into the loss — **framework hook**.
+
+        Answered for torch: the weights become a ``Tensor`` on the loss's ``weight`` argument.
+        A deferred loss is FLOWED with it (a ``Fluid`` cannot be mutated in place, so the slot
+        is rebound); a live loss gets the attribute set. ``self.class_weights`` keeps the vector
+        for tracking.
+
+        Another backend overrides this with its own convention — a Keras classifier would store
+        ``{class_id: weight}`` for ``model.fit(class_weight=…)`` and never touch the loss. The
+        WEIGHTS themselves are framework-neutral: they come from
+        :func:`recordstream.inverse_frequency_weights`, a statistic over the labels, so only
+        this last step differs per backend.
+        """
+        tensor = torch.as_tensor(weights)
+        if isinstance(self.loss_fn, Fluid):
+            # A Fluid cannot be mutated in place — it is flowed with `weight=` and the slot rebound.
+            self.loss_fn = flow(self.loss_fn, weight=tensor)
+        else:
+            cast(nn.Module, self.loss_fn).weight = tensor
+        self.class_weights = tensor
+        logger.info(f"Balanced loss: injected inverse-frequency class weights for {len(tensor)} classes.")
+
+    def _balance_loss(self, num_classes: int, raw_targets: Optional[List[Any]]) -> None:
+        """Derive the class weights from the walked targets and hand them to the backend hook.
+
+        `raw_targets` is None when no walk was needed — at this call site that means the loss is
+        not weight-capable (`want_weights` gated the walk), so there is nothing to balance.
+        Everything about the derivation is recordstream's: ``inverse_frequency_weights`` flattens
+        each target through the :class:`~recordstream.LabelMap` (names encode, ids pass through,
+        a multi-label target counts for every class it names) and returns the vector.
+        """
+        if not raw_targets:
+            return
+        weights = inverse_frequency_weights(raw_targets, num_classes, self.label_map)
+        if weights is None:
+            logger.warning("Class balancing requested but no class ids were observed; training unweighted.")
+            return
+        self.apply_class_weights(weights)
 
     def _load_pinned_label_map(self) -> Optional[LabelMap]:
         ckpt_path = getattr(self.model, "checkpoint_path", None)
@@ -605,7 +652,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         """Write ONE prediction per record to the wired sink, paired with that record's metadata.
 
         The model emits a BATCHED output (``probs`` ``[N, C]``, ``class_idx`` ``[N]``) while the
-        sink contract is per-record — so a batched :class:`~marainer.outputs.ClassificationOutput`
+        sink contract is per-record — so a batched :class:`~recordstream.ClassificationOutput`
         is sliced row-wise here. Handing the batch over whole was a real bug: the sink read
         ``probs[0]`` as if it were one record's class distribution and silently dropped the
         rest of the batch.

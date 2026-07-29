@@ -45,6 +45,7 @@ from marainer.lightning import (
 )
 from marainer.outputs import ClassificationOutput
 from marainer.run_names import generate_run_name
+from marainer.sinks import PredictionsSink
 from marainer.torch import RecordSource, apply_class_weights, ensure_record_dataset, loss_accepts_weight
 from marainer.torch.outputs import classification_output
 from marainer.tracking.base import Tracker
@@ -229,7 +230,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self.train_metrics: Any = None
         self.val_metrics: Any = None
         self.test_metrics: Any = None
-        self.predictions_sink: Any = None
+        self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
         self.class_names: Optional[Union[List[str], str]] = None
         self.trackers: Optional[List[Tracker]] = None
@@ -238,7 +239,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self._trackers: List[Tracker] = []
 
     @property
-    def __torch_runner__(self) -> bool:  # type: ignore[override]  # dynamic per-task override of the marker
+    def __needs_autograd__(self) -> bool:  # type: ignore[override]  # dynamic per-task override of the marker
         """Only ``fit`` needs autograd; evaluate / test / predict are inference-only."""
         return self.task == "fit"
 
@@ -615,7 +616,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         items = _per_record_predictions(preds)
         for i, item in enumerate(items):
             m = per_record_meta[i] if per_record_meta and i < len(per_record_meta) else {}
-            self.predictions_sink.write(item, m)
+            cast(PredictionsSink, self.predictions_sink).write(item, m)
 
     def _write_class_names(self, trainer: L.Trainer, label_names: List[str]) -> None:
         payload = {"class_names": label_names, "num_classes": len(label_names)}

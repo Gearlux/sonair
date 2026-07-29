@@ -6,10 +6,22 @@ import pytest
 import torch
 import torch.nn as nn
 from confluid import LazyClass
+from confluid.fluid import Fluid
 from recordstream import Image, Label, Record, Stream
 from torchmetrics import MetricCollection
 
 from sonair.lightning_classifier import LightningClassifier
+
+
+def _stub(slot: Any) -> Fluid:
+    """The deferred Fluid behind a ``Lazy[T]`` slot — asserts it is STILL deferred, and narrows.
+
+    ``Lazy[T]`` is ``Union[T, Fluid]``, so reading ``.kwargs`` needs the Fluid arm. Going through
+    this helper means every such read also asserts the slot has not been eagerly built, which is
+    the property these tests actually care about.
+    """
+    assert isinstance(slot, Fluid), f"expected a deferred stub, got {type(slot).__name__}"
+    return slot
 
 
 def _ts(inp: Any, tgt: Any, **meta: Any) -> Record:
@@ -288,7 +300,7 @@ def test_default_loader_uses_collate_records() -> None:
     )
     # The train_loader is a deferred Class stub; check its kwargs contain the collate_fn.
     assert isinstance(trainer.train_loader, ConfluidClass)
-    assert trainer.train_loader.kwargs.get("collate_fn") is collate_records
+    assert _stub(trainer.train_loader).kwargs.get("collate_fn") is collate_records
 
 
 # ---------------------------------------------------------------------------
@@ -310,13 +322,13 @@ def test_ergonomic_knobs_reach_loader_and_lightning_stubs() -> None:
         num_workers=4,
         max_epochs=7,
     )
-    tl = trainer.train_loader.kwargs
+    tl = _stub(trainer.train_loader).kwargs
     assert tl["batch_size"] == 64 and tl["num_workers"] == 4
     assert tl["shuffle"] is True and tl["persistent_workers"] is True
-    assert trainer.val_loader.kwargs["shuffle"] is False
+    assert _stub(trainer.val_loader).kwargs["shuffle"] is False
     # max_epochs is baked into the base's deferred L.Trainer stub at construction.
     assert isinstance(trainer.lightning, ConfluidClass)
-    assert trainer.lightning.kwargs["max_epochs"] == 7
+    assert _stub(trainer.lightning).kwargs["max_epochs"] == 7
 
 
 def test_persistent_workers_guarded_when_num_workers_zero() -> None:
@@ -328,7 +340,7 @@ def test_persistent_workers_guarded_when_num_workers_zero() -> None:
         num_classes=3,
         num_workers=0,
     )
-    assert trainer.train_loader.kwargs["persistent_workers"] is False
+    assert _stub(trainer.train_loader).kwargs["persistent_workers"] is False
 
 
 def test_explicit_loader_override_is_respected() -> None:
@@ -342,11 +354,11 @@ def test_explicit_loader_override_is_respected() -> None:
         num_classes=3,
         batch_size=8,
     )
-    assert trainer.train_loader.kwargs["batch_size"] == 8
+    assert _stub(trainer.train_loader).kwargs["batch_size"] == 8
     # ...but a post-construction explicit loader replaces it wholesale (nothing folds
     # over it at run() — the base run() flows whatever loader is wired).
     trainer.train_loader = ConfluidClass(DataLoader, batch_size=999)
-    assert trainer.train_loader.kwargs["batch_size"] == 999
+    assert _stub(trainer.train_loader).kwargs["batch_size"] == 999
 
 
 # ---------------------------------------------------------------------------
@@ -385,12 +397,12 @@ def test_flat_broadcasting_wires_trainer_attributes_from_top_level_keys() -> Non
     # max_epochs broadcasts into the stored attribute...
     assert t.max_epochs == 7
     # ...batch_size/num_workers into the deferred loader stub...
-    assert t.train_loader.kwargs["batch_size"] == 64
-    assert t.train_loader.kwargs["num_workers"] == 4
-    assert t.train_loader.kwargs["persistent_workers"] is True
+    assert _stub(t.train_loader).kwargs["batch_size"] == 64
+    assert _stub(t.train_loader).kwargs["num_workers"] == 4
+    assert _stub(t.train_loader).kwargs["persistent_workers"] is True
     # ...and max_epochs/logger into the base's deferred L.Trainer stub at construction.
-    assert t.lightning.kwargs["max_epochs"] == 7
-    assert isinstance(t.lightning.kwargs["logger"], list) and len(t.lightning.kwargs["logger"]) == 1
+    assert _stub(t.lightning).kwargs["max_epochs"] == 7
+    assert isinstance(_stub(t.lightning).kwargs["logger"], list) and len(_stub(t.lightning).kwargs["logger"]) == 1
 
 
 def test_logger_broadcasts_and_flows_into_lightning() -> None:
@@ -405,7 +417,7 @@ def test_logger_broadcasts_and_flows_into_lightning() -> None:
     t = flow(t) if isinstance(t, Fluid) else t
 
     # Staged on the deferred L.Trainer stub as a list with one logger Fluid...
-    staged = t.lightning.kwargs["logger"]
+    staged = _stub(t.lightning).kwargs["logger"]
     assert isinstance(staged, list) and len(staged) == 1
     # ...flowing the lightning stub materializes it into a live TensorBoardLogger.
     lt = flow(t.lightning)
@@ -556,18 +568,36 @@ def test_multilabel_string_targets_fit_encode_and_train() -> None:
     assert trainer.label_map is not None and trainer.label_map.mapping == {"a": 0, "b": 1}
 
 
-def test_multilabel_targets_collate_to_a_float_multi_hot_matrix() -> None:
-    """The shape the multi-label losses need: [N, C] float, not [N] int64 ids."""
+def test_the_classifier_picks_the_multi_hot_target_when_multilabel() -> None:
+    """The task-shaped choice `_targets` makes: [N, C] float multi-hot, not [N] int64 ids.
+
+    The multi-hot ITSELF is `recordstream.multi_hot` (pinned there, and numpy so a non-torch
+    backend reuses it) — what this pins is that the classifier selects it.
+    """
     from recordstream import MultiLabel, collate_records
 
-    from sonair.lightning_classifier import _batch_target
-
+    trainer = LightningClassifier(model=_TinyClassifier(num_classes=3), num_classes=3)
+    trainer.multilabel = True
     batch = collate_records([{"class": MultiLabel([0, 2])}, {"class": MultiLabel([1])}])
-    y = _batch_target(batch, "class", num_classes=3, multilabel=True)
+
+    y = trainer._targets(batch)
 
     assert y.shape == (2, 3)
     assert y.dtype is torch.float32
     assert y.tolist() == [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+
+
+def test_the_classifier_names_int64_for_single_label_targets() -> None:
+    """int32 label tensors are legal; CrossEntropyLoss rejects them, so the dtype is named."""
+    from recordstream import Label, collate_records
+
+    trainer = LightningClassifier(model=_TinyClassifier(num_classes=3), num_classes=3)
+    batch = collate_records([{"class": Label(torch.tensor(i, dtype=torch.int32))} for i in range(3)])
+
+    y = trainer._targets(batch)
+
+    assert y.dtype is torch.int64 and y.tolist() == [0, 1, 2]
+    nn.CrossEntropyLoss()(torch.randn(3, 3), y)  # would raise on int32
 
 
 def test_multilabel_fit_runs_end_to_end(tmp_path: object) -> None:

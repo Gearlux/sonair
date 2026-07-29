@@ -8,7 +8,7 @@ just adds the HF Hub fetch in front. The fake dataset yields the tensorized
 record dict that ``HuggingFaceSource`` produces (a ``[3, H, W]`` float
 ``Image`` under ``"image"`` + a ``Label`` under ``"class"`` + plain metadata
 keys), collated by the generic ``collate_records`` and read back through the
-same ``recordstream.batch_tensor`` / sonair ``_batch_target`` accessors the classifier uses. Useful
+same ``recordstream.batch_tensor`` accessors the classifier uses. Useful
 as a CI gate so the classification path stays green even when HuggingFace's CDN
 is rate-limited.
 """
@@ -21,7 +21,6 @@ import torch.nn as nn
 from recordstream import Image, Label, Record, batch_metadata, batch_tensor, collate_records
 from torch.utils.data import DataLoader
 
-from sonair.lightning_classifier import _batch_target
 from sonair.timm_classifier import TimmModel
 
 
@@ -89,7 +88,7 @@ def test_full_train_step_runs_end_to_end() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
     batch = next(iter(loader))
-    x, y = batch_tensor(batch, "image"), _batch_target(batch, "class")
+    x, y = batch_tensor(batch, "image"), batch_tensor(batch, "class", dtype=torch.int64)
     assert x.shape == (4, 3, 64, 64)
     assert y.shape == (4,)
     assert y.dtype == torch.int64

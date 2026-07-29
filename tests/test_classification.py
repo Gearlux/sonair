@@ -3,7 +3,7 @@
 Sonair no longer ships a bespoke classification collate: the config pipeline tensorizes the input
 (``ConvertToImage`` → ``ToTensor``) so each record's ``input_key`` value is already a ``[3, H, W]``
 image at collate time. ``recordstream.collate_records`` stacks it and the model boundary
-(``recordstream.batch_tensor`` / ``batch_metadata`` + sonair's ``_batch_target`` shaping) recovers the batched
+(``recordstream.batch_tensor`` / ``batch_metadata`` / ``multi_hot``) recovers the batched
 input tensor, stacks the ``Label`` target's per-record list into an ``[N]`` int64 tensor, and
 transposes the remaining plain keys into a per-record metadata list.
 """
@@ -12,8 +12,6 @@ import numpy as np
 import pytest
 import torch
 from recordstream import Image, Label, Record, batch_metadata, batch_tensor, collate_records, item_data
-
-from sonair.lightning_classifier import _batch_target
 
 
 def _chw(size: int = 8) -> np.ndarray:
@@ -40,7 +38,7 @@ def test_target_label_list_stacked_to_int64() -> None:
     batch = collate_records([_record(_chw(), i % 3) for i in range(4)])
     # collate_records leaves the Label target's value as a per-record list; the boundary stacks it.
     assert isinstance(batch["class"].value, list)
-    y = _batch_target(batch, "class")
+    y = batch_tensor(batch, "class", dtype=torch.int64)
     assert y.shape == (4,) and y.dtype == torch.int64
 
 
@@ -77,7 +75,7 @@ def test_batch_target_uses_prestacked_tensor_verbatim() -> None:
         "image": Image(np.zeros((2, 3, 4, 4), dtype="float32"), layout="CHW"),
         "class": Label(torch.tensor([5, 7])),
     }
-    y = _batch_target(batch, "class")
+    y = batch_tensor(batch, "class", dtype=torch.int64)
     assert y.tolist() == [5, 7]
 
 

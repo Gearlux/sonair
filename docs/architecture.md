@@ -127,3 +127,71 @@ leave it off when it genuinely is not (a pure-python op, a path-based source).
 Do not fold framework into `category`, and do not make an untagged class
 excluded-by-default — the opt-in asymmetry is what let this ship without
 re-tagging the workspace.
+
+---
+
+## 3. Task defaults are sentinels, resolved at `initialize()`
+
+*2026-07-29*
+
+**Context.** `LightningClassifier` has always shipped a working default loss
+and metric set, so a minimal config trains without naming either. The obvious
+spelling is a live default in the constructor signature:
+
+```python
+def __init__(self, loss_fn: Any = nn.CrossEntropyLoss(), ...):
+```
+
+Multi-label support broke that. A `MultiLabel` target needs a *different* loss
+(`BCEWithLogitsLoss` over a float multi-hot `[N, C]`, not `CrossEntropyLoss`
+over int64 ids `[N]`) and a *different* metric family (`Multilabel*` sized by
+`num_labels`, not `Multiclass*` sized by `num_classes`). Which one is right is
+a property of the DATA, and the data is not read until `initialize()` — long
+after the constructor ran.
+
+A live default also destroys the information needed to fix this later: once
+`self.loss_fn` holds a `CrossEntropyLoss`, nothing can tell whether the user
+asked for it or merely didn't say. Overwriting it when the data turns out to be
+multi-label would silently discard a deliberate choice; leaving it would
+silently train a multi-label model with the wrong loss.
+
+**Decision.** `loss_fn` and `metrics` default to **`None`** — a sentinel
+meaning *not chosen*, not *no loss*. `_resolve_task_defaults()` fills a `None`
+slot the moment `initialize()` has set `self.multilabel` from the first target,
+and is a no-op for anything already set. `_metric_dims()` is the matching
+one-liner that returns `{"num_labels": n}` or `{"num_classes": n}` for
+`build_metric_collection`.
+
+**Consequences.**
+
+- A wired loss/metric is never replaced, whatever the data looks like.
+- The defaults are correct for both target shapes with no config knob and no
+  `multilabel: true` flag to keep in sync with the dataset.
+- The slots are `None` between construction and `initialize()`. Any code
+  reading them earlier sees the sentinel — the step functions therefore call
+  `_resolve_task_defaults()` themselves, so a directly-invoked
+  `training_step` (tests, a custom loop) still works.
+- Resolution ORDER matters inside `initialize()`: the class-balancing probe
+  asks `loss_accepts_weight(self.loss_fn)`, and an unresolved `None` answers
+  "cannot be balanced" — so resolution happens *before* the probe, not after.
+
+**Example.**
+
+```python
+def _resolve_task_defaults(self) -> None:
+    """Fill the unset (None) task-shaped slots. Idempotent; never overwrites."""
+    if self.loss_fn is None:
+        self.loss_fn = nn.BCEWithLogitsLoss() if self.multilabel else nn.CrossEntropyLoss()
+    if self.metrics is None:
+        self.metrics = (
+            {"accuracy": LazyClass[Metric](MultilabelAccuracy), ...}
+            if self.multilabel
+            else {"accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1), ...}
+        )
+```
+
+**What you may change.** Add task-shaped defaults to the same method — it is
+the one place that answers "what does this data need?". Do not reintroduce a
+live default in the constructor signature, and do not add a `multilabel:`
+config knob: the target item type already says it, and a knob could disagree
+with the data.

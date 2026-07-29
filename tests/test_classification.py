@@ -3,7 +3,7 @@
 Sonair no longer ships a bespoke classification collate: the config pipeline tensorizes the input
 (``ConvertToImage`` → ``ToTensor``) so each record's ``input_key`` value is already a ``[3, H, W]``
 image at collate time. ``recordstream.collate_records`` stacks it and the model boundary
-(``sonair.lightning_classifier._batch_input`` / ``_batch_target`` / ``_batch_metadata``) recovers the batched
+(``recordstream.batch_tensor`` / ``batch_metadata`` + sonair's ``_batch_target`` shaping) recovers the batched
 input tensor, stacks the ``Label`` target's per-record list into an ``[N]`` int64 tensor, and
 transposes the remaining plain keys into a per-record metadata list.
 """
@@ -11,9 +11,9 @@ transposes the remaining plain keys into a per-record metadata list.
 import numpy as np
 import pytest
 import torch
-from recordstream import Image, Label, Record, collate_records, item_data
+from recordstream import Image, Label, Record, batch_metadata, batch_tensor, collate_records, item_data
 
-from sonair.lightning_classifier import _batch_input, _batch_metadata, _batch_target
+from sonair.lightning_classifier import _batch_target
 
 
 def _chw(size: int = 8) -> np.ndarray:
@@ -31,7 +31,7 @@ def _record(image: np.ndarray, target: int, **meta: object) -> Record:
 def test_collate_records_stacks_tensorized_inputs() -> None:
     batch = collate_records([_record(_chw(), i % 3, i=i) for i in range(4)])
     assert isinstance(batch, dict)
-    x = _batch_input(batch, "image")
+    x = batch_tensor(batch, "image")
     assert x.shape == (4, 3, 8, 8)
     assert x.dtype == torch.float32
 
@@ -46,7 +46,7 @@ def test_target_label_list_stacked_to_int64() -> None:
 
 def test_metadata_preserved_via_batch_metadata() -> None:
     batch = collate_records([_record(_chw(), i % 3, idx=i, name=f"s{i}") for i in range(4)])
-    metas = _batch_metadata(batch, "image", "class")
+    metas = batch_metadata(batch, exclude=("image", "class"))
     assert isinstance(metas, list) and len(metas) == 4
     assert metas[2]["name"] == "s2"  # string metadata preserved
     assert metas[2]["idx"] == 2
@@ -64,9 +64,9 @@ def test_input_key_is_image_target_is_label() -> None:
 
 def test_live_tensor_inputs_collate_as_list_and_stack_at_boundary() -> None:
     """A live CHW ``torch.Tensor`` plain value (the ``ToTensor`` output) batches as a per-record
-    list; ``_batch_input`` stacks it to ``[N, 3, H, W]`` at the model boundary."""
+    list; ``batch_tensor`` stacks it to ``[N, 3, H, W]`` at the model boundary."""
     batch = collate_records([{"image": torch.from_numpy(_chw()), "class": Label(i)} for i in range(3)])
-    x = _batch_input(batch, "image")
+    x = batch_tensor(batch, "image")
     assert isinstance(x, torch.Tensor)
     assert x.shape == (3, 3, 8, 8) and x.dtype == torch.float32
 
@@ -87,7 +87,7 @@ def test_batch_metadata_reads_legacy_metadata_field() -> None:
         "class": Label(torch.tensor([0, 1])),
         "metadata": [{"idx": 0}, {"idx": 1}],
     }
-    assert _batch_metadata(batch, "image", "class") == [{"idx": 0}, {"idx": 1}]
+    assert batch_metadata(batch, exclude=("image", "class")) == [{"idx": 0}, {"idx": 1}]
 
 
 def test_collate_records_rejects_empty_batch() -> None:

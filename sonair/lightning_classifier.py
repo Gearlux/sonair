@@ -26,17 +26,14 @@ Minimal flat YAML (top-level keys wired by Confluid broadcasting)::
     recordstream run train.yaml
 """
 
-import inspect
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Optional, Union, cast
 
-import numpy as np
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
 from confluid import Fluid, LazyClass, Mandatory, configurable, flow, get_hierarchy_from_instance, output
-from confluid.registry import resolve_class
 from loggair import get_logger
 from marainer.lightning import (
     TrackingCallback,
@@ -46,15 +43,27 @@ from marainer.lightning import (
     coerce_metric_value,
     scalar_metrics,
 )
+from marainer.outputs import ClassificationOutput
 from marainer.run_names import generate_run_name
-from marainer.torch import ensure_record_dataset
+from marainer.torch import apply_class_weights, ensure_record_dataset, loss_accepts_weight
+from marainer.torch.outputs import classification_output
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
-from recordstream import Label, LabelMap, Record, Stream, collate_records, item_data, iter_key
+from recordstream import (
+    LabelMap,
+    Record,
+    Stream,
+    batch_metadata,
+    batch_tensor,
+    batch_values,
+    collate_records,
+    is_class_id,
+    iter_key,
+)
 from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics import Metric, MetricCollection
-from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
+from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MultilabelAccuracy, MultilabelF1Score
 from tqdm import tqdm
 
 logger = get_logger(__name__)
@@ -62,39 +71,18 @@ logger = get_logger(__name__)
 #: Which entry point :meth:`LightningClassifier.run` dispatches to.
 ClassifierTask = Literal["fit", "evaluate", "test", "predict"]
 
-#: How a record's target value is shaped — drives the encode / num_classes path.
-_TargetKind = Literal["int", "str", "multilabel", "empty"]
 
+def _first_target(source: Any, target_key: str) -> Any:
+    """The first non-``None`` target value in ``source`` (``None`` when there are none).
 
-def _loss_accepts_weight(loss: Any) -> bool:
-    """True when ``loss``'s CONSTRUCTOR declares a ``weight`` parameter (balance-capability check)."""
-    loss_cls = resolve_class(loss.target) if isinstance(loss, Fluid) else type(loss)
-    if loss_cls is None:
-        return False
-    try:
-        return "weight" in inspect.signature(loss_cls).parameters
-    except (ValueError, TypeError):  # pragma: no cover - C-extension ctor without a signature
-        return False
-
-
-def _target_to_int(value: Any) -> int:
-    """Coerce a single scalar class id into a Python ``int`` (rejects bool)."""
-    if isinstance(value, bool):
-        raise TypeError(f"target {value!r} is a bool, not a class id")
-    return int(value)
-
-
-def detect_target_kind(source: Any, target_key: str = "class") -> _TargetKind:
-    """Classify a dataset's target by peeking the first non-``None`` value under ``target_key``."""
+    One peek is enough to know whether the targets need encoding — the ANSWER comes from
+    :func:`recordstream.is_class_id`, the single rule for "is this a class id or a class name?",
+    rather than a type check re-derived here.
+    """
     for target in iter_key(flow(source), target_key):
-        if target is None:
-            continue
-        if isinstance(target, str):
-            return "str"
-        if isinstance(target, (list, tuple, set)):
-            return "multilabel"
-        return "int"
-    return "empty"
+        if target is not None:
+            return target
+    return None
 
 
 def encode_stream(source: Any, label_map: LabelMap) -> Stream:
@@ -108,60 +96,62 @@ def encode_stream(source: Any, label_map: LabelMap) -> Stream:
     return stream
 
 
-def _batch_input(batch: Record, key: str, device: Any = None) -> torch.Tensor:
-    """The ``[N, 3, H, W]`` input tensor under ``key`` in a :func:`~recordstream.collate_records` batch.
+def _batch_target(
+    batch: Record,
+    key: str,
+    device: Any = None,
+    num_classes: Optional[int] = None,
+    multilabel: bool = False,
+) -> torch.Tensor:
+    """The CLASSIFICATION target tensor under ``key`` in a batched record.
 
-    The generic record collate stacks an array item's payload (the pipeline already tensorized the
-    per-record image via ``ConvertToImage`` → ``ToTensor``) into one ndarray, but leaves a plain
-    (non-item) value as a per-record list — both shapes are normalized here with a cheap,
-    memory-sharing ``torch.as_tensor``. ``device`` (the LightningModule's) moves the result onto the
-    accelerator — a tensor built here from a per-record list is created on the CPU regardless of
-    Lightning's own batch move.
+    Single-label: ``[N]`` int64 class ids. Multi-label (``multilabel=True``): ``[N, num_classes]``
+    FLOAT multi-hot — the shape the multi-label losses take (``BCEWithLogitsLoss`` /
+    ``MultiLabelSoftMarginLoss`` / ``SigmoidFocalLoss`` all want float targets shaped like the
+    logits, not int64 ids).
+
+    Reading the batch is the generic part and lives in recordstream
+    (:func:`~recordstream.batch_values` / :func:`~recordstream.batch_tensor`, the inverse of
+    ``collate_records``); this function is only the classification-specific SHAPING on top —
+    which is exactly why it stays here rather than moving down with the readers: a segmenter's
+    ``[N, H, W]`` mask and a detector's variable-N boxes start from the same values and need a
+    different shape, and one shared function would just be a task switch.
     """
-    data = item_data(batch[key])
-    if isinstance(data, list):
-        tensor = torch.stack([torch.as_tensor(v) for v in data])
-    else:
-        tensor = data if isinstance(data, torch.Tensor) else torch.as_tensor(np.asarray(data))
-    return tensor if device is None else tensor.to(device)
+    value = batch_values(batch, key)
+    if multilabel:
+        if not num_classes:
+            raise ValueError("_batch_target: multilabel targets need num_classes to build the multi-hot tensor.")
+        rows = value if isinstance(value, list) else [value]
+        multi_hot = torch.zeros(len(rows), int(num_classes), dtype=torch.float32)
+        for row, ids in enumerate(rows):
+            for class_id in ids if isinstance(ids, (list, tuple, set)) else [ids]:
+                index = int(class_id)
+                if 0 <= index < num_classes:
+                    multi_hot[row, index] = 1.0
+        return multi_hot if device is None else multi_hot.to(device)
+
+    return batch_tensor(batch, key, device)
 
 
-def _batch_target(batch: Record, key: str, device: Any = None) -> torch.Tensor:
-    """The ``[N]`` int64 target tensor under ``key`` in a :func:`~recordstream.collate_records` batch.
+def _per_record_predictions(preds: Any) -> List[Any]:
+    """Split a model's prediction output into ONE entry per record.
 
-    The target rides as a :class:`~recordstream.Label`; the generic record collate does NOT stack a
-    wrapper item's payload — it leaves ``Label.value`` as a per-record list — so the ``[N]`` tensor is
-    stacked here at the model boundary. A pre-stacked tensor value (hand-built batch) is used verbatim.
+    The sink contract (``write(prediction, metadata)``) is per-record, but a classification
+    model emits the whole batch at once. Handled shapes, in order: a list (already per-record),
+    a ``{"predictions": [...]}`` wrapper (a detector's convention), a batched mapping such as
+    :class:`~marainer.outputs.ClassificationOutput` (sliced row-wise into N mappings), and
+    anything else (treated as ONE prediction).
     """
-    item = batch[key]
-    value = item.value if isinstance(item, Label) else item_data(item)
-    if isinstance(value, list):
-        tensor = torch.stack([torch.as_tensor(v) for v in value])
-    else:
-        tensor = value if isinstance(value, torch.Tensor) else torch.as_tensor(np.asarray(value))
-    return tensor if device is None else tensor.to(device)
-
-
-def _batch_metadata(batch: Record, input_key: str, target_key: str) -> Optional[List[Dict[str, Any]]]:
-    """Per-record metadata dicts recovered from a :func:`~recordstream.collate_records` batch.
-
-    A collated batch carries every key besides the configured input / target as its own per-record
-    list (a :class:`~recordstream.Label`'s ``.value`` is a list, an array item a stacked payload) —
-    transpose them into a list-of-dicts so predictions sinks can correlate outputs to source
-    records. A hand-built batch that instead carries a single list-valued ``"metadata"`` key is
-    returned verbatim.
-    """
-    if "metadata" in batch and isinstance(batch["metadata"], list):
-        return list(batch["metadata"])
-    columns: Dict[str, Any] = {}
-    for key, item in batch.items():
-        if key in (input_key, target_key):
-            continue
-        columns[key] = item.value if isinstance(item, Label) else item_data(item)
-    if not columns:
-        return None
-    n = min(len(v) for v in columns.values())
-    return [{k: columns[k][i] for k in columns} for i in range(n)]
+    if isinstance(preds, list):
+        return preds
+    if isinstance(preds, dict):
+        if "predictions" in preds:
+            return list(preds["predictions"])
+        lengths = {len(v) for v in preds.values() if hasattr(v, "__len__")}
+        if len(lengths) == 1:
+            n = lengths.pop()
+            return [{k: v[i] for k, v in preds.items()} for i in range(n)]
+    return [preds]
 
 
 @configurable(task="classification", role="trainer", framework="torch")
@@ -208,10 +198,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         target_key: str = "class",
         label_map: Optional[LabelMap] = None,
         balance_classes: bool = True,
-        metrics: dict[str, Metric | LazyClass[Metric]] | MetricCollection = {
-            "accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1),
-            "f1_macro": LazyClass[Metric](MulticlassF1Score, average="macro"),
-        },
+        metrics: Optional[dict[str, Metric | LazyClass[Metric]] | MetricCollection] = None,
     ) -> None:
         super().__init__()
         self.model: Any = model
@@ -229,7 +216,11 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self.class_weights: Optional[torch.Tensor] = None
         self.max_epochs = max_epochs
         # Deferred runtime slots (flowed in the run methods) — standard Lightning defaults.
-        self.loss_fn: nn.Module = nn.CrossEntropyLoss()
+        # Sentinels: the right loss/metrics depend on whether the targets are single- or
+        # multi-label, which is only known once `initialize()` peeks the dataset. `None` means
+        # "not chosen" — a live default here could not be told apart from a user's explicit
+        # CrossEntropyLoss, so a multi-label config would train silently wrong.
+        self.loss_fn: Any = None
         self.optimizer: Any = LazyClass(torch.optim.AdamW, lr=1e-4, weight_decay=0.05)
         loader_kw = dict(
             collate_fn=collate_records,
@@ -241,7 +232,10 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self.val_loader: Any = LazyClass(DataLoader, shuffle=False, **loader_kw)
         self.test_loader: Any = LazyClass(DataLoader, shuffle=False, **loader_kw)
         self.lightning: Any = LazyClass(L.Trainer, max_epochs=max_epochs, logger=logger)
-        self.metrics = metrics
+        self.metrics: Any = metrics
+        #: True once `initialize()` sees multi-label targets. Drives the loss/metric defaults,
+        #: the multi-hot collate, and whether metrics size by `num_labels` or `num_classes`.
+        self.multilabel: bool = False
         self.train_metrics: Any = None
         self.val_metrics: Any = None
         self.test_metrics: Any = None
@@ -272,8 +266,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
 
     # ---- standard Lightning step functions ---------------------------------- #
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        x = _batch_input(batch, self.input_key, self.device)
-        y = _batch_target(batch, self.target_key, self.device)
+        self._resolve_task_defaults()  # no-op once resolved; keeps a directly-called step working
+        x = batch_tensor(batch, self.input_key, self.device)
+        y = _batch_target(batch, self.target_key, self.device, self.num_classes, self.multilabel)
         preds = self(x)
         loss: torch.Tensor = self.loss_fn(preds, y)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
@@ -287,8 +282,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             self.train_metrics.reset()
 
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        x = _batch_input(batch, self.input_key, self.device)
-        y = _batch_target(batch, self.target_key, self.device)
+        self._resolve_task_defaults()  # no-op once resolved; keeps a directly-called step working
+        x = batch_tensor(batch, self.input_key, self.device)
+        y = _batch_target(batch, self.target_key, self.device, self.num_classes, self.multilabel)
         preds = self(x)
         loss: torch.Tensor = self.loss_fn(preds, y)
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
@@ -298,20 +294,28 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         return loss
 
     def test_step(self, batch: Any, batch_idx: int) -> Any:
-        x = _batch_input(batch, self.input_key, self.device)
+        x = batch_tensor(batch, self.input_key, self.device)
         preds = self(x)
         if isinstance(self.test_metrics, MetricCollection):
-            self.test_metrics.update(preds, _batch_target(batch, self.target_key, self.device))
+            self.test_metrics.update(
+                preds, _batch_target(batch, self.target_key, self.device, self.num_classes, self.multilabel)
+            )
             self.log_dict(self.test_metrics, on_step=False, on_epoch=True, batch_size=x.shape[0])
         if self.predictions_sink is not None:
-            self._write_predictions(preds, batch)
+            self._write_predictions(classification_output(preds), batch)
         return preds
 
-    def predict_step(self, batch: Any, batch_idx: int) -> Any:
-        preds = self(_batch_input(batch, self.input_key, self.device))
+    def predict_step(self, batch: Any, batch_idx: int) -> ClassificationOutput[torch.Tensor]:
+        """Predict a batch as a :class:`~marainer.outputs.ClassificationOutput`.
+
+        Returning the CONTRACT rather than raw logits is what makes the output consumable:
+        a predictions sink reads ``probs`` / ``class_idx`` by name (it cannot softmax on the
+        caller's behalf — only the model knows whether its head already did).
+        """
+        out = classification_output(self(batch_tensor(batch, self.input_key, self.device)))
         if self.predictions_sink is not None:
-            self._write_predictions(preds, batch)
-        return preds
+            self._write_predictions(out, batch)
+        return out
 
     def configure_optimizers(self) -> Any:
         return flow(self.optimizer, params=self.parameters())
@@ -414,13 +418,22 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         if self.test_set is not None:
             self.test_set = ensure_record_dataset(flow(self.test_set))
 
-        kind = detect_target_kind(self.train_set, self.target_key)
-        if kind == "multilabel":
-            raise NotImplementedError("multi-label string targets are not yet supported.")
+        # `iter_key` unwraps a MultiLabel to its list of values, so a sequence here IS a
+        # multi-label target — the item type, not a guess about what a list might mean.
+        first = _first_target(self.train_set, self.target_key)
+        self.multilabel = isinstance(first, (list, tuple, set))
 
+        # Names need a LabelMap; ids do not. `is_class_id` is recordstream's rule (bool excluded,
+        # so a boolean flag wired to the target key cannot silently become class 1). For a
+        # multi-label target the question is asked of its FIRST member.
+        probe = next(iter(first), None) if self.multilabel else first
+        targets_are_names = probe is not None and not is_class_id(probe)
+        # Resolve the sentinels HERE: the capability probe below reads `loss_fn`, and an
+        # unresolved `None` would report "cannot be balanced" and skip the target walk.
+        self._resolve_task_defaults()
         nc = self._num_classes_without_data()
-        want_weights = self.balance_classes and _loss_accepts_weight(self.loss_fn)
-        need_fit = kind == "str" and self.label_map is None
+        want_weights = self.balance_classes and loss_accepts_weight(self.loss_fn)
+        need_fit = targets_are_names and self.label_map is None
         raw_targets: Optional[List[Any]] = None
         if need_fit or want_weights or nc is None:
             raw_targets = self._walk_targets(self.train_set)
@@ -429,7 +442,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             assert raw_targets is not None
             self.label_map = LabelMap.fit(raw_targets)
             logger.info(f"Fitted LabelMap with {self.label_map.num_classes} classes from train targets.")
-        if kind == "str" and self.label_map is not None:
+        if targets_are_names and self.label_map is not None:
             self.train_set = encode_stream(self.train_set, self.label_map)
             if self.val_set is not None:
                 self.val_set = encode_stream(self.val_set, self.label_map)
@@ -441,8 +454,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
                 nc = self.label_map.num_classes
             else:
                 assert raw_targets is not None
-                highest = max((_target_to_int(t) for t in raw_targets if t is not None), default=-1)
-                nc = highest + 1 if highest >= 0 else None
+                # An empty map still maps ids through — that is the `to_ids` contract.
+                ids = [i for t in raw_targets for i in LabelMap().to_ids(t)]
+                nc = max(ids) + 1 if ids else None
         if not nc:
             raise RuntimeError(
                 "could not determine num_classes — set it on the trainer/model or wire a labelled dataset."
@@ -450,11 +464,11 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self.num_classes = int(nc)
 
         if self.balance_classes and self.class_weights is None:
-            self._apply_class_weights(self.num_classes, kind, raw_targets)
+            self._apply_class_weights(self.num_classes, raw_targets)
 
         self.model = flow(self.model, num_classes=self.num_classes)
         if self.train_metrics is None:
-            base = build_metric_collection(self.metrics, num_classes=self.num_classes)
+            base = build_metric_collection(self.metrics, **self._metric_dims())
             self.train_metrics = base.clone(prefix="train/")
             self.val_metrics = base.clone(prefix="val/")
             self.test_metrics = base.clone(prefix="test/")
@@ -471,10 +485,11 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         if source is None:
             return
         dataset = ensure_record_dataset(flow(source))
-        kind = detect_target_kind(dataset, self.target_key)
-        if kind == "multilabel":
-            raise NotImplementedError("multi-label string targets are not yet supported.")
-        if kind == "str":
+        first = _first_target(dataset, self.target_key)
+        self.multilabel = isinstance(first, (list, tuple, set))
+        self._resolve_task_defaults()
+        probe = next(iter(first), None) if self.multilabel else first
+        if probe is not None and not is_class_id(probe):
             label_map = self.label_map or self._load_pinned_label_map()
             if label_map is None:
                 raise RuntimeError("eval dataset has string targets but no label_map and no class_names.json found.")
@@ -484,7 +499,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         metrics_slot = "val_metrics" if self.task == "evaluate" else "test_metrics"
         prefix = "val/" if self.task == "evaluate" else "test/"
         if getattr(self, metrics_slot) is None:
-            base = build_metric_collection(self.metrics, num_classes=self.num_classes)
+            base = build_metric_collection(self.metrics, **self._metric_dims())
             setattr(self, metrics_slot, base.clone(prefix=prefix))
 
     def _walk_targets(self, source: Any) -> List[Any]:
@@ -511,32 +526,62 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
                 return int(pinned)
         return None
 
-    def _apply_class_weights(self, num_classes: int, kind: _TargetKind, raw_targets: Optional[List[Any]]) -> None:
-        if not _loss_accepts_weight(self.loss_fn):
-            name: Any = getattr(self.loss_fn, "target", type(self.loss_fn).__name__)
-            logger.warning(f"balance_classes=True but the loss ({name}) has no 'weight' arg; training unweighted.")
-            self.class_weights = None
-            return
-        assert raw_targets is not None
-        if kind == "str":
-            assert self.label_map is not None
-            encoded = [self.label_map.mapping[str(t)] for t in raw_targets if t is not None]
-        else:
-            encoded = [_target_to_int(t) for t in raw_targets if t is not None]
-        counts = torch.zeros(num_classes, dtype=torch.float64)
-        for c in encoded:
-            if 0 <= c < num_classes:
-                counts[c] += 1
-        total = float(counts.sum())
-        if total <= 0:
-            return
-        weights = torch.where(counts > 0, total / (num_classes * counts), torch.zeros_like(counts))
-        self.class_weights = weights.to(torch.float32)
-        if isinstance(self.loss_fn, Fluid):
-            self.loss_fn = flow(self.loss_fn, weight=self.class_weights)
-        else:
-            self.loss_fn.weight = self.class_weights  # type: ignore[assignment]
-        logger.info(f"Balanced loss: injected inverse-frequency class weights for {num_classes} classes.")
+    def _resolve_task_defaults(self) -> None:
+        """Fill the ``loss_fn`` / ``metrics`` sentinels once the target shape is known.
+
+        Both defaults depend on :attr:`multilabel`, which `initialize()` derives from the data —
+        so they cannot be constructor defaults. A value the user DID wire is left untouched
+        (that is what the ``None`` sentinel buys: "not chosen" is distinguishable from "chosen
+        to be the single-label default").
+        """
+        if self.loss_fn is None:
+            # Multi-label needs per-class independent sigmoids; single-label a softmax over classes.
+            self.loss_fn = nn.BCEWithLogitsLoss() if self.multilabel else nn.CrossEntropyLoss()
+            logger.debug(f"loss_fn defaulted to {type(self.loss_fn).__name__} (multilabel={self.multilabel}).")
+        if self.metrics is None:
+            self.metrics = (
+                {
+                    "accuracy": LazyClass[Metric](MultilabelAccuracy),
+                    "f1_macro": LazyClass[Metric](MultilabelF1Score, average="macro"),
+                }
+                if self.multilabel
+                else {
+                    "accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1),
+                    "f1_macro": LazyClass[Metric](MulticlassF1Score, average="macro"),
+                }
+            )
+
+    def _metric_dims(self) -> dict[str, int]:
+        """The sizing kwarg metric templates are flowed with.
+
+        torchmetrics sizes multi-label metrics by ``num_labels`` and multi-class ones by
+        ``num_classes`` — same number, different keyword.
+        """
+        assert self.num_classes is not None
+        return {"num_labels": self.num_classes} if self.multilabel else {"num_classes": self.num_classes}
+
+    def _apply_class_weights(self, num_classes: int, raw_targets: Optional[List[Any]]) -> None:
+        """Encode the walked targets to class ids, then hand the policy to marainer.
+
+        Only the ENCODING is sonair's — it depends on this trainer's
+        :class:`~recordstream.LabelMap`. The capability check, the
+        inverse-frequency arithmetic and the injection are engine-generic and
+        live in :mod:`marainer.torch.balancing`, so a segmentation or detection
+        trainer gets them without reimplementing anything.
+        """
+        # `raw_targets` is None when no walk was needed — which, at this call site,
+        # means the loss is not weight-capable (`want_weights` gated the walk). Pass
+        # the empty set through rather than asserting: `apply_class_weights` does the
+        # capability check itself and emits the "loss has no 'weight' arg" warning,
+        # so the diagnostic stays in one place instead of being duplicated here.
+        # `to_ids` maps names through the fitted map AND passes already-encoded ids
+        # through, so there is no name-vs-id branch here at all. An empty LabelMap is
+        # valid for the id case — that is the contract.
+        label_map = self.label_map or LabelMap()
+        targets = [i for t in (raw_targets or []) if t is not None for i in label_map.to_ids(t)]
+        # Rebind: a deferred `!class:` loss is FLOWED with the weights, so the
+        # returned object is not the one passed in.
+        self.loss_fn, self.class_weights = apply_class_weights(self.loss_fn, targets, num_classes)
 
     def _load_pinned_label_map(self) -> Optional[LabelMap]:
         ckpt_path = getattr(self.model, "checkpoint_path", None)
@@ -555,15 +600,21 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
 
     # ---- predictions + tracking-side helpers -------------------------------- #
     def _write_predictions(self, preds: Any, batch: Any) -> None:
-        per_record_meta = _batch_metadata(batch, self.input_key, self.target_key) if isinstance(batch, dict) else None
-        items = (
-            preds["predictions"]
-            if isinstance(preds, dict) and "predictions" in preds
-            else (preds if isinstance(preds, list) else [preds])
+        """Write ONE prediction per record to the wired sink, paired with that record's metadata.
+
+        The model emits a BATCHED output (``probs`` ``[N, C]``, ``class_idx`` ``[N]``) while the
+        sink contract is per-record — so a batched :class:`~marainer.outputs.ClassificationOutput`
+        is sliced row-wise here. Handing the batch over whole was a real bug: the sink read
+        ``probs[0]`` as if it were one record's class distribution and silently dropped the
+        rest of the batch.
+        """
+        per_record_meta = (
+            batch_metadata(batch, exclude=(self.input_key, self.target_key)) if isinstance(batch, dict) else None
         )
-        for i in range(len(items)):
+        items = _per_record_predictions(preds)
+        for i, item in enumerate(items):
             m = per_record_meta[i] if per_record_meta and i < len(per_record_meta) else {}
-            self.predictions_sink.write(items[i], m)
+            self.predictions_sink.write(item, m)
 
     def _write_class_names(self, trainer: L.Trainer, label_names: List[str]) -> None:
         payload = {"class_names": label_names, "num_classes": len(label_names)}
@@ -638,4 +689,4 @@ def _resolve_label_names(dataset: Any) -> Optional[List[str]]:
         return None
 
 
-__all__ = ["ClassifierTask", "LightningClassifier", "detect_target_kind", "encode_stream"]
+__all__ = ["ClassifierTask", "LightningClassifier", "encode_stream"]

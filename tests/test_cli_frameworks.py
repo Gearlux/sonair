@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from confluid import configurable
 
 from sonair import cli
 from sonair.cli import TEMPLATES, BackendNotImplementedError
@@ -79,6 +80,67 @@ def test_dispatch_without_a_runnable_is_a_clear_error() -> None:
         cli._dispatch(None, "fit")
 
 
+@configurable
+class _ConfigRunnable:
+    """A runnable with the ergonomic-knob shape a flat sonair config drives."""
+
+    def __init__(self, task: str = "fit", max_epochs: int = 10, experiment_name: str = "default") -> None:
+        self.task, self.max_epochs, self.experiment_name = task, max_epochs, experiment_name
+        self.ran = False
+
+    def run(self) -> None:
+        self.ran = True
+
+
+def test_dispatch_builds_with_the_flat_configs_top_level_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The verbs must NOT bare-flow the bound node — that drops every top-level key.
+
+    A bare ``flow()`` leaves ``train_set`` at ``None`` and ``max_epochs`` at the
+    constructor default, SILENTLY, and the run proceeds looking configured.
+    """
+    import confluid
+    from liquifai.context import LiquifyContext, get_context, set_context
+
+    text = (
+        "runnable: !class:tests.test_cli_frameworks._ConfigRunnable\n"
+        "max_epochs: 3\n"
+        "experiment_name: from_the_flat_config\n"
+    )
+    document = confluid.load(text, flow=False)
+    previous = get_context()
+    ctx = LiquifyContext(name="test")
+    ctx.config_data = document
+    set_context(ctx)
+    try:
+        built: dict = {}
+        monkeypatch.setattr(_ConfigRunnable, "run", lambda self: built.update(vars(self)))
+        cli._dispatch(document["runnable"], "predict")
+    finally:
+        set_context(previous)
+
+    assert built["max_epochs"] == 3, "a bare flow() leaves this at the ctor default of 10 — silently"
+    assert built["experiment_name"] == "from_the_flat_config"
+    assert built["task"] == "predict", "the verb still wins over the config"
+
+
+def test_dispatch_uses_the_shared_materialize_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pins the seam itself: `_dispatch` delegates building to recordstream's helper."""
+    import recordstream.cli as rs_cli
+
+    seen: list = []
+    runnable = _FakeRunnable(task="something-else")
+
+    def _spy(node: Any) -> Any:
+        seen.append(node)
+        return node
+
+    monkeypatch.setattr(rs_cli, "materialize_runnable", _spy)
+    cli._dispatch(runnable, "fit")
+
+    assert seen == [runnable], "_dispatch must build through materialize_runnable, not a bare flow()"
+    assert runnable.task == "fit" and runnable.ran
+
+
 # ---------------------------------------------------------------------------
 # Templates fail informatively
 # ---------------------------------------------------------------------------
@@ -94,9 +156,10 @@ def test_template_verb_raises_with_instructions(backend: str) -> None:
     assert f"sonair/{backend}_classifier.py" in message  # the file to create
     assert "lightning_classifier.py" in message  # the reference to copy
     assert "sonair/cli.py" in message  # where to replace the template
-    # The pip extra survives Rich's markup parser (an unescaped `[keras]` would
-    # be eaten, printing `pip install 'sonair'` — a wrong instruction).
-    assert f"sonair\\[{backend}]" in message
+    # The install hint is raised as PLAIN text — liquifai >= 0.1.1 escapes it in its own
+    # failure renderer. Escaping here too would print the literal backslash.
+    assert f"pip install 'sonair[{backend}]'" in message
+    assert "\\[" not in message, "double-escaped: liquifai owns the markup escaping now"
 
 
 @pytest.mark.parametrize("backend", TEMPLATES)

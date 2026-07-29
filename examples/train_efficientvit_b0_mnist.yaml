@@ -64,12 +64,12 @@ max_epochs: 3
 # dead in both paths. Set `task:` only to change what a BARE `recordstream run`
 # does — e.g. `task: test` in an eval-only config that ships without a verb.
 
-runnable: !class:sonair.LightningClassifier
-
 # `!lazy:` so `initialize()` can inject the dataset-derived num_classes (10).
-model: !lazy:sonair.TimmModel
-  model_name: efficientvit_b0
-  pretrained: true
+runnable: !class:sonair.LightningClassifier
+  model: !lazy:sonair.TimmModel
+    model_name: efficientvit_b0
+    pretrained: true
+
 
 # Broadcasts into the classifier's ctor, which bakes it into its own
 # `LazyClass(pytorch_lightning.Trainer, logger=[...])`; `_build_trainer()`'s

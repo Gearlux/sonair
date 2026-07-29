@@ -8,10 +8,22 @@ import pytorch_lightning as L
 import torch
 import torch.nn as nn
 from confluid import Class
+from confluid.fluid import Fluid
 from recordstream import Label, Record, Stream
 from torchmetrics import MetricCollection
 
 from sonair.lightning_classifier import LightningClassifier
+
+
+def _stub(slot: Any) -> Fluid:
+    """The deferred Fluid behind a ``Lazy[T]`` slot — asserts it is STILL deferred, and narrows.
+
+    ``Lazy[T]`` is ``Union[T, Fluid]``, so reading ``.kwargs`` needs the Fluid arm. Going through
+    this helper means every such read also asserts the slot has not been eagerly built, which is
+    the property these tests actually care about.
+    """
+    assert isinstance(slot, Fluid), f"expected a deferred stub, got {type(slot).__name__}"
+    return slot
 
 
 def _ts(inp: Any, tgt: Any, **meta: Any) -> Record:
@@ -114,7 +126,7 @@ def test_loader_uses_collate_records_by_default() -> None:
     from recordstream import collate_records
 
     ev = _make_evaluator(model=_TinyClassifier(), dataset=_make_stream())
-    assert ev.test_loader.kwargs["collate_fn"] == collate_records
+    assert _stub(ev.test_loader).kwargs["collate_fn"] == collate_records
 
 
 def test_run_executes_test_loop(tmp_path: Any) -> None:

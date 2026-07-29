@@ -33,7 +33,7 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Union, cast
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
-from confluid import Fluid, LazyClass, Mandatory, configurable, flow, get_hierarchy_from_instance, output
+from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, get_hierarchy_from_instance, output
 from loggair import get_logger
 from marainer.lightning import (
     TrackingCallback,
@@ -45,23 +45,23 @@ from marainer.lightning import (
 )
 from marainer.outputs import ClassificationOutput
 from marainer.run_names import generate_run_name
-from marainer.torch import apply_class_weights, ensure_record_dataset, loss_accepts_weight
+from marainer.torch import RecordSource, apply_class_weights, ensure_record_dataset, loss_accepts_weight
 from marainer.torch.outputs import classification_output
 from marainer.tracking.base import Tracker
 from pytorch_lightning.loggers import Logger
 from recordstream import (
     LabelMap,
-    Record,
     Stream,
     batch_metadata,
     batch_tensor,
-    batch_values,
     collate_records,
     is_class_id,
     iter_key,
+    multi_hot,
 )
-from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint
-from torch.utils.data import DataLoader, Dataset
+from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint, run_entrypoint
+from torch.optim import Optimizer
+from torch.utils.data import DataLoader
 from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MultilabelAccuracy, MultilabelF1Score
 from tqdm import tqdm
@@ -86,51 +86,17 @@ def _first_target(source: Any, target_key: str) -> Any:
 
 
 def encode_stream(source: Any, label_map: LabelMap) -> Stream:
-    """Wrap ``source`` in a :class:`~recordstream.Stream` applying ``label_map``'s encode op.
+    """``label_map.encode(source)`` plus the ``label_names`` handoff marainer reads.
 
-    Exposes ``label_names`` on the returned Stream so :meth:`LightningClassifier._write_class_names`
-    persists ``class_names.json`` (reloaded on the eval/predict path via ``LabelMap.load``).
+    The Stream wrap itself is recordstream's (:meth:`~recordstream.LabelMap.encode`). What
+    stays here is the one sonair-specific line: exposing ``label_names`` on the returned
+    Stream so :meth:`LightningClassifier._write_class_names` persists ``class_names.json``
+    (reloaded on the eval/predict path via ``LabelMap.load``). That attribute is a
+    sonair<->marainer handoff, not a dataset concept, which is why it did not move down.
     """
-    stream = Stream(source=flow(source), ops=[label_map.encode_op()])
+    stream = label_map.encode(source)
     stream.label_names = label_map.label_names  # type: ignore[attr-defined]
     return stream
-
-
-def _batch_target(
-    batch: Record,
-    key: str,
-    device: Any = None,
-    num_classes: Optional[int] = None,
-    multilabel: bool = False,
-) -> torch.Tensor:
-    """The CLASSIFICATION target tensor under ``key`` in a batched record.
-
-    Single-label: ``[N]`` int64 class ids. Multi-label (``multilabel=True``): ``[N, num_classes]``
-    FLOAT multi-hot — the shape the multi-label losses take (``BCEWithLogitsLoss`` /
-    ``MultiLabelSoftMarginLoss`` / ``SigmoidFocalLoss`` all want float targets shaped like the
-    logits, not int64 ids).
-
-    Reading the batch is the generic part and lives in recordstream
-    (:func:`~recordstream.batch_values` / :func:`~recordstream.batch_tensor`, the inverse of
-    ``collate_records``); this function is only the classification-specific SHAPING on top —
-    which is exactly why it stays here rather than moving down with the readers: a segmenter's
-    ``[N, H, W]`` mask and a detector's variable-N boxes start from the same values and need a
-    different shape, and one shared function would just be a task switch.
-    """
-    value = batch_values(batch, key)
-    if multilabel:
-        if not num_classes:
-            raise ValueError("_batch_target: multilabel targets need num_classes to build the multi-hot tensor.")
-        rows = value if isinstance(value, list) else [value]
-        multi_hot = torch.zeros(len(rows), int(num_classes), dtype=torch.float32)
-        for row, ids in enumerate(rows):
-            for class_id in ids if isinstance(ids, (list, tuple, set)) else [ids]:
-                index = int(class_id)
-                if 0 <= index < num_classes:
-                    multi_hot[row, index] = 1.0
-        return multi_hot if device is None else multi_hot.to(device)
-
-    return batch_tensor(batch, key, device)
 
 
 def _per_record_predictions(preds: Any) -> List[Any]:
@@ -152,6 +118,20 @@ def _per_record_predictions(preds: Any) -> List[Any]:
             n = lengths.pop()
             return [{k: v[i] for k, v in preds.items()} for i in range(n)]
     return [preds]
+
+
+def _run_prefix(task: str) -> str:
+    return {"fit": "train", "predict": "predict"}.get(task, "evaluate")
+
+
+def _resolve_label_names(dataset: Any) -> Optional[List[str]]:
+    names = getattr(dataset, "label_names", None)
+    if not names:
+        return None
+    try:
+        return [str(n) for n in names]
+    except TypeError:
+        return None
 
 
 @configurable(task="classification", role="trainer", framework="torch")
@@ -183,9 +163,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
 
     def __init__(
         self,
-        model: Mandatory[nn.Module],
-        train_set: Optional[Union[Dataset[Any], Fluid]] = None,
-        test_set: Optional[Union[Dataset[Any], Fluid]] = None,
+        model: Mandatory[Lazy[nn.Module]],
+        train_set: Optional[Lazy[RecordSource]] = None,
+        test_set: Optional[Lazy[RecordSource]] = None,
         num_classes: Optional[int] = None,
         task: ClassifierTask = "fit",
         max_epochs: int = 10,
@@ -201,10 +181,10 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         metrics: Optional[dict[str, Metric | LazyClass[Metric]] | MetricCollection] = None,
     ) -> None:
         super().__init__()
-        self.model: Any = model
-        self.train_set: Any = train_set
-        self.val_set: Any = None
-        self.test_set: Any = test_set
+        self.model: Lazy[nn.Module] = model
+        self.train_set: Optional[Lazy[RecordSource]] = train_set
+        self.val_set: Optional[Lazy[RecordSource]] = None
+        self.test_set: Optional[Lazy[RecordSource]] = test_set
         self.task: ClassifierTask = task
         self.num_classes = int(num_classes) if num_classes is not None else None
         self.experiment_name = experiment_name
@@ -215,23 +195,33 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self.balance_classes = balance_classes
         self.class_weights: Optional[torch.Tensor] = None
         self.max_epochs = max_epochs
-        # Deferred runtime slots (flowed in the run methods) — standard Lightning defaults.
+        # Deferred runtime slots — `Lazy[T]` DECLARES that the run methods flow this later,
+        # usually with a kwarg that does not exist yet (`params=self.parameters()`, `dataset=`).
+        # What that buys differs by slot kind, and the difference is worth knowing:
+        #   * CONSTRUCTOR params (`model`/`train_set`/`test_set`) — the marker is machine-read:
+        #     `confluid.lazy_param_names` reports them and liquifai's auto deep-flow SKIPS them
+        #     instead of eagerly building them.
+        #   * BODY slots (below) — `lazy_param_names` scans `__init__` PARAMS only, so the
+        #     marker is inert here; what actually keeps them deferred is holding a `LazyClass`
+        #     value, which every walker recognises. The annotation still earns its place: it
+        #     gives `to_pydantic` a real type (navigaitor form-spec / StreamStudio widgets) where
+        #     `Any` — what this class used to say — typed nothing at all.
         # Sentinels: the right loss/metrics depend on whether the targets are single- or
         # multi-label, which is only known once `initialize()` peeks the dataset. `None` means
         # "not chosen" — a live default here could not be told apart from a user's explicit
         # CrossEntropyLoss, so a multi-label config would train silently wrong.
         self.loss_fn: Any = None
-        self.optimizer: Any = LazyClass(torch.optim.AdamW, lr=1e-4, weight_decay=0.05)
+        self.optimizer: Lazy[Optimizer] = LazyClass(torch.optim.AdamW, lr=1e-4, weight_decay=0.05)
         loader_kw = dict(
             collate_fn=collate_records,
             batch_size=batch_size,
             num_workers=num_workers,
             persistent_workers=num_workers != 0,
         )
-        self.train_loader: Any = LazyClass(DataLoader, shuffle=True, **loader_kw)
-        self.val_loader: Any = LazyClass(DataLoader, shuffle=False, **loader_kw)
-        self.test_loader: Any = LazyClass(DataLoader, shuffle=False, **loader_kw)
-        self.lightning: Any = LazyClass(L.Trainer, max_epochs=max_epochs, logger=logger)
+        self.train_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=True, **loader_kw)
+        self.val_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=False, **loader_kw)
+        self.test_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=False, **loader_kw)
+        self.lightning: Lazy[L.Trainer] = LazyClass(L.Trainer, max_epochs=max_epochs, logger=logger)
         self.metrics: Any = metrics
         #: True once `initialize()` sees multi-label targets. Drives the loss/metric defaults,
         #: the multi-hot collate, and whether metrics size by `num_labels` or `num_classes`.
@@ -255,11 +245,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
     # ---- run dispatch ------------------------------------------------------- #
     def run(self) -> None:
         self.initialize()
-        dispatch = {"fit": self.fit, "evaluate": self.evaluate, "test": self.test, "predict": self.predict}
-        entry = dispatch.get(self.task)
-        if entry is None:
-            raise ValueError(f"Unknown task {self.task!r}; expected one of {list(dispatch)}.")
-        entry()
+        # The `@entrypoint` markers below ARE the dispatch table — a hand-written
+        # {task: method} dict restates them and drifts (recordstream `docs/runnable.md`).
+        run_entrypoint(self, self.task)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return cast(torch.Tensor, cast(nn.Module, self.model)(x))
@@ -268,7 +256,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
         self._resolve_task_defaults()  # no-op once resolved; keeps a directly-called step working
         x = batch_tensor(batch, self.input_key, self.device)
-        y = _batch_target(batch, self.target_key, self.device, self.num_classes, self.multilabel)
+        y = self._targets(batch)
         preds = self(x)
         loss: torch.Tensor = self.loss_fn(preds, y)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
@@ -284,7 +272,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
         self._resolve_task_defaults()  # no-op once resolved; keeps a directly-called step working
         x = batch_tensor(batch, self.input_key, self.device)
-        y = _batch_target(batch, self.target_key, self.device, self.num_classes, self.multilabel)
+        y = self._targets(batch)
         preds = self(x)
         loss: torch.Tensor = self.loss_fn(preds, y)
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
@@ -297,9 +285,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         x = batch_tensor(batch, self.input_key, self.device)
         preds = self(x)
         if isinstance(self.test_metrics, MetricCollection):
-            self.test_metrics.update(
-                preds, _batch_target(batch, self.target_key, self.device, self.num_classes, self.multilabel)
-            )
+            self.test_metrics.update(preds, self._targets(batch))
             self.log_dict(self.test_metrics, on_step=False, on_epoch=True, batch_size=x.shape[0])
         if self.predictions_sink is not None:
             self._write_predictions(classification_output(preds), batch)
@@ -551,6 +537,21 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
                 }
             )
 
+    def _targets(self, batch: Any) -> torch.Tensor:
+        """The target tensor this task's loss expects — the ONLY task-shaped choice left.
+
+        Both branches are recordstream calls; what is classification-specific is WHICH one and
+        the dtype named for it. Multi-label wants an ``[N, C]`` float multi-hot (what
+        ``BCEWithLogitsLoss`` and friends consume), single-label an ``[N]`` int64 class-id
+        vector — ``int64`` explicitly, because a dataset yielding int32 label tensors is legal
+        and ``CrossEntropyLoss`` rejects it with *"expected scalar type Long but found Int"*.
+        """
+        if self.multilabel:
+            if not self.num_classes:
+                raise RuntimeError("multi-label targets need num_classes — call initialize() first.")
+            return torch.as_tensor(multi_hot(batch, self.target_key, self.num_classes)).to(self.device)
+        return batch_tensor(batch, self.target_key, self.device, dtype=torch.int64)
+
     def _metric_dims(self) -> dict[str, int]:
         """The sizing kwarg metric templates are flowed with.
 
@@ -673,20 +674,6 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         if self.label_map is not None:
             return list(self.label_map.label_names)
         return list(self._label_names or [])
-
-
-def _run_prefix(task: str) -> str:
-    return {"fit": "train", "predict": "predict"}.get(task, "evaluate")
-
-
-def _resolve_label_names(dataset: Any) -> Optional[List[str]]:
-    names = getattr(dataset, "label_names", None)
-    if not names:
-        return None
-    try:
-        return [str(n) for n in names]
-    except TypeError:
-        return None
 
 
 __all__ = ["ClassifierTask", "LightningClassifier", "encode_stream"]

@@ -10,7 +10,7 @@ dependencies = [
     # pulls the pl-side tracking helpers; [mlflow]/[tensorboard] add those tracker backends. sonair's
     # LightningClassifier is a standard pl.LightningModule and trains without marainer (a couple of
     # tracking lines would drop out).
-    "marainer[lightning,mlflow,tensorboard]>=0.2.0",
+    "marainer[lightning,mlflow,tensorboard]>=0.1.0",
     # 0.3.0 is the floor for the `framework=` discovery tag, passed at decoration
     # time in sonair/classification.py — against 0.2.0 every registration raises
     # TypeError at import.

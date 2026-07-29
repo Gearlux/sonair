@@ -76,12 +76,30 @@ def _make_records(n: int = 16, num_classes: int = 3, input_size: int = 4) -> Str
 
 
 def test_loss_fn_defaults_to_cross_entropy() -> None:
+    """The default is a SENTINEL until `initialize()` knows the target shape.
+
+    A live `CrossEntropyLoss` here could not be told apart from a user's explicit one, so a
+    multi-label config would silently train with the wrong loss.
+    """
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_records(16),
         num_classes=3,
     )
+    assert trainer.loss_fn is None
+    trainer.initialize()
     assert isinstance(trainer.loss_fn, nn.CrossEntropyLoss)
+
+
+def test_an_explicitly_wired_loss_is_never_replaced() -> None:
+    """The sentinel distinguishes "not chosen" from "chosen" — a wired loss survives."""
+    chosen = nn.MultiLabelSoftMarginLoss()
+    trainer = LightningClassifier(
+        model=_TinyClassifier(num_classes=3), train_set=_make_records(16), num_classes=3, balance_classes=False
+    )
+    trainer.loss_fn = chosen
+    trainer.initialize()
+    assert trainer.loss_fn is chosen
 
 
 def test_initialize_wires_metrics_with_correct_prefixes() -> None:
@@ -522,11 +540,82 @@ def test_explicit_label_map_drives_encoding_and_num_classes() -> None:
     assert next(iter(iter_key(train_set, "class"))) == lm.mapping[raw_name]
 
 
-def test_multilabel_string_targets_raise() -> None:
-    records = [_ts(torch.randn(4), ["a", "b"]) for _ in range(8)]
-    trainer = LightningClassifier(model=_TinyClassifier(num_classes=2), train_set=Stream(source=records))
-    with pytest.raises(NotImplementedError):
-        trainer.initialize()
+def test_multilabel_string_targets_fit_encode_and_train() -> None:
+    """Multi-label targets: names fitted to ids, BCE + Multilabel metrics chosen automatically."""
+    from recordstream import MultiLabel
+
+    records = [{"image": torch.randn(4), "class": MultiLabel(["a", "b"])} for _ in range(8)]
+    trainer = LightningClassifier(
+        model=_TinyClassifier(num_classes=2), train_set=Stream(source=records), balance_classes=False
+    )
+    trainer.initialize()
+
+    assert trainer.multilabel is True
+    assert isinstance(trainer.loss_fn, nn.BCEWithLogitsLoss)  # not CrossEntropy
+    assert trainer.num_classes == 2
+    assert trainer.label_map is not None and trainer.label_map.mapping == {"a": 0, "b": 1}
+
+
+def test_multilabel_targets_collate_to_a_float_multi_hot_matrix() -> None:
+    """The shape the multi-label losses need: [N, C] float, not [N] int64 ids."""
+    from recordstream import MultiLabel, collate_records
+
+    from sonair.lightning_classifier import _batch_target
+
+    batch = collate_records([{"class": MultiLabel([0, 2])}, {"class": MultiLabel([1])}])
+    y = _batch_target(batch, "class", num_classes=3, multilabel=True)
+
+    assert y.shape == (2, 3)
+    assert y.dtype is torch.float32
+    assert y.tolist() == [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+
+
+def test_multilabel_fit_runs_end_to_end(tmp_path: object) -> None:
+    """The whole multi-label path: MultiLabel targets -> multi-hot -> BCE -> Multilabel metrics.
+
+    The unit tests above pin each seam; this proves they compose — a `[N, C]` float target
+    against `[N, C]` logits is exactly what a shape mismatch would blow up on.
+    """
+    from confluid import Class as ConfluidClass
+    from recordstream import MultiLabel, collate_records
+    from torch.utils.data import DataLoader
+
+    records = [{"image": torch.randn(4), "class": MultiLabel([i % 3, (i + 1) % 3])} for i in range(16)]
+    trainer = LightningClassifier(
+        model=_TinyClassifier(num_classes=3), train_set=Stream(source=records), balance_classes=False
+    )
+    trainer.train_loader = ConfluidClass(DataLoader, batch_size=8, collate_fn=collate_records)
+    trainer.lightning = _cpu_lightning(tmp_path)
+    trainer.run()
+
+    assert trainer.multilabel is True
+    assert isinstance(trainer.loss_fn, nn.BCEWithLogitsLoss)
+    sized = [m for m in trainer.val_metrics.values() if hasattr(m, "num_labels")]
+    assert sized and all(m.num_labels == 3 for m in sized)
+
+
+def test_multilabel_metrics_are_sized_by_num_labels() -> None:
+    """torchmetrics sizes multi-label metrics by `num_labels`, multi-class by `num_classes`."""
+    trainer = LightningClassifier(model=_TinyClassifier(num_classes=3), num_classes=3)
+    trainer.multilabel = True
+    assert trainer._metric_dims() == {"num_labels": 3}
+    trainer.multilabel = False
+    assert trainer._metric_dims() == {"num_classes": 3}
+
+
+def test_multilabel_class_weights_count_every_label() -> None:
+    """Balancing flattens a MultiLabel's ids — a record with two labels counts for both."""
+    from recordstream import MultiLabel
+
+    records = [{"image": torch.randn(4), "class": MultiLabel([0, 1])} for _ in range(6)]
+    records += [{"image": torch.randn(4), "class": MultiLabel([2])} for _ in range(2)]
+    trainer = LightningClassifier(model=_TinyClassifier(num_classes=3), train_set=Stream(source=records), num_classes=3)
+    trainer.loss_fn = nn.BCEWithLogitsLoss()  # weight-capable
+    trainer.initialize()
+
+    assert trainer.class_weights is not None
+    # class 2 appears twice, classes 0/1 six times each -> the rare class weighs more
+    assert trainer.class_weights[2] > trainer.class_weights[0]
 
 
 # ---------------------------------------------------------------------------
@@ -586,16 +675,25 @@ def test_balance_skipped_when_loss_not_weight_capable() -> None:
     assert isinstance(trainer.loss_fn, nn.MSELoss)
 
 
-def test_loss_accepts_weight_checks_constructor() -> None:
-    # The confluid-aware balance-capability check, on both live and deferred (lazy/Fluid) losses.
-    from confluid import LazyClass
+def test_balancing_policy_is_delegated_to_marainer() -> None:
+    """sonair owns only the ENCODING; the policy is `marainer.torch.balancing`.
 
-    from sonair.lightning_classifier import _loss_accepts_weight
+    The capability check / inverse-frequency arithmetic / injection are pinned
+    in marainer's own suite (tests/test_balancing.py) — duplicating them here
+    would let the two drift. This pins the SEAM: sonair calls the shared
+    helpers rather than carrying a private copy.
+    """
+    import inspect
 
-    assert _loss_accepts_weight(nn.CrossEntropyLoss()) is True  # live, weight in ctor
-    assert _loss_accepts_weight(nn.MSELoss()) is False  # live, no weight arg
-    assert _loss_accepts_weight(LazyClass(nn.CrossEntropyLoss)) is True  # deferred, resolved via target
-    assert _loss_accepts_weight(LazyClass(nn.MSELoss)) is False  # deferred, no weight arg
+    from marainer.torch import apply_class_weights, loss_accepts_weight
+
+    from sonair import lightning_classifier
+
+    assert lightning_classifier.loss_accepts_weight is loss_accepts_weight
+    assert lightning_classifier.apply_class_weights is apply_class_weights
+    assert not hasattr(lightning_classifier, "_loss_accepts_weight"), "the private copy must stay deleted"
+    # The encoding — the one genuinely sonair-specific step — stays local.
+    assert "encoded" in inspect.getsource(lightning_classifier.LightningClassifier._apply_class_weights)
 
 
 def test_metrics_accepts_ready_made_collection() -> None:

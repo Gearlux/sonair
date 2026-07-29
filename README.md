@@ -10,7 +10,7 @@ ONE standard `pytorch_lightning.LightningModule` with its own
 `training_step` / `validation_step` / `test_step` / `predict_step` /
 `configure_optimizers`, and a `run()` that dispatches on a `task` knob
 (`fit` / `evaluate` / `test` / `predict`). Its standard
-`preds = self(self._batch_input(batch)); loss = self.loss_fn(preds, self._batch_target(batch))`
+`preds = self(batch_tensor(batch, self.input_key)); loss = self.loss_fn(preds, _batch_target(batch, self.target_key))`
 flow — reading the primary input and target-`Label` fields off the batched typed
 record — a plain dict of typed values — fits classification natively. Marainer is now used only for OPTIONAL experiment
 tracking plus a couple of torch utilities.
@@ -179,8 +179,8 @@ train_set: !class:recordstream.sources.HuggingFaceSource
 When the dataset's `target` is a **class-name string** (a generic HF imagefolder, etc.) rather
 than an integer id, `initialize()` auto-encodes it:
 
-- **Encoding** — it fits a `recordstream.LabelMap` from the train targets (scikit-learn
-  `LabelEncoder`, shown with a progress bar), or uses a `label_map` you pass in. The wired
+- **Encoding** — it fits a `recordstream.LabelMap` from the train targets (deterministic
+  sorted-unique ordering, shown with a progress bar), or uses a `label_map` you pass in. The wired
   `train`/`val`/`test` sets are wrapped so their targets become ids, and the map's class names are
   persisted to `class_names.json` next to the checkpoint — which a `task: evaluate` / `test` /
   `predict` run reloads (via `recordstream.LabelMap.load`) so eval/predict share the identical
@@ -205,7 +205,62 @@ train_set: !class:recordstream.sources.HuggingFaceSource
   split: train
 ```
 
-Multi-label string targets (a *sequence* of names) are not yet supported and raise a clear error.
+## Multi-label classification
+
+A record whose target is a `recordstream.MultiLabel` (several classes at once) needs no extra
+configuration — `initialize()` detects it from the data and switches three things at once:
+
+| | single-label (`Label`) | multi-label (`MultiLabel`) |
+|---|---|---|
+| target tensor | `[N]` int64 class ids | `[N, C]` **float** multi-hot |
+| default `loss_fn` | `torch.nn.CrossEntropyLoss` | `torch.nn.BCEWithLogitsLoss` |
+| default metrics | `Multiclass*` sized by `num_classes` | `Multilabel*` sized by `num_labels` |
+
+Class-name strings are encoded exactly as in the single-label case (the same `LabelMap`, fitted
+over every member of every record's label set), and `balance_classes` counts each of a record's
+labels, so a record with two labels contributes to both classes' frequencies.
+
+```yaml
+runnable: !class:sonair.LightningClassifier
+  task: fit
+  # nothing multi-label-specific: MultiLabel targets in the data are enough.
+  # Override either default explicitly if you want something else:
+  # loss_fn: !class:sonair.classification.SigmoidFocalLoss { alpha: 0.25 }
+  # metrics:
+  #   exact_match: !lazy:sonair.classification.MultilabelExactMatch
+```
+
+Wiring a `loss_fn` or `metrics` yourself always wins — the defaults only fill an **unset** slot
+(both are `None` until `initialize()` runs, which is how "not chosen" stays distinguishable from
+"chosen"; see [docs/architecture.md](docs/architecture.md) §3).
+
+The prediction sink still writes top-k entries per record; a threshold-based multi-label sink is
+open work (see `TASKS.md`).
+
+## What `predict` returns
+
+`task: predict` emits a `marainer.outputs.ClassificationOutput` per batch — not raw logits:
+
+| Key | Shape | Meaning |
+|---|---|---|
+| `logits` | `[N, C]` | raw pre-softmax scores |
+| `probs` | `[N, C]` | softmax over the class dim |
+| `class_idx` | `[N]` int64 | argmax |
+
+A predictions sink reads `probs` / `class_idx` **by name** — it cannot softmax on the caller's
+behalf, since only the model knows whether its head already did. Wire one under
+`predictions_sink` and the classifier slices the batch row-wise, writing one entry per record
+paired with that record's metadata:
+
+```yaml
+runnable: !class:sonair.LightningClassifier
+  task: predict
+  predictions_sink: !class:marainer.sinks.ClassificationPredictionsSink
+    top_k: 3
+    ops:
+      - !class:recordstream.ops.sink.RecordSinkOp
+        sink: ...
+```
 
 ## Adapters
 
@@ -213,13 +268,17 @@ Multi-label string targets (a *sequence* of names) are not yet supported and rai
 |--------|---------|
 | `torch.nn.CrossEntropyLoss` | The default classification loss — registered (no sonair wrapper) as `task="classification", role="loss"`; set `label_smoothing` / `ignore_index` / `reduction` from YAML. Consumes int64 class-id targets `[N]`. |
 | `SigmoidFocalLoss` | Thin `nn.Module` wrapper over `torchvision.ops.sigmoid_focal_loss` (a function, which confluid's `register` can't tag) — a pickable `task="classification", role="loss"` configurable with `alpha` / `gamma` / `reduction` knobs. Expects **float** targets the same shape as the logits (e.g. one-hot `[N, C]`), like the `BCEWithLogitsLoss` family. Defaults `reduction="mean"` (a scalar loss), not torchvision's `"none"`. |
-| `recordstream.collate_records` | The generic DataLoader collate the classifier wires in (no bespoke sonair collate). Stacks the already-tensorized input under `input_key` (default `image`) to `[N, 3, H, W]` and leaves the other keys as per-record lists; the model boundary stacks the `Label` target under `target_key` (default `class`) into an `[N]` int64 tensor. |
+| `torch.nn.BCEWithLogitsLoss` | The default **multi-label** loss (also registered, `role="loss"`). Consumes float multi-hot targets `[N, C]` shaped like the logits. |
+| `recordstream.collate_records` | The generic DataLoader collate the classifier wires in (no bespoke sonair collate). Stacks the already-tensorized input under `input_key` (default `image`) to `[N, 3, H, W]` and leaves the other keys as per-record lists; the model boundary reads it back with `recordstream.batch_tensor` / `batch_metadata` and stacks the `Label` target under `target_key` (default `class`) into an `[N]` int64 tensor — or builds an `[N, C]` float multi-hot from a `MultiLabel`. |
 | `load_lightning_checkpoint` | `marainer.torch` helper that strips Lightning's `"model."` prefix when loading a `.ckpt` saved by `sonair.LightningClassifier`. |
 
-Most torchmetrics classification metrics
-(`MulticlassAccuracy`, `MulticlassF1Score`, `MulticlassAUROC`, ...) accept
-logits directly and emit a scalar — they wire into `val_metrics` straight
-from YAML, no adapter needed.
+Most torchmetrics classification metrics accept logits directly and emit a
+scalar — they wire into `val_metrics` straight from YAML, no adapter needed.
+Both families are registered: `Multiclass*` (`MulticlassAccuracy`,
+`MulticlassF1Score`, `MulticlassAUROC`, ...), sized by `num_classes`, and
+`Multilabel*` (`MultilabelAccuracy`, `MultilabelF1Score`,
+`MultilabelExactMatch`, ...), sized by `num_labels`. The classifier picks the
+family that matches the data; name one explicitly to override.
 
 ## Optional tracking via marainer
 

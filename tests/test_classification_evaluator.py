@@ -97,8 +97,9 @@ def test_declares_computed_metrics_and_label_names_outputs() -> None:
 
 def test_test_metrics_are_built_in_initialize() -> None:
     ev = _make_evaluator(model=_TinyClassifier(num_classes=3), dataset=_make_stream(8))
-    assert isinstance(ev.metrics, dict)  # the template dict on construction
+    assert ev.metrics is None  # sentinel: the right family depends on the target shape
     ev.initialize()
+    assert isinstance(ev.metrics, dict)  # resolved template dict
     assert isinstance(ev.test_metrics, MetricCollection)  # built collection
 
 
@@ -126,7 +127,7 @@ def test_run_executes_test_loop(tmp_path: Any) -> None:
     ev = _make_evaluator(model=_FlattenTinyClassifier(input_size=3 * 8 * 8), dataset=_make_stream())
     # _make_stream yields records with BARE-tensor "image" values, so collate them with the test-only
     # pre-stacking collate; the classifier's step functions read the batch dict through the same
-    # _batch_input / _batch_target accessors.
+    # batch_tensor / _batch_target accessors.
     ev.test_loader = Class(DataLoader, batch_size=8, collate_fn=_stack_collate)
     ev.lightning = Class(
         L.Trainer,

@@ -4,7 +4,7 @@ Classification is the simplest fit for the classifier: it takes ``[N, 3, H, W]``
 images and emits ``[N, C]`` logits, and the loss / metric pair both consume
 ``(logits, target_class_ids)`` directly. No step-output dict, no per-mode forward
 divergence — the classifier recovers the input tensor + target tensor from the
-batched record dict (via ``_batch_input`` / ``_batch_target``)
+batched record dict (via ``recordstream.batch_tensor`` / ``_batch_target``)
 and its standard ``preds = self(x)`` / ``loss = self.loss_fn(preds, y)`` flow runs.
 
 Loss: the default classification loss is :class:`torch.nn.CrossEntropyLoss`
@@ -34,17 +34,21 @@ its DataLoader collate — there is no bespoke sonair collate. The config pipeli
 tensorizes the input (``ConvertToImageOp`` → ``ToTensorOp``) so at collate time each
 record's input key is already a ``[3, H, W]`` :class:`~recordstream.Image`;
 ``collate_records`` stacks it to ``[N, 3, H, W]`` and gathers the remaining
-keys as per-record lists. The classifier's model boundary
-(:func:`sonair.lightning_classifier._batch_input` / ``_batch_target``) unwraps the batched input
-tensor and stacks the ``Label`` target's per-record list into an ``[N]`` int64 tensor.
+keys as per-record lists. The classifier's model boundary reads it back with the generic
+:func:`recordstream.batch_tensor` and shapes the target with
+:func:`sonair.lightning_classifier._batch_target` (an ``[N]`` int64 tensor, or an ``[N, C]``
+float multi-hot for a :class:`~recordstream.MultiLabel`).
 
-Metrics: the useful ``torchmetrics.classification`` multiclass metrics
-(:class:`~torchmetrics.classification.MulticlassAccuracy`,
-:class:`~torchmetrics.classification.MulticlassF1Score`, …) are registered here
-(``_CLASSIFICATION_METRICS``, ``role="metric"``) — they accept logits directly as
-``preds`` and emit a scalar by default (no adapter), so they're navigaitor
-metric-slot options, StreamStudio OBJECT nodes, and wirable into ``val_metrics``
-straight from YAML. Each takes ``num_classes`` (dataset-derived at run time).
+Metrics: the useful ``torchmetrics.classification`` metrics — BOTH families,
+multiclass (:class:`~torchmetrics.classification.MulticlassAccuracy`, …) and
+multi-label (:class:`~torchmetrics.classification.MultilabelAccuracy`, …) — are
+registered here (``_CLASSIFICATION_METRICS``, ``role="metric"``); they accept
+logits directly as ``preds`` and emit a scalar by default (no adapter), so
+they're navigaitor metric-slot options, StreamStudio OBJECT nodes, and wirable
+into ``val_metrics`` straight from YAML. The two families differ in their sizing
+knob — ``num_classes`` for multiclass, ``num_labels`` for multi-label (both
+dataset-derived at run time) — and in the target they consume: int64 class ids
+``[N]`` vs a float multi-hot ``[N, C]``.
 
 Typical wiring (YAML)::
 
@@ -87,6 +91,18 @@ from torchmetrics.classification import (
     MulticlassPrecision,
     MulticlassRecall,
     MulticlassSpecificity,
+    MultilabelAccuracy,
+    MultilabelAUROC,
+    MultilabelAveragePrecision,
+    MultilabelConfusionMatrix,
+    MultilabelExactMatch,
+    MultilabelF1Score,
+    MultilabelHammingDistance,
+    MultilabelJaccardIndex,
+    MultilabelMatthewsCorrCoef,
+    MultilabelPrecision,
+    MultilabelRecall,
+    MultilabelSpecificity,
 )
 from torchvision.ops import sigmoid_focal_loss
 
@@ -134,6 +150,26 @@ _CLASSIFICATION_METRICS = (
     MulticlassJaccardIndex,
     MulticlassCalibrationError,
     MulticlassHammingDistance,
+    # Multi-label counterparts — sized by ``num_labels`` (not ``num_classes``) and fed a
+    # float multi-hot ``[N, C]`` target, so they are a DISTINCT family rather than an
+    # option on the multiclass ones. The classifier picks between the two automatically
+    # (``LightningClassifier._resolve_task_defaults``); these registrations are what make
+    # the multi-label choice explicitly wirable from YAML and pickable in the GUIs.
+    # ``MulticlassCohenKappa`` / ``MulticlassCalibrationError`` have no multi-label
+    # counterpart in torchmetrics; ``MultilabelExactMatch`` (subset accuracy) has no
+    # multiclass one.
+    MultilabelAccuracy,
+    MultilabelF1Score,
+    MultilabelPrecision,
+    MultilabelRecall,
+    MultilabelAUROC,
+    MultilabelAveragePrecision,
+    MultilabelSpecificity,
+    MultilabelMatthewsCorrCoef,
+    MultilabelConfusionMatrix,
+    MultilabelJaccardIndex,
+    MultilabelHammingDistance,
+    MultilabelExactMatch,
 )
 for _metric_cls in _CLASSIFICATION_METRICS:
     register(_metric_cls, task="classification", role="metric", framework="torch")
@@ -229,4 +265,17 @@ __all__ = [
     "MulticlassJaccardIndex",
     "MulticlassCalibrationError",
     "MulticlassHammingDistance",
+    # metrics (torchmetrics.classification) — role="metric", multi-label family
+    "MultilabelAccuracy",
+    "MultilabelF1Score",
+    "MultilabelPrecision",
+    "MultilabelRecall",
+    "MultilabelAUROC",
+    "MultilabelAveragePrecision",
+    "MultilabelSpecificity",
+    "MultilabelMatthewsCorrCoef",
+    "MultilabelConfusionMatrix",
+    "MultilabelJaccardIndex",
+    "MultilabelHammingDistance",
+    "MultilabelExactMatch",
 ]

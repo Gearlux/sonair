@@ -43,19 +43,25 @@ class BackendNotImplementedError(LiquifaiError, NotImplementedError):
 
 
 def _dispatch(runnable: Any, task: str) -> None:
-    """Flow the bound runnable, force ``task``, and run it.
+    """Build the bound runnable, force ``task``, and run it.
 
     The verb wins over any ``task:`` set in YAML, so one config serves all
     three verbs. Backend-agnostic: needs only a ``task`` attribute and ``run()``.
+
+    Building goes through ``recordstream.cli.materialize_runnable`` — NOT a bare
+    ``flow()`` — because the flat config's top-level keys (``train_set`` /
+    ``batch_size`` / ``max_epochs`` / ``logger`` …) only broadcast into the
+    constructor when the node is built against the document it came from. A bare
+    flow drops them SILENTLY: `train_set` becomes None and `max_epochs` quietly
+    falls back to the constructor default. Same helper as `recordstream run`, so
+    both runners share one answer.
     """
     if runnable is None:
         raise ValueError("No runnable was bound — provide one under 'runnable:' in your YAML.")
 
-    from confluid import flow
-    from confluid.fluid import Fluid
+    from recordstream.cli import materialize_runnable
 
-    if isinstance(runnable, Fluid):
-        runnable = flow(runnable)
+    runnable = materialize_runnable(runnable)
     if hasattr(runnable, "task"):
         runnable.task = task  # the verb wins over the YAML's task
     runnable.run()
@@ -71,19 +77,19 @@ lightning = LiquifyApp(
 )
 
 
-@lightning.script_command(flow_mode="auto")
+@lightning.script_command(flow_mode="manual")
 def train(runnable: Any) -> None:
     """Train an image classifier with PyTorch Lightning (task=fit)."""
     _dispatch(runnable, "fit")
 
 
-@lightning.script_command(flow_mode="auto")
+@lightning.script_command(flow_mode="manual")
 def evaluate(runnable: Any) -> None:
     """Evaluate a trained classifier over the test set (task=test)."""
     _dispatch(runnable, "test")
 
 
-@lightning.script_command(flow_mode="auto")
+@lightning.script_command(flow_mode="manual")
 def predict(runnable: Any) -> None:
     """Stream predictions from a trained classifier to its sink (task=predict)."""
     _dispatch(runnable, "predict")
@@ -140,12 +146,11 @@ def _template_command(name: str, verb: str) -> Callable[[], None]:
     """
 
     def command() -> None:
-        # Escaped for liquifai's failure handler, which interpolates the
-        # exception into a Rich markup string — an unescaped `sonair[keras]`
-        # loses its extra and prints `pip install 'sonair'`, a WRONG command.
-        from rich.markup import escape
-
-        raise BackendNotImplementedError(escape(_template_message(name, verb)))
+        # No escaping here: liquifai >= 0.1.1 escapes the message in its own failure
+        # renderer, so `pip install 'sonair[keras]'` survives with its extra intact.
+        # (Against 0.1.0 it printed `pip install 'sonair'` — Rich read `[keras]` as a
+        # style tag — and sonair escaped at the raise site to compensate.)
+        raise BackendNotImplementedError(_template_message(name, verb))
 
     command.__name__ = f"{name}_{verb}"
     command.__doc__ = f"{verb.capitalize()} with {name} — NOT IMPLEMENTED (backend template)."

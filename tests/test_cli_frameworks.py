@@ -26,11 +26,22 @@ VERBS = ("train", "evaluate", "predict")
 VERB_TASKS = {"train": "fit", "evaluate": "test", "predict": "predict"}
 
 
-def test_lightning_and_the_templates_are_all_mounted() -> None:
-    assert set(cli.app._sub_apps) == {"lightning", *TEMPLATES}
+#: The backends that actually train. A template graduating moves it to this list, and the
+#: two tests below then hold it to the SAME verb surface as the others — which is the whole
+#: claim of the framework dimension.
+IMPLEMENTED = ("lightning", "keras")
 
 
-@pytest.mark.parametrize("backend", ["lightning", *TEMPLATES])
+def test_every_backend_is_mounted() -> None:
+    assert set(cli.app._sub_apps) == {*IMPLEMENTED, *TEMPLATES}
+
+
+def test_an_implemented_backend_is_not_also_a_template() -> None:
+    """A graduated backend must be removed from TEMPLATES, or its verbs would still raise."""
+    assert not set(IMPLEMENTED) & set(TEMPLATES)
+
+
+@pytest.mark.parametrize("backend", [*IMPLEMENTED, *TEMPLATES])
 def test_every_backend_exposes_the_same_verbs(backend: str) -> None:
     """Templates advertise train/evaluate/predict too — the roadmap is visible."""
     assert set(cli.app._sub_apps[backend]._commands) == set(VERBS)
@@ -173,7 +184,7 @@ def test_template_exits_1_through_the_cli(monkeypatch: pytest.MonkeyPatch, capsy
     """End-to-end: one clean `Error:` line, exit 1 — not an unhandled traceback."""
     from liquifai.context import set_context
 
-    monkeypatch.setattr(sys, "argv", ["sonair", "keras", "train"])
+    monkeypatch.setattr(sys, "argv", ["sonair", "tensorflow", "train"])
     set_context(None)  # type: ignore[arg-type]
 
     with pytest.raises(SystemExit) as ei:
@@ -205,7 +216,7 @@ if __name__ == "__main__":
 # verb picks the scope so the backend is never named twice.
 
 
-@pytest.mark.parametrize("backend", ["lightning", *TEMPLATES])
+@pytest.mark.parametrize("backend", [*IMPLEMENTED, *TEMPLATES])
 def test_verb_injects_its_framework_scope(backend: str) -> None:
     argv = ["sonair", backend, "train", "cfg.yaml"]
     cli._inject_framework_scope(argv)

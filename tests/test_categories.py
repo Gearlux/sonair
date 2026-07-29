@@ -9,7 +9,7 @@ dropped tag fails CI instead of silently emptying a picker.
 from confluid.registry import get_registry
 
 import sonair.classification  # noqa: F401 — import for the register(nn.CrossEntropyLoss, ...) side effect
-from sonair.timm_classifier import TimmModel
+from sonair.timm_model import TimmModel
 
 
 def test_classification_classes_tagged() -> None:
@@ -88,7 +88,7 @@ def test_all_exports_registered_losses_and_metrics() -> None:
 def test_every_sonair_registration_declares_framework_torch() -> None:
     from sonair.classification import _CLASSIFICATION_LOSSES, _CLASSIFICATION_METRICS, SigmoidFocalLoss
     from sonair.lightning_classifier import LightningClassifier
-    from sonair.timm_classifier import TimmModel
+    from sonair.timm_model import TimmModel
 
     tagged = (
         *_CLASSIFICATION_LOSSES,

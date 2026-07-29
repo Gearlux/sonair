@@ -1,11 +1,11 @@
-"""Tests for :class:`sonair.timm_classifier.TimmModel`."""
+"""Tests for :class:`sonair.timm_model.TimmModel`."""
 
 from pathlib import Path
 
 import pytest
 import torch
 
-from sonair.timm_classifier import TimmModel
+from sonair.timm_model import TimmModel
 
 # efficientvit_b0's native input is 224x224. Use a smaller backbone that
 # tolerates arbitrary sizes for fast tests; resnet18 with 64x64 keeps the

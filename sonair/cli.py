@@ -5,8 +5,10 @@ The framework is a first-class dimension of the command line::
     sonair lightning train    cfg.yaml     # implemented
     sonair lightning evaluate cfg.yaml
     sonair lightning predict  cfg.yaml
-    sonair keras      train   cfg.yaml     # template — raises with instructions
-    sonair tensorflow train   cfg.yaml     # template
+    sonair keras      train   cfg.yaml     # implemented (Keras 3)
+    sonair keras      evaluate cfg.yaml
+    sonair keras      predict  cfg.yaml
+    sonair tensorflow train   cfg.yaml     # template — raises with instructions
     sonair jax        train   cfg.yaml     # template
     sonair huggingface train  cfg.yaml     # template
     sonair mlx        train   cfg.yaml     # template
@@ -99,13 +101,54 @@ app.add_app(lightning, "lightning")
 
 
 # --------------------------------------------------------------------------- #
+# keras — the second implemented backend
+# --------------------------------------------------------------------------- #
+# Written out plainly, like `lightning` above it and for the same reason: two sub-apps
+# that each call `_dispatch` share three lines, which is less than any indirection that
+# would remove the duplication. Revisit if a THIRD real backend lands.
+#
+# Keras 3 chooses its compute backend from `KERAS_BACKEND` at import time; sonair imports
+# keras through `sonair._keras`, which defaults it to `torch` (the one this package
+# guarantees) when the operator has not chosen. So `sonair keras train` works out of the
+# box, and `KERAS_BACKEND=tensorflow sonair keras train` runs the identical config on
+# TensorFlow once that is installed.
+
+keras = LiquifyApp(
+    name="keras",
+    description="Keras 3 — one API over PyTorch / TensorFlow / JAX (set KERAS_BACKEND to pick).",
+)
+
+
+# `name=` is explicit because the handlers cannot both be called `train`: liquifai derives a
+# command's name from the function name, and two module-level `def train` would collide.
+@keras.script_command(name="train", flow_mode="manual")
+def keras_train(runnable: Any) -> None:
+    """Train an image classifier with Keras 3 (task=fit)."""
+    _dispatch(runnable, "fit")
+
+
+@keras.script_command(name="evaluate", flow_mode="manual")
+def keras_evaluate(runnable: Any) -> None:
+    """Evaluate a trained classifier over the test set (task=test)."""
+    _dispatch(runnable, "test")
+
+
+@keras.script_command(name="predict", flow_mode="manual")
+def keras_predict(runnable: Any) -> None:
+    """Stream predictions from a trained classifier to its sink (task=predict)."""
+    _dispatch(runnable, "predict")
+
+
+app.add_app(keras, "keras")
+
+
+# --------------------------------------------------------------------------- #
 # Backend templates — verbs exist so `--help` and TAB advertise the roadmap,
 # and each names the work instead of shrugging. Replace a block with a real
 # sub-app (like `lightning` above) once its runnable class exists.
 # --------------------------------------------------------------------------- #
 
 TEMPLATES = {
-    "keras": "Keras 3 — one API over TensorFlow / JAX / PyTorch backends. TEMPLATE.",
     "tensorflow": "TensorFlow / tf.keras — graph execution and SavedModel export. TEMPLATE.",
     "jax": "JAX + Flax/NNX — functional transforms, jit/pmap scaling. TEMPLATE.",
     "huggingface": "Transformers `Trainer` + Accelerate — the fine-tuning path. TEMPLATE.",
@@ -113,7 +156,7 @@ TEMPLATES = {
 }
 
 #: Every backend verb, implemented or not — used to map a verb to its scope.
-BACKENDS = ("lightning", *TEMPLATES)
+BACKENDS = ("lightning", "keras", *TEMPLATES)
 
 
 def _template_message(name: str, verb: str) -> str:

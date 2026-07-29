@@ -214,7 +214,7 @@ class TimmModel(nn.Module):
             pred_classes = logits.argmax(dim=-1)
             unique_pred = sorted({int(v) for v in pred_classes.tolist()})
             logger.trace(
-                f"[diag][timm_classifier] batch={n} model={self.model_name!r} "
+                f"[diag][timm_model] batch={n} model={self.model_name!r} "
                 f"unique_pred_classes={unique_pred} "
                 f"logits_range=[{float(logits.min()):.3f},{float(logits.max()):.3f}]"
             )

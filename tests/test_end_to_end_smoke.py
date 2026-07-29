@@ -21,7 +21,7 @@ import torch.nn as nn
 from recordstream import Image, Label, Record, batch_metadata, batch_tensor, collate_records
 from torch.utils.data import DataLoader
 
-from sonair.timm_classifier import TimmModel
+from sonair.timm_model import TimmModel
 
 
 class _FakeFeature:

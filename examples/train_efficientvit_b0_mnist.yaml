@@ -29,8 +29,9 @@
 #  * The model is `!lazy:` so `num_classes` is derived from the dataset (10 for
 #    MNIST) and injected by `initialize()` at run time — never written here.
 #
-# MNIST is greyscale 28x28; the source converts each image to RGB and resizes to
-# the model's expected size, so the 3-channel efficientvit backbone works.
+# MNIST is greyscale 28x28 and efficientvit_b0 wants 3x224x224 ImageNet-normalized
+# input, so the dataset is wrapped in a Stream carrying the `preprocess` op chain
+# below. Without it the model receives [N, 28, 28] and rejects it.
 
 # ===========================================================================
 # Shared — identical for every backend
@@ -39,15 +40,41 @@
 experiment_name: mnist_classification
 run_name: efficientvit_b0_mnist
 
+# Image preprocessing — named once, referenced by both splits so train and eval
+# can never drift apart. Engine-agnostic: it produces a plain CHW float tensor,
+# which every backend can consume.
+#
+#  1. ConvertToImage  28x28 grey -> 224x224x3 uint8 (the backbone's input size;
+#     the greyscale plane is broadcast to three channels).
+#  2. A.Normalize     ImageNet mean/std — the statistics `pretrained: true` was
+#     trained under. A bare albumentations transform drops straight into an ops
+#     list; recordstream calls each library the way that library expects.
+#  3. ToTensor        HWC -> CHW float32. `normalize: false` because step 2 has
+#     ALREADY standardized the pixels; leaving the default true would divide the
+#     standardized values by 255 again and squash them to ~[-0.01, 0.01].
+preprocess:
+  - !class:recordstream.ops.image.ConvertToImage
+    width: 224
+    height: 224
+  - !class:albumentations.Normalize
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+  - !class:recordstream.ops.torch.ToTensor
+    normalize: false
+
 # Data: HuggingFace `mnist`. It exposes `train` and `test` splits (no
 # `validation`), so the held-out split is `test`.
-train_set: !class:recordstream.sources.HuggingFaceSource
-  path: "mnist"
-  split: train
+train_set: !class:recordstream.Stream
+  source: !class:recordstream.sources.HuggingFaceSource()
+    path: "mnist"
+    split: train
+  ops: !ref:preprocess
 
-val_set: !class:recordstream.sources.HuggingFaceSource
-  path: "mnist"
-  split: test
+val_set: !class:recordstream.Stream
+  source: !class:recordstream.sources.HuggingFaceSource()
+    path: "mnist"
+    split: test
+  ops: !ref:preprocess
 
 batch_size: 32
 num_workers: 8

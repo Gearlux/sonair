@@ -3,7 +3,7 @@
 Sonair no longer ships a bespoke classification collate: the config pipeline tensorizes the input
 (``ConvertToImage`` → ``ToTensor``) so each record's ``input_key`` value is already a ``[3, H, W]``
 image at collate time. ``recordstream.collate_records`` stacks it and the model boundary
-(``sonair.classifier._batch_input`` / ``_batch_target`` / ``_batch_metadata``) recovers the batched
+(``sonair.lightning_classifier._batch_input`` / ``_batch_target`` / ``_batch_metadata``) recovers the batched
 input tensor, stacks the ``Label`` target's per-record list into an ``[N]`` int64 tensor, and
 transposes the remaining plain keys into a per-record metadata list.
 """
@@ -13,7 +13,7 @@ import pytest
 import torch
 from recordstream import Image, Label, Record, collate_records, item_data
 
-from sonair.classifier import _batch_input, _batch_metadata, _batch_target
+from sonair.lightning_classifier import _batch_input, _batch_metadata, _batch_target
 
 
 def _chw(size: int = 8) -> np.ndarray:

@@ -90,15 +90,38 @@ typical stages:
 Run:
 
 ```bash
-sonair train examples/train_efficientvit_b0_mnist.yaml
-# or the generic runner:
+sonair lightning train examples/train_efficientvit_b0_mnist.yaml
+# or the generic runner (no framework verb):
 recordstream run examples/train_efficientvit_b0_mnist.yaml
 ```
 
-The `sonair evaluate <cfg>` and `sonair predict <cfg>` verbs bind the same
-`LightningClassifier` with `task: evaluate` / `test` / `predict` to measure
+That one config carries **every** backend: engine-agnostic keys (dataset, batch
+size, epochs) at the top level, and one `!scope:framework=<name>` block per
+alternative overriding only `runnable` / `model` / `logger`. The backend verb
+activates the matching scope, so you never name the framework twice.
+
+The `sonair lightning evaluate <cfg>` and `sonair lightning predict <cfg>` verbs
+bind the same `LightningClassifier` with `task: test` / `predict` to measure
 quality on a held-out split or dump per-record classification JSON — the verb
 wins over any `task:` set in the config, so one config can serve all three.
+
+## Training backends
+
+The framework is a first-class dimension of the CLI — the point sonair exists to
+demonstrate is that only the *runnable class* changes when the engine does:
+
+```bash
+sonair lightning train cfg.yaml    # implemented
+sonair keras      train cfg.yaml   # template — fails with instructions
+sonair tensorflow train cfg.yaml   # template
+```
+
+The verbs, the config shape (`runnable:` + `task:`) and the logging backends are
+identical across backends. See [docs/frameworks.md](docs/frameworks.md) for how
+to implement a template or register a new framework, and
+[docs/architecture.md](docs/architecture.md) for why the CLI is shaped this way
+— including why the registry has no `framework` axis yet, and what would trigger
+adding one.
 
 ## Models
 

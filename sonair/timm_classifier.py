@@ -2,7 +2,7 @@
 
 Wraps :func:`timm.create_model` into a plain :class:`torch.nn.Module` whose
 ``forward(images) -> logits`` signature plugs straight into
-:class:`sonair.classifier.LightningClassifier`, which calls
+:class:`sonair.lightning_classifier.LightningClassifier`, which calls
 ``preds = self(batch.input)`` and ``loss = self.loss_fn(preds, batch.target)``
 in its ``training_step`` — for classification that's all the glue we need. No
 bundled batch type, no step-output dict, no per-mode forward divergence.
@@ -48,7 +48,7 @@ from torch import Tensor
 logger = get_logger(__name__)
 
 
-@configurable(task="classification", role="model", lazy=True)
+@configurable(task="classification", role="model", lazy=True, framework="torch")
 class TimmModel(nn.Module):
     """timm-backed image-classification model wrapped for the Marainer Trainer flow.
 

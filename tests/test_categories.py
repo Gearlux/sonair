@@ -28,7 +28,7 @@ def test_categories_enumerable_via_registry() -> None:
 
 def test_task_role_tags() -> None:
     """task/role drive navigaitor's scan-and-generate task surfaces."""
-    from sonair.classifier import LightningClassifier
+    from sonair.lightning_classifier import LightningClassifier
 
     assert TimmModel.__confluid_task__ == "classification"
     assert TimmModel.__confluid_role__ == "model"
@@ -74,3 +74,41 @@ def test_all_exports_registered_losses_and_metrics() -> None:
 
     for cls in (*c._CLASSIFICATION_LOSSES, *c._CLASSIFICATION_METRICS):
         assert cls.__name__ in c.__all__, f"{cls.__name__} registered but missing from __all__ (won't surface)"
+
+
+# ---------------------------------------------------------------------------
+# framework — every sonair registration claims its engine
+# ---------------------------------------------------------------------------
+# `task`+`role` say what a class is FOR; `framework` says what it can be WIRED
+# TO. Without it a picker asked for "a classification loss" would offer these
+# torch losses to a Keras trainer. Every sonair registration is torch today —
+# a future backend registers its own set under its own framework.
+
+
+def test_every_sonair_registration_declares_framework_torch() -> None:
+    from sonair.classification import _CLASSIFICATION_LOSSES, _CLASSIFICATION_METRICS, SigmoidFocalLoss
+    from sonair.lightning_classifier import LightningClassifier
+    from sonair.timm_classifier import TimmModel
+
+    tagged = (
+        *_CLASSIFICATION_LOSSES,
+        *_CLASSIFICATION_METRICS,
+        SigmoidFocalLoss,
+        LightningClassifier,
+        TimmModel,
+    )
+    untagged = [c.__name__ for c in tagged if getattr(c, "__confluid_framework__", None) != "torch"]
+    assert not untagged, f"missing framework='torch': {untagged}"
+
+
+def test_framework_filter_narrows_the_loss_picker() -> None:
+    """The query a discovery consumer makes — and what it must NOT return."""
+    import confluid
+
+    reg = confluid.get_registry()
+    torch_losses = reg.list_classes(task="classification", role="loss", framework="torch")
+    assert "CrossEntropyLoss" in torch_losses
+    assert "SigmoidFocalLoss" in torch_losses
+    # No sonair class claims another engine yet, so a keras picker is empty
+    # rather than wrongly offering the torch set.
+    assert reg.list_classes(task="classification", role="loss", framework="keras") == set()

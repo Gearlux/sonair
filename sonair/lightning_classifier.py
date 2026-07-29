@@ -164,7 +164,7 @@ def _batch_metadata(batch: Record, input_key: str, target_key: str) -> Optional[
     return [{k: columns[k][i] for k in columns} for i in range(n)]
 
 
-@configurable(task="classification", role="trainer")
+@configurable(task="classification", role="trainer", framework="torch")
 class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
     """A standard Lightning image classifier — train, evaluate, test, or predict via ``task``.
 

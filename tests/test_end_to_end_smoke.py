@@ -21,7 +21,7 @@ import torch.nn as nn
 from recordstream import Image, Label, Record, collate_records
 from torch.utils.data import DataLoader
 
-from sonair.classifier import _batch_input, _batch_metadata, _batch_target
+from sonair.lightning_classifier import _batch_input, _batch_metadata, _batch_target
 from sonair.timm_classifier import TimmModel
 
 

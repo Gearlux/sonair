@@ -1,34 +1,45 @@
-# Minimal flat sonair classification config — MNIST (10-class digit) edition.
+# One classification config, every training backend — MNIST (10-class digits).
 #
-#   sonair train examples/train_efficientvit_b0_mnist.yaml
-#   # (or the generic runner: `recordstream run examples/train_efficientvit_b0_mnist.yaml`)
+#   sonair lightning train examples/train_efficientvit_b0_mnist.yaml
+#   recordstream run       examples/train_efficientvit_b0_mnist.yaml   # generic runner, no verb
+#
+# ---------------------------------------------------------------------------
+# The shape of this file IS the demo
+# ---------------------------------------------------------------------------
+# Everything above the "framework-specific" divider is engine-agnostic: the
+# dataset, the batch/epoch knobs, the run identity. Only the keys below it
+# change when the training engine does — which is the claim sonair exists to
+# demonstrate, made checkable by putting both halves in one file.
+#
+# The top level is also the DEFAULT backend (lightning), so this config runs
+# as-is under `recordstream run` with no scope at all. An alternative backend
+# is a `!scope:framework=<name>` block that OVERRIDES only the framework
+# specific keys (document order, last write wins). The `sonair <backend>` verb
+# activates the matching scope for you; explicitly it is:
+#
+#   recordstream run examples/train_efficientvit_b0_mnist.yaml --scope framework=keras
 #
 # How it stays this small:
-#  * `sonair.LightningClassifier` (a standard pl.LightningModule) bakes loss
-#    (CrossEntropy), collate, optimizer (AdamW), and metrics (top1/f1). It also
-#    exposes ergonomic knobs (batch_size / num_workers / max_epochs / logger) that
-#    build the DataLoaders + the pytorch_lightning.Trainer for you.
-#  * Every top-level key below is wired into the classifier by **Confluid
-#    broadcasting** (sibling keys are injected into the same-named constructor
-#    params) — no nesting or `!ref` plumbing needed.
-#  * The model is `!lazy:` so `num_classes` is **derived from the dataset**
-#    (10 for MNIST, walking the targets) and injected by `initialize()` at run
-#    time — it is NOT specified here.
+#  * `sonair.LightningClassifier` bakes loss (CrossEntropy), collate, optimizer
+#    (AdamW) and metrics (top-1 / macro-F1), and turns the ergonomic knobs
+#    (batch_size / num_workers / max_epochs / logger) into DataLoaders + a
+#    `pytorch_lightning.Trainer`.
+#  * Every top-level key is wired in by **Confluid broadcasting** — sibling keys
+#    inject into the same-named constructor params, no nesting or `!ref:`.
+#  * The model is `!lazy:` so `num_classes` is derived from the dataset (10 for
+#    MNIST) and injected by `initialize()` at run time — never written here.
 #
-# MNIST is greyscale 28x28; the dataset converts each image to RGB and resizes
-# to the model's expected size, so the 3-channel efficientvit backbone works.
+# MNIST is greyscale 28x28; the source converts each image to RGB and resizes to
+# the model's expected size, so the 3-channel efficientvit backbone works.
 
-runnable: !class:sonair.LightningClassifier
-  task: fit
-  experiment_name: mnist_classification
-  run_name: efficientvit_b0_mnist
+# ===========================================================================
+# Shared — identical for every backend
+# ===========================================================================
 
-# Model — `!lazy:` so the trainer injects the dataset-derived num_classes (10).
-model: !lazy:sonair.TimmModel
-  model_name: efficientvit_b0
-  pretrained: true
+experiment_name: mnist_classification
+run_name: efficientvit_b0_mnist
 
-# Data: HuggingFace `mnist`. MNIST exposes `train` and `test` splits (no
+# Data: HuggingFace `mnist`. It exposes `train` and `test` splits (no
 # `validation`), so the held-out split is `test`.
 train_set: !class:recordstream.sources.HuggingFaceSource
   path: "mnist"
@@ -38,16 +49,54 @@ val_set: !class:recordstream.sources.HuggingFaceSource
   path: "mnist"
   split: test
 
-# Ergonomic knobs — broadcast into the trainer, which assembles the loaders +
-# Lightning Trainer from them.
 batch_size: 32
 num_workers: 8
 max_epochs: 3
 
-# `logger` broadcasts into the trainer ctor and is forwarded to the base, which
-# bakes it into LazyClass(pytorch_lightning.Trainer, logger=[...]); the base's
-# flow(self.lightning) at run() materializes these `!class:` logger Fluids.
+# ===========================================================================
+# Framework-specific — the ONLY part a backend swap touches
+# ===========================================================================
+# Top level = the default backend (lightning).
+#
+# No `task:` here on purpose. The classifier's constructor already defaults to
+# `fit`, and every `sonair <backend> <verb>` sets the task from the verb
+# (train->fit, evaluate->test, predict->predict), so a `task: fit` line would be
+# dead in both paths. Set `task:` only to change what a BARE `recordstream run`
+# does — e.g. `task: test` in an eval-only config that ships without a verb.
+
+runnable: !class:sonair.LightningClassifier
+
+# `!lazy:` so `initialize()` can inject the dataset-derived num_classes (10).
+model: !lazy:sonair.TimmModel
+  model_name: efficientvit_b0
+  pretrained: true
+
+# Broadcasts into the classifier's ctor, which bakes it into its own
+# `LazyClass(pytorch_lightning.Trainer, logger=[...])`; `_build_trainer()`'s
+# `flow(self.lightning)` at run() materializes these `!class:` Fluids.
 logger:
   - !class:pytorch_lightning.loggers.TensorBoardLogger
     save_dir: ./lightning_logs
     name: mnist_efficientvit_b0
+
+# ---------------------------------------------------------------------------
+# Alternative backends
+# ---------------------------------------------------------------------------
+# Each is a scope block overriding ONLY the keys above this divider. They are
+# commented out because their runnable classes do not exist yet — uncomment a
+# block when you implement the backend (see docs/frameworks.md), and note how
+# little there is to write: the data, the knobs and the run identity are
+# already shared.
+#
+# keras: !scope:framework=keras
+#   runnable: !class:sonair.KerasClassifier
+#   model: !lazy:sonair.KerasModel
+#     model_name: efficientvit_b0
+#   logger:
+#     - !class:keras.callbacks.CSVLogger
+#       filename: ./keras_logs/mnist.csv
+#
+# jax: !scope:framework=jax
+#   runnable: !class:sonair.JaxClassifier
+#   model: !lazy:sonair.FlaxModel
+#     model_name: efficientvit_b0

@@ -1,55 +1,196 @@
-"""Sonair CLI — image-classification training and evaluation.
+"""Sonair CLI — image classification across training backends.
 
-``sonair train`` / ``sonair evaluate`` / ``sonair predict`` bind the single
-:class:`~sonair.classifier.LightningClassifier` (a standard Lightning module) and
-run it with the matching ``task``. The verb wins over any ``task:`` set in YAML, so
-one config can serve all three. (A generic ``recordstream run config.yaml`` also
-works — it just calls ``.run()`` with whatever ``task`` the YAML declares.)
+The framework is a first-class dimension of the command line::
+
+    sonair lightning train    cfg.yaml     # implemented
+    sonair lightning evaluate cfg.yaml
+    sonair lightning predict  cfg.yaml
+    sonair keras      train   cfg.yaml     # template — raises with instructions
+    sonair tensorflow train   cfg.yaml     # template
+    sonair jax        train   cfg.yaml     # template
+    sonair huggingface train  cfg.yaml     # template
+    sonair mlx        train   cfg.yaml     # template
+
+What stays constant across backends is the point of the demo: the same
+``runnable:`` + ``task:`` config, the same three verbs, and the same logging
+backends. Only the runnable class named in the YAML changes. (A generic
+``recordstream run cfg.yaml`` also works — it calls ``.run()`` with whatever
+``task`` the YAML declares, with no framework verb at all.)
+
+Adding a backend: write ``sonair/<name>_classifier.py`` (see
+``docs/frameworks.md``), then replace its template block below with a real
+sub-app modelled on ``lightning``.
 """
 
-from typing import Any
+import sys
+from typing import Any, Callable, List
 
-from liquifai import LiquifyApp
+from liquifai import LiquifaiError, LiquifyApp
 from loggair import get_logger
 
 logger = get_logger(__name__)
 
-app = LiquifyApp(name="sonair", description="Sonair image-classification commands")
+app = LiquifyApp(name="sonair", description="Image classification across training backends")
 
 
-def _dispatch(classifier: Any, task: str) -> None:
-    if classifier is None:
-        logger.error("No classifier was bound — provide one under 'runnable:' in your YAML.")
-        return
+class BackendNotImplementedError(LiquifaiError, NotImplementedError):
+    """A backend's verbs exist as a template but its runnable class does not.
+
+    Dual-inherits ``LiquifaiError`` so liquifai renders one clean message +
+    exit 1 (an unbuilt backend is a documented state, not a crash) and
+    ``NotImplementedError`` so ordinary ``except`` clauses still catch it.
+    """
+
+
+def _dispatch(runnable: Any, task: str) -> None:
+    """Flow the bound runnable, force ``task``, and run it.
+
+    The verb wins over any ``task:`` set in YAML, so one config serves all
+    three verbs. Backend-agnostic: needs only a ``task`` attribute and ``run()``.
+    """
+    if runnable is None:
+        raise ValueError("No runnable was bound — provide one under 'runnable:' in your YAML.")
+
     from confluid import flow
     from confluid.fluid import Fluid
 
-    if isinstance(classifier, Fluid):
-        classifier = flow(classifier)
-    if hasattr(classifier, "task"):
-        classifier.task = task  # the verb wins over the YAML's task
-    classifier.run()
+    if isinstance(runnable, Fluid):
+        runnable = flow(runnable)
+    if hasattr(runnable, "task"):
+        runnable.task = task  # the verb wins over the YAML's task
+    runnable.run()
 
 
-@app.script_command(flow_mode="auto")
+# --------------------------------------------------------------------------- #
+# lightning — the implemented backend
+# --------------------------------------------------------------------------- #
+
+lightning = LiquifyApp(
+    name="lightning",
+    description="PyTorch Lightning — the reference backend (timm models, Lightning loggers).",
+)
+
+
+@lightning.script_command(flow_mode="auto")
 def train(runnable: Any) -> None:
-    """Train an image classifier (task=fit)."""
+    """Train an image classifier with PyTorch Lightning (task=fit)."""
     _dispatch(runnable, "fit")
 
 
-@app.script_command(flow_mode="auto")
+@lightning.script_command(flow_mode="auto")
 def evaluate(runnable: Any) -> None:
-    """Evaluate a trained image classifier over the test set (task=test)."""
+    """Evaluate a trained classifier over the test set (task=test)."""
     _dispatch(runnable, "test")
 
 
-@app.script_command(flow_mode="auto")
+@lightning.script_command(flow_mode="auto")
 def predict(runnable: Any) -> None:
     """Stream predictions from a trained classifier to its sink (task=predict)."""
     _dispatch(runnable, "predict")
 
 
+app.add_app(lightning, "lightning")
+
+
+# --------------------------------------------------------------------------- #
+# Backend templates — verbs exist so `--help` and TAB advertise the roadmap,
+# and each names the work instead of shrugging. Replace a block with a real
+# sub-app (like `lightning` above) once its runnable class exists.
+# --------------------------------------------------------------------------- #
+
+TEMPLATES = {
+    "keras": "Keras 3 — one API over TensorFlow / JAX / PyTorch backends. TEMPLATE.",
+    "tensorflow": "TensorFlow / tf.keras — graph execution and SavedModel export. TEMPLATE.",
+    "jax": "JAX + Flax/NNX — functional transforms, jit/pmap scaling. TEMPLATE.",
+    "huggingface": "Transformers `Trainer` + Accelerate — the fine-tuning path. TEMPLATE.",
+    "mlx": "MLX — training on Apple-silicon unified memory. TEMPLATE.",
+}
+
+#: Every backend verb, implemented or not — used to map a verb to its scope.
+BACKENDS = ("lightning", *TEMPLATES)
+
+
+def _template_message(name: str, verb: str) -> str:
+    """The actionable error a template verb raises — the file, the reference, the edit."""
+    return (
+        f"`sonair {name} {verb}` is not implemented yet — {name} is a backend TEMPLATE.\n\n"
+        f"To implement it:\n"
+        f"  1. Create sonair/{name}_classifier.py with a runnable class — a `task` Literal,\n"
+        f"     `run()` -> `initialize()` -> `@entrypoint`-tagged methods, and\n"
+        f'     `@configurable(task="classification", role="trainer")`.\n'
+        f"     Reference: sonair/lightning_classifier.py (see docs/frameworks.md).\n"
+        f"  2. Replace the `{name}` template in sonair/cli.py with a real sub-app,\n"
+        f"     modelled on the `lightning` one above it.\n"
+        f"  3. Install the backend: pip install 'sonair[{name}]'\n\n"
+        f"The verbs, the config shape (`runnable:` + `task:`) and the logging backends\n"
+        f"are already wired — only the runnable class is missing."
+    )
+
+
+def _template_command(name: str, verb: str) -> Callable[[], None]:
+    """One unimplemented verb.
+
+    A factory, not a default-argument closure: liquifai reads the handler's
+    SIGNATURE, so smuggling the loop variables in as defaults would advertise
+    them as ``--_name`` / ``--_verb`` options in help and TAB completion.
+
+    The handler takes no ``runnable`` parameter on purpose — the failure must
+    land before liquifai resolves a config for a class that does not exist, so
+    the user gets instructions rather than an unresolvable-``!class:`` error.
+    """
+
+    def command() -> None:
+        # Escaped for liquifai's failure handler, which interpolates the
+        # exception into a Rich markup string — an unescaped `sonair[keras]`
+        # loses its extra and prints `pip install 'sonair'`, a WRONG command.
+        from rich.markup import escape
+
+        raise BackendNotImplementedError(escape(_template_message(name, verb)))
+
+    command.__name__ = f"{name}_{verb}"
+    command.__doc__ = f"{verb.capitalize()} with {name} — NOT IMPLEMENTED (backend template)."
+    return command
+
+
+def _template_app(name: str, description: str) -> LiquifyApp:
+    """Build a backend's sub-app with the three verbs, all unimplemented."""
+    sub = LiquifyApp(name=name, description=description)
+    for verb in ("train", "evaluate", "predict"):
+        sub.command(name=verb)(_template_command(name, verb))
+    return sub
+
+
+for _name, _description in TEMPLATES.items():
+    app.add_app(_template_app(_name, _description), _name)
+
+
+def _inject_framework_scope(argv: List[str]) -> None:
+    """Let the backend verb activate the matching ``framework=<name>`` scope.
+
+    One config can carry every backend: shared keys at the top level (which is
+    also the default backend) and a ``!scope:framework=<name>`` block per
+    alternative, overriding only the framework-specific keys. Without this, a
+    user would name the backend twice —
+    ``sonair keras train cfg.yaml --scope framework=keras``.
+
+    Appends to ``argv`` rather than reaching into liquifai: scopes are parsed
+    from the command line in phase 3, so this must land before ``run()``. An
+    explicit ``--scope framework=…`` or ``--framework …`` always wins.
+    """
+    for i, arg in enumerate(argv):
+        if arg.startswith("--framework"):  # `--framework keras` / `--framework=keras`
+            return
+        if arg.startswith(("--scope=", "-s=")) and "framework=" in arg:
+            return
+        if arg in ("--scope", "-s") and i + 1 < len(argv) and argv[i + 1].startswith("framework="):
+            return
+    backend = next((a for a in argv[1:] if a in BACKENDS), None)
+    if backend is not None:
+        argv += ["--scope", f"framework={backend}"]
+
+
 def main() -> None:
+    _inject_framework_scope(sys.argv)
     app.run()
 
 

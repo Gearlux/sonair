@@ -11,7 +11,7 @@ from confluid import Class
 from recordstream import Label, Record, Stream
 from torchmetrics import MetricCollection
 
-from sonair.classifier import LightningClassifier
+from sonair.lightning_classifier import LightningClassifier
 
 
 def _ts(inp: Any, tgt: Any, **meta: Any) -> Record:

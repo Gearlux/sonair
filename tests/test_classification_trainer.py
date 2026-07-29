@@ -517,16 +517,16 @@ def test_string_targets_fit_encode_and_expose_map() -> None:
     trainer.initialize()
     # A LabelMap was fitted and exposed.
     assert isinstance(trainer.label_map, LabelMap)
-    assert trainer.label_map.label_names == ["bird", "cat", "dog"]
+    assert trainer.label_map.class_names == ["bird", "cat", "dog"]
     assert trainer.num_classes == 3
     # The train set is now a Stream whose targets are encoded class-id ints, and it exposes
-    # label_names so marainer persists class_names.json.
+    # class_names so marainer persists class_names.json.
     from typing import Sized
 
     from recordstream import iter_key
 
     train_set = cast(Stream, trainer.train_set)
-    assert train_set.label_names == ["bird", "cat", "dog"]  # type: ignore[attr-defined]
+    assert train_set.class_names == ["bird", "cat", "dog"]  # type: ignore[attr-defined]
     assert len(cast(Sized, train_set))  # touch len for parity with the old index-walk
     encoded = set(iter_key(train_set, "class"))
     assert encoded == {0, 1, 2}
@@ -807,7 +807,7 @@ def test_inherits_computed_metrics_and_label_names_outputs() -> None:
     from confluid import output_specs
 
     names = {s["name"] for s in output_specs(LightningClassifier)}
-    assert {"trained_model", "computed_metrics", "label_names"} <= names
+    assert {"trained_model", "computed_metrics", "class_names"} <= names
 
 
 def test_trained_model_is_not_a_config_field() -> None:

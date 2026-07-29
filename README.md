@@ -292,7 +292,7 @@ Removing marainer would take only a few line changes. Wire stock
 
 `LightningClassifier` declares three read-only post-run `@output`s directly —
 `trained_model` (the live trained `nn.Module`), `computed_metrics`
-(`Dict[str, float]`), and `label_names` (`List[str]`) — so a run's model, scalar
+(`Dict[str, float]`), and `class_names` (`List[str]`) — so a run's model, scalar
 metrics, and class names show up as wireable output sockets in StreamStudio's
 Run-node results panel automatically.
 

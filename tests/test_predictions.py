@@ -121,7 +121,7 @@ def test_the_real_sink_consumes_the_output() -> None:
         return record
 
     clf = _predictor(num_classes=3)
-    clf.predictions_sink = ClassificationPredictionsSink(ops=[_capture], label_names={0: "a", 1: "b", 2: "c"})
+    clf.predictions_sink = ClassificationPredictionsSink(ops=[_capture], class_names={0: "a", 1: "b", 2: "c"})
     clf.predict_step(_batch(4), 0)
 
     assert len(written) == 4

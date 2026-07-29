@@ -10,7 +10,8 @@ and its standard ``preds = self(x)`` / ``loss = self.loss_fn(preds, y)`` flow ru
 Loss: the default classification loss is :class:`torch.nn.CrossEntropyLoss`
 (raw logits ``[N, C]`` + int64 targets ``[N]``). A family of off-the-shelf
 ``torch.nn`` losses is registered here (``_CLASSIFICATION_LOSSES``) as confluid
-configurables (``task="classification", role="loss"``) so they're discoverable /
+configurables (``task="classification", role="loss", framework="torch"``) so they're
+discoverable /
 pickable via navigaitor's task surfaces, usable straight from YAML
 (``label_smoothing`` / ``ignore_index`` / ``reduction`` …; per-class ``weight``
 needs a tensor and isn't expressible in YAML), AND StreamStudio OBJECT nodes. They
@@ -34,7 +35,7 @@ tensorizes the input (``ConvertToImageOp`` → ``ToTensorOp``) so at collate tim
 record's input key is already a ``[3, H, W]`` :class:`~recordstream.Image`;
 ``collate_records`` stacks it to ``[N, 3, H, W]`` and gathers the remaining
 keys as per-record lists. The classifier's model boundary
-(:func:`sonair.classifier._batch_input` / ``_batch_target``) unwraps the batched input
+(:func:`sonair.lightning_classifier._batch_input` / ``_batch_target``) unwraps the batched input
 tensor and stacks the ``Label`` target's per-record list into an ``[N]`` int64 tensor.
 
 Metrics: the useful ``torchmetrics.classification`` multiclass metrics
@@ -111,7 +112,7 @@ _CLASSIFICATION_LOSSES = (
     SoftMarginLoss,
 )
 for _loss_cls in _CLASSIFICATION_LOSSES:
-    register(_loss_cls, task="classification", role="loss")
+    register(_loss_cls, task="classification", role="loss", framework="torch")
 
 # The useful ``torchmetrics`` multiclass metrics — registered ``task="classification",
 # role="metric"`` so they're navigaitor metric-slot options AND StreamStudio OBJECT nodes
@@ -135,10 +136,10 @@ _CLASSIFICATION_METRICS = (
     MulticlassHammingDistance,
 )
 for _metric_cls in _CLASSIFICATION_METRICS:
-    register(_metric_cls, task="classification", role="metric")
+    register(_metric_cls, task="classification", role="metric", framework="torch")
 
 
-@configurable(task="classification", role="loss")
+@configurable(task="classification", role="loss", framework="torch")
 class SigmoidFocalLoss(nn.Module):
     """RetinaNet sigmoid focal loss (`Lin et al. 2017 <https://arxiv.org/abs/1708.02002>`_).
 

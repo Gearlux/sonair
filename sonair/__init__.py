@@ -1,6 +1,6 @@
 """Sonair: a standard PyTorch-Lightning image classifier, using marainer for optional tracking."""
 
-from sonair.classifier import LightningClassifier
+from sonair.lightning_classifier import LightningClassifier
 from sonair.timm_classifier import TimmModel
 
 __version__ = "0.2.0"

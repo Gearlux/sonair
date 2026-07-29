@@ -11,7 +11,10 @@ dependencies = [
     # LightningClassifier is a standard pl.LightningModule and trains without marainer (a couple of
     # tracking lines would drop out).
     "marainer[lightning,mlflow,tensorboard]>=0.2.0",
-    "confluid>=0.1.0",
+    # 0.3.0 is the floor for the `framework=` discovery tag, passed at decoration
+    # time in sonair/classification.py — against 0.2.0 every registration raises
+    # TypeError at import.
+    "confluid>=0.3.0",
     "recordstream>=0.1.0",
     "loggair>=0.1.0",
     "torch",
@@ -25,6 +28,30 @@ dependencies = [
 requires-python = ">=3.12"
 
 [project.optional-dependencies]
+# Backend extras — one per training framework in `sonair.frameworks.FRAMEWORKS`.
+# `lightning` needs no extra (torch + pytorch-lightning are core deps, it being
+# the reference backend). The others are TEMPLATES: the extra exists so the
+# not-implemented guidance can name a real install command, and so wiring a
+# backend later is a dependency change, not a packaging change.
+keras = [
+    "keras>=3.0",           # Keras 3 picks its own backend (TF / JAX / PyTorch)
+]
+tensorflow = [
+    "tensorflow>=2.16",     # 2.16+ ships Keras 3 as tf.keras
+]
+jax = [
+    "jax>=0.4",
+    "flax>=0.8",            # NNX is the current Flax module API
+]
+huggingface = [
+    "transformers>=4.40",
+    "accelerate>=0.30",     # what `Trainer` uses for device/distribution placement
+]
+mlx = [
+    # Apple silicon only — the marker keeps `pip install sonair[mlx]` from
+    # failing outright elsewhere, so the template stays installable everywhere.
+    "mlx>=0.15; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 dev = [
     "black>=24.0.0,<25.0.0",
     "isort>=5.13.0,<6.0.0",

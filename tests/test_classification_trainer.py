@@ -9,7 +9,7 @@ from confluid import LazyClass
 from recordstream import Image, Label, Record, Stream
 from torchmetrics import MetricCollection
 
-from sonair.classifier import LightningClassifier
+from sonair.lightning_classifier import LightningClassifier
 
 
 def _ts(inp: Any, tgt: Any, **meta: Any) -> Record:
@@ -590,7 +590,7 @@ def test_loss_accepts_weight_checks_constructor() -> None:
     # The confluid-aware balance-capability check, on both live and deferred (lazy/Fluid) losses.
     from confluid import LazyClass
 
-    from sonair.classifier import _loss_accepts_weight
+    from sonair.lightning_classifier import _loss_accepts_weight
 
     assert _loss_accepts_weight(nn.CrossEntropyLoss()) is True  # live, weight in ctor
     assert _loss_accepts_weight(nn.MSELoss()) is False  # live, no weight arg

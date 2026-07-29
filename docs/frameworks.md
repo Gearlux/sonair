@@ -165,14 +165,19 @@ A template fails with the file to create, the reference to copy, and the exact
 registry line that switches it on:
 
 ```console
-$ sonair keras train
-Error: `sonair keras train` is not implemented yet — keras is a backend TEMPLATE.
+$ sonair tensorflow train
+Error: `sonair tensorflow train` is not implemented yet — tensorflow is a backend TEMPLATE.
 ...
-  1. Create sonair/keras_classifier.py with a runnable class: ...
-  2. Replace the `keras` template in sonair/cli.py with a real sub-app,
+  1. Create sonair/tensorflow_classifier.py with a runnable class: ...
+  2. Replace the `tensorflow` template in sonair/cli.py with a real sub-app,
      modelled on the `lightning` one above it.
-  3. Install the backend: pip install 'sonair[keras]'
+  3. Install the backend: pip install 'sonair[tensorflow]'
 ```
+
+That is exactly how the `keras` backend got built (2026-07-29): the template named the
+file, the reference and the edit, and graduating it meant deleting its entry from
+`TEMPLATES`, adding a real sub-app, and moving it to `IMPLEMENTED` in
+`tests/test_cli_frameworks.py` — which then holds it to the same verb surface as the rest.
 
 It exits 1 through liquifai's failure contract (one clean message, full
 traceback under `--debug`) rather than raising an unhandled `NotImplementedError`

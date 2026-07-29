@@ -117,11 +117,15 @@ sonair keras     train examples/train_efficientvit_b0_mnist.yaml   # Keras 3
 sonair tensorflow train cfg.yaml                                   # template — names the work
 ```
 
-| Backend | Status | Model wrapper | Notes |
+| Backend | Status | Model wrapper | MNIST (3 epochs, this config) |
 |---|---|---|---|
-| `lightning` | implemented | `TimmModel` (timm) | the reference backend |
-| `keras` | implemented | `KerasModel` (`keras.applications`) | Keras 3 — see below |
+| `lightning` | implemented | `TimmModel` (timm, `efficientvit_b0`) | **99.52%** top-1 |
+| `keras` | implemented | `KerasModel` (`keras.applications`, `MobileNetV3Small`) | **99.18%** best val |
 | `tensorflow` / `jax` / `huggingface` / `mlx` | templates | — | the verbs exist and name the work |
+
+Both numbers come from the same file, changing only the verb. Different backbones, so this
+is not a benchmark — it is evidence that one config drives two engines to a comparable
+result.
 
 ### What a backend swap actually costs
 

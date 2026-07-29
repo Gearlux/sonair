@@ -172,7 +172,7 @@ one-liner that returns `{"num_labels": n}` or `{"num_classes": n}` for
   `_resolve_task_defaults()` themselves, so a directly-invoked
   `training_step` (tests, a custom loop) still works.
 - Resolution ORDER matters inside `initialize()`: the class-balancing probe
-  asks `loss_accepts_weight(self.loss_fn)`, and an unresolved `None` answers
+  asks `self.accepts_class_weights()`, and an unresolved `None` loss answers
   "cannot be balanced" — so resolution happens *before* the probe, not after.
 
 **Example.**

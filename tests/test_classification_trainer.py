@@ -2,12 +2,13 @@
 
 from typing import Any, List, cast, get_args
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 from confluid import LazyClass
 from confluid.fluid import Fluid
-from recordstream import Image, Label, Record, Stream
+from recordstream import Image, Label, Record, Stream, inverse_frequency_weights
 from recordstream.runnable import runnable_entrypoints
 from torchmetrics import MetricCollection
 
@@ -674,7 +675,7 @@ def test_balance_classes_injects_class_weights() -> None:
     assert trainer.class_weights[1] > trainer.class_weights[0]
     assert trainer.class_weights[2] > trainer.class_weights[0]
     # The weight is wired into the loss.
-    weight = cast(torch.Tensor, trainer.loss_fn.weight)
+    weight = cast(torch.Tensor, cast(nn.Module, trainer.loss_fn).weight)
     assert weight is not None
     assert torch.allclose(weight, trainer.class_weights)
 
@@ -688,7 +689,7 @@ def test_balance_classes_false_leaves_loss_unweighted() -> None:
     )
     trainer.initialize()
     assert trainer.class_weights is None
-    assert trainer.loss_fn.weight is None
+    assert cast(nn.Module, trainer.loss_fn).weight is None
 
 
 def test_balance_skipped_when_loss_not_weight_capable() -> None:
@@ -706,25 +707,66 @@ def test_balance_skipped_when_loss_not_weight_capable() -> None:
     assert isinstance(trainer.loss_fn, nn.MSELoss)
 
 
-def test_balancing_policy_is_delegated_to_marainer() -> None:
-    """sonair owns only the ENCODING; the policy is `marainer.torch.balancing`.
+def test_the_weight_STATISTIC_comes_from_recordstream() -> None:
+    """The split: the numbers are a property of the DATA, the injection of the FRAMEWORK.
 
-    The capability check / inverse-frequency arithmetic / injection are pinned
-    in marainer's own suite (tests/test_balancing.py) — duplicating them here
-    would let the two drift. This pins the SEAM: sonair calls the shared
-    helpers rather than carrying a private copy.
+    sonair must not carry its own inverse-frequency arithmetic — that is a label statistic
+    (`recordstream.inverse_frequency_weights`, pinned in recordstream's own suite). What stays
+    here is the backend hook that knows what `weight=` means.
     """
     import inspect
 
-    from marainer.torch import apply_class_weights, loss_accepts_weight
+    from recordstream import inverse_frequency_weights
 
     from sonair import lightning_classifier
 
-    assert lightning_classifier.loss_accepts_weight is loss_accepts_weight
-    assert lightning_classifier.apply_class_weights is apply_class_weights
-    assert not hasattr(lightning_classifier, "_loss_accepts_weight"), "the private copy must stay deleted"
-    # The encoding — the one genuinely sonair-specific step — stays local.
-    assert "encoded" in inspect.getsource(lightning_classifier.LightningClassifier._apply_class_weights)
+    assert lightning_classifier.inverse_frequency_weights is inverse_frequency_weights
+    source = inspect.getsource(lightning_classifier)
+    assert "def inverse_frequency_weights" not in source, "the arithmetic must not be re-derived here"
+
+
+def test_balancing_hooks_are_overridable_per_framework() -> None:
+    """`accepts_class_weights` / `apply_class_weights` are the per-backend extension point.
+
+    A non-torch backend overrides them (Keras takes `class_weight` on `fit()`, so it never
+    touches the loss). Both must therefore be public METHODS on the runnable, not module-level
+    functions baked into the torch path.
+    """
+    calls: list = []
+
+    class _KerasLike(LightningClassifier):
+        def accepts_class_weights(self) -> bool:
+            return True
+
+        def apply_class_weights(self, weights: Any) -> None:
+            calls.append(list(weights))  # a Keras backend would stash {class_id: weight} here
+
+    records = [_ts(torch.randn(4), 0) for _ in range(6)] + [_ts(torch.randn(4), 1)]
+    trainer = _KerasLike(
+        model=_TinyClassifier(num_classes=2), train_set=Stream(source=records), num_classes=2, balance_classes=True
+    )
+    trainer.initialize()
+
+    assert len(calls) == 1
+    # The rare class weighs more — the vector came from recordstream, unchanged by the hook.
+    assert calls[0][1] > calls[0][0]
+    # The torch loss was NOT touched: this backend overrode the injection.
+    assert getattr(trainer.loss_fn, "weight", None) is None
+
+
+def test_the_torch_hook_converts_the_numpy_vector_to_a_tensor() -> None:
+    """recordstream returns numpy (framework-neutral); making it a Tensor is the hook's job."""
+    records = [_ts(torch.randn(4), 0) for _ in range(6)] + [_ts(torch.randn(4), 1)]
+    trainer = LightningClassifier(
+        model=_TinyClassifier(num_classes=2),
+        train_set=Stream(source=records),
+        num_classes=2,
+        balance_classes=True,
+    )
+    trainer.initialize()
+
+    assert isinstance(trainer.class_weights, torch.Tensor)
+    assert isinstance(inverse_frequency_weights([0, 0, 1], 2), np.ndarray)
 
 
 def test_metrics_accepts_ready_made_collection() -> None:

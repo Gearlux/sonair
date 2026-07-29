@@ -309,9 +309,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         logger.info(f"sonair training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("LightningClassifier.fit() requires a 'train_set'.")
-        train_ds = ensure_record_dataset(flow(self.train_set))
-        val_ds = ensure_record_dataset(flow(self.val_set)) if self.val_set is not None else None
-        test_ds = ensure_record_dataset(flow(self.test_set)) if self.test_set is not None else None
+        train_ds = ensure_record_dataset(self.train_set)
+        val_ds = ensure_record_dataset(self.val_set) if self.val_set is not None else None
+        test_ds = ensure_record_dataset(self.test_set) if self.test_set is not None else None
         t_loader = flow(self.train_loader, dataset=train_ds)
         v_loader = flow(self.val_loader, dataset=val_ds) if val_ds is not None else None
         trainer = self._build_trainer()
@@ -336,7 +336,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         logger.info(f"sonair predicting: {self.experiment_name} ({self.run_name})")
         if self.test_set is None:
             raise ValueError("LightningClassifier.predict() requires a 'test_set'.")
-        dataset = ensure_record_dataset(flow(self.test_set))
+        dataset = ensure_record_dataset(self.test_set)
         if self.predictions_sink is not None:
             self.predictions_sink = flow(self.predictions_sink)
         loader = flow(self.test_loader, dataset=dataset)
@@ -350,7 +350,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         source = getattr(self, dataset_slot)
         if source is None:
             raise ValueError(f"LightningClassifier.{stage}() requires a '{dataset_slot}'.")
-        dataset = ensure_record_dataset(flow(source))
+        dataset = ensure_record_dataset(source)
         if self.predictions_sink is not None:
             self.predictions_sink = flow(self.predictions_sink)
         loader = flow(getattr(self, loader_slot), dataset=dataset)
@@ -395,11 +395,11 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             self._initialize_eval()
 
     def _initialize_fit(self) -> None:
-        self.train_set = ensure_record_dataset(flow(self.train_set))
+        self.train_set = ensure_record_dataset(self.train_set)
         if self.val_set is not None:
-            self.val_set = ensure_record_dataset(flow(self.val_set))
+            self.val_set = ensure_record_dataset(self.val_set)
         if self.test_set is not None:
-            self.test_set = ensure_record_dataset(flow(self.test_set))
+            self.test_set = ensure_record_dataset(self.test_set)
 
         # `iter_key` unwraps a MultiLabel to its list of values, so a sequence here IS a
         # multi-label target — the item type, not a guess about what a list might mean.
@@ -467,7 +467,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         source = getattr(self, eval_slot)
         if source is None:
             return
-        dataset = ensure_record_dataset(flow(source))
+        dataset = ensure_record_dataset(source)
         first = _first_target(dataset, self.target_key)
         self.multilabel = isinstance(first, (list, tuple, set))
         self._resolve_task_defaults()

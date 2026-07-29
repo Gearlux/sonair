@@ -1,0 +1,119 @@
+"""``KerasModel`` — a thin ``keras.applications`` wrapper, the Keras twin of ``TimmModel``.
+
+The point of this class is how LITTLE it does. It mirrors ``sonair.timm_model.TimmModel``
+exactly — same constructor shape, same lazy build, same ``num_classes`` injection at run time —
+so a reader comparing the two sees that only the library call differs. That comparison IS the
+demo: swapping the training engine swaps the model wrapper and nothing else in the config.
+
+Like its torch twin it is LAZY: ``__init__`` only stores values (the workspace zero-arg /
+lazy-init mandate), and the network is built on first use by :meth:`solidify` — which is also
+confluid's ``flow()``-time hook, so a classifier that flows this with a dataset-derived
+``num_classes`` gets a head of the right width without ever writing the count in YAML.
+
+Keras 3 picks its backend from ``KERAS_BACKEND`` at import time; sonair imports Keras through
+:mod:`sonair._keras`, which defaults it to ``torch`` (the backend this package guarantees) only
+when the operator has not chosen. See that module for why.
+"""
+
+from typing import Any, Optional, Tuple
+
+from confluid import configurable
+from loggair import get_logger
+
+from sonair._keras import keras, keras_backend
+
+logger = get_logger(__name__)
+
+__all__ = ["KerasModel"]
+
+
+@configurable(task="classification", role="model", lazy=True, framework="keras")
+class KerasModel:
+    """A ``keras.applications`` backbone with a fresh classification head.
+
+    Args:
+        model_name: A ``keras.applications`` constructor name, e.g. ``"MobileNetV3Small"`` or
+            ``"EfficientNetV2B0"``. Sentinel ``""`` is invalid but permitted so the class is
+            zero-arg constructible; it is rejected at build time with a clear error.
+        num_classes: Width of the classification head. Sentinel ``0`` likewise — a classifier
+            injects the dataset-derived count via ``flow(model, num_classes=N)`` at run time,
+            so it is not written in YAML.
+        pretrained: Load ImageNet weights for the backbone. ``False`` (the default) keeps a
+            first run offline and reproducible; the head is always fresh either way.
+        input_shape: ``(H, W, C)`` — Keras is CHANNELS-LAST, unlike the torch backend's
+            ``(C, H, W)``. That difference is real and is why the two backends' preprocessing
+            configs differ by their last op.
+        pooling: How the backbone's feature map is reduced before the head — ``"avg"`` or
+            ``"max"``.
+        dropout: Dropout applied before the head; ``0.0`` disables it.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "",
+        num_classes: int = 0,
+        pretrained: bool = False,
+        input_shape: Tuple[int, int, int] = (224, 224, 3),
+        pooling: str = "avg",
+        dropout: float = 0.0,
+    ) -> None:
+        # Lazy: store only. No keras import, no network build — see the module docstring.
+        self.model_name = model_name
+        self.num_classes = num_classes
+        self.pretrained = pretrained
+        self.input_shape = tuple(input_shape)
+        self.pooling = pooling
+        self.dropout = dropout
+        self._model: Optional[Any] = None
+
+    def solidify(self) -> Any:
+        """Build (once) and return the live ``keras.Model``.
+
+        This is confluid's ``flow()``-time hook as well as the cache: flowing this class with
+        ``num_classes=N`` builds a head of that width immediately, so the caller never has to
+        remember a separate build step. Required configuration is validated HERE rather than in
+        ``__init__``, which is what keeps zero-arg construction working.
+        """
+        if self._model is not None:
+            return self._model
+        if not self.model_name:
+            raise ValueError("KerasModel.model_name is not set — name a keras.applications model.")
+        if not self.num_classes:
+            raise ValueError(
+                "KerasModel.num_classes is not set — a classifier flows the dataset-derived "
+                "count in at run time, or set it explicitly."
+            )
+
+        factory = getattr(keras.applications, self.model_name, None)
+        if factory is None:
+            available = ", ".join(sorted(n for n in dir(keras.applications) if n[:1].isupper())[:8])
+            raise ValueError(f"Unknown keras.applications model {self.model_name!r} (e.g. {available}, …).")
+
+        backbone = factory(
+            input_shape=self.input_shape,
+            include_top=False,
+            weights="imagenet" if self.pretrained else None,
+            pooling=self.pooling,
+        )
+        head = keras.layers.Dropout(self.dropout)(backbone.output) if self.dropout else backbone.output
+        outputs = keras.layers.Dense(self.num_classes, name="predictions")(head)
+        self._model = keras.Model(backbone.input, outputs, name=f"{self.model_name}_classifier")
+        logger.info(
+            f"Built {self.model_name} ({keras_backend()} backend, {self.num_classes} classes, "
+            f"pretrained={self.pretrained})."
+        )
+        return self._model
+
+    @property
+    def model(self) -> Any:
+        """The live ``keras.Model``, built on first access.
+
+        The ergonomic accessor for a directly-constructed instance that was never flowed —
+        ``flow()`` does not touch property getters, which is why :meth:`solidify` exists as a
+        method as well.
+        """
+        return self.solidify()
+
+    def __call__(self, x: Any, **kwargs: Any) -> Any:
+        """Predict on ``x``, building the network if this is the first use."""
+        return self.model(x, **kwargs)

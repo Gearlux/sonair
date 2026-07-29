@@ -12,7 +12,7 @@ sonair lightning train    cfg.yaml     # implemented
 sonair lightning evaluate cfg.yaml
 sonair lightning predict  cfg.yaml
 
-sonair keras       train  cfg.yaml    # template — not implemented yet
+sonair keras       train  cfg.yaml    # implemented (Keras 3)
 sonair tensorflow  train  cfg.yaml    # template
 sonair jax         train  cfg.yaml    # template
 sonair huggingface train  cfg.yaml    # template
@@ -81,7 +81,7 @@ real sub-app, modelled on `lightning` right above it — drop the name from
 ```python
 keras = LiquifyApp(name="keras", description="Keras 3 — one API over TF / JAX / PyTorch.")
 
-@keras.script_command(flow_mode="auto")
+@keras.script_command(name="train", flow_mode="manual")
 def train(runnable: Any) -> None:
     """Train an image classifier with Keras (task=fit)."""
     _dispatch(runnable, "fit")

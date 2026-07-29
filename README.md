@@ -107,21 +107,49 @@ wins over any `task:` set in the config, so one config can serve all three.
 
 ## Training backends
 
-The framework is a first-class dimension of the CLI — the point sonair exists to
-demonstrate is that only the *runnable class* changes when the engine does:
+Two engines, one config. `sonair <backend> <verb>` picks the engine; everything above the
+config's framework divider — dataset, splits, batch size, epochs, run identity — is shared
+verbatim.
 
 ```bash
-sonair lightning train cfg.yaml    # implemented
-sonair keras      train cfg.yaml   # template — fails with instructions
-sonair tensorflow train cfg.yaml   # template
+sonair lightning train examples/train_efficientvit_b0_mnist.yaml   # PyTorch Lightning
+sonair keras     train examples/train_efficientvit_b0_mnist.yaml   # Keras 3
+sonair tensorflow train cfg.yaml                                   # template — names the work
 ```
 
-The verbs, the config shape (`runnable:` + `task:`) and the logging backends are
-identical across backends. See [docs/frameworks.md](docs/frameworks.md) for how
-to implement a template or register a new framework, and
-[docs/architecture.md](docs/architecture.md) for why the CLI is shaped this way
-— including why the registry has no `framework` axis yet, and what would trigger
-adding one.
+| Backend | Status | Model wrapper | Notes |
+|---|---|---|---|
+| `lightning` | implemented | `TimmModel` (timm) | the reference backend |
+| `keras` | implemented | `KerasModel` (`keras.applications`) | Keras 3 — see below |
+| `tensorflow` / `jax` / `huggingface` / `mlx` | templates | — | the verbs exist and name the work |
+
+### What a backend swap actually costs
+
+The `keras` block in the example config overrides four keys and nothing else: `runnable`,
+`model`, `logger`, and `preprocess`. Only that last one is a *data* difference, and it is a
+real one — **Keras is channels-last, torch is channels-first** — so the Keras chain stops
+after `Normalize` (leaving `HWC`) where the torch chain adds `ToTensor` to transpose to `CHW`.
+
+Everything else is shared because it belongs to neither engine: the record stream, the
+`LabelMap` that encodes string labels, the class-name vocabulary, the predictions sink, the
+metrics sidecar. The Keras backend's own code is a ~20-line `PyDataset` adapter plus
+`compile()`/`fit()` — that ratio is the demonstration.
+
+### Choosing the Keras compute backend
+
+Keras 3 runs on PyTorch, TensorFlow or JAX, chosen by `KERAS_BACKEND` **at import time**.
+sonair defaults it to `torch` (the one it always installs) when you have not chosen, so
+`sonair keras train` works out of the box:
+
+```bash
+sonair keras train cfg.yaml                          # torch (default)
+KERAS_BACKEND=tensorflow sonair keras train cfg.yaml # the same config on TensorFlow
+```
+
+Install with `pip install 'sonair[keras]'` — Keras alone, four small packages. Installing
+TensorFlow is a heavier decision (it moves protobuf a major version across mlflow, tensorboard
+and wandb); see `TASKS.md`.
+
 
 ## Models
 

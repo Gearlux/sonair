@@ -1,6 +1,6 @@
 """Tests for LightningClassifier."""
 
-from typing import Any, cast
+from typing import Any, List, cast, get_args
 
 import pytest
 import torch
@@ -8,9 +8,10 @@ import torch.nn as nn
 from confluid import LazyClass
 from confluid.fluid import Fluid
 from recordstream import Image, Label, Record, Stream
+from recordstream.runnable import runnable_entrypoints
 from torchmetrics import MetricCollection
 
-from sonair.lightning_classifier import LightningClassifier
+from sonair.lightning_classifier import ClassifierTask, LightningClassifier
 
 
 def _stub(slot: Any) -> Fluid:
@@ -803,3 +804,25 @@ def test_model_is_mandatory_input() -> None:
     assert mandatory_param_names(LightningClassifier) == {"model"}
     required = {s["name"] for s in input_specs(LightningClassifier) if s["required"]}
     assert required == {"model"}
+
+
+# ---------------------------------------------------------------------------
+# run() dispatch — the @entrypoint markers ARE the table (recordstream run_entrypoint)
+# ---------------------------------------------------------------------------
+
+
+def test_entrypoint_markers_cover_every_task_literal_value() -> None:
+    """`run()` dispatches through the markers, so a task the Literal offers must be declared."""
+    declared = {str(meta["task"]) for meta in runnable_entrypoints(LightningClassifier).values()}
+    assert declared == set(get_args(ClassifierTask))
+
+
+@pytest.mark.parametrize("task", get_args(ClassifierTask))
+def test_run_dispatches_to_the_entry_point_declaring_the_task(task: str) -> None:
+    calls: List[str] = []
+    trainer = LightningClassifier(model=cast(Any, None), task=cast(Any, task))
+    trainer.initialize = lambda: None  # type: ignore[method-assign]
+    for name in get_args(ClassifierTask):  # instance attrs win over the class's bound methods
+        setattr(trainer, name, lambda n=name: calls.append(n))
+    trainer.run()
+    assert calls == [task]

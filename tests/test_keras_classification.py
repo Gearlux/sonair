@@ -7,21 +7,24 @@ These pin three things a broken registration would silently cost:
    a picker rather than failing anything);
 2. ``__all__`` names every one of them, because ``scan_module`` filters by ``__module__``
    (``keras.src.*`` here) and the ``__all__``-gated pass is what surfaces them to StreamStudio;
-3. no registered NAME is claimed twice — confluid's registry is keyed by class name, and
-   Keras publishes thirteen names under both ``keras.losses`` and ``keras.metrics``, so
-   registering a metric duplicate would silently overwrite its loss.
+3. the seven loss/metric NAMESAKES resolve to the right class per ``role`` — Keras publishes
+   thirteen names under both ``keras.losses`` and ``keras.metrics``, and until confluid
+   admitted a shared name (0.3.0) registering the metric silently overwrote the loss, so
+   those seven could not be registered at all.
 
 Plus the numeric facts the module docstring's wiring guidance rests on: which metrics are
 safe on the classifier's raw-logits head, and what to set for the ones that are not.
 """
 
+import importlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import confluid
 import numpy as np
 import pytest
-from confluid import Fluid, get_registry
+from confluid import AmbiguousClassError, Fluid, get_registry
 
 import sonair.keras_classification as kc
 from sonair._keras import keras
@@ -48,16 +51,25 @@ def _value(metric: object, y_pred: np.ndarray, y_true: np.ndarray = TARGETS) -> 
 
 
 def test_every_keras_loss_is_registered_under_its_framework() -> None:
-    names = get_registry().list_classes(task="classification", role="loss", framework="keras")
+    """Asserted through the FILTERED lookup, which is the picker's actual query.
+
+    A name shared with a metric publishes under its dotted key, so a bare membership test
+    would fail for exactly the seven classes this change made registrable.
+    """
+    registry = get_registry()
     for cls in kc._CLASSIFICATION_LOSSES:
-        assert cls.__name__ in names, f"{cls.__name__} not registered as a keras classification loss"
+        found = registry.get_class(cls.__name__, task="classification", role="loss", framework="keras")
+        assert found is cls, f"{cls.__name__} not registered as a keras classification loss"
+    assert len(registry.list_classes(task="classification", role="loss", framework="keras")) == len(
+        kc._CLASSIFICATION_LOSSES
+    )
 
 
 def test_every_keras_metric_is_registered_under_its_framework() -> None:
     registry = get_registry()
-    names = registry.list_classes(task="classification", role="metric", framework="keras")
     for cls in kc._CLASSIFICATION_METRICS:
-        assert cls.__name__ in names, f"{cls.__name__} not registered as a keras classification metric"
+        found = registry.get_class(cls.__name__, task="classification", role="metric", framework="keras")
+        assert found is cls, f"{cls.__name__} not registered as a keras classification metric"
     # category is the derived `classification_metric`, which navigaitor's metric-slot picker reads.
     assert "SparseCategoricalAccuracy" in registry.list_classes(category="classification_metric")
 
@@ -69,19 +81,44 @@ def test_all_exports_registered_losses_and_metrics() -> None:
     assert len(kc.__all__) == len(set(kc.__all__))
 
 
-def test_no_name_is_registered_twice() -> None:
-    """confluid's registry is keyed by NAME, so a loss/metric name clash would overwrite silently.
+def test_the_loss_metric_namesakes_are_both_registered_and_resolve_by_role() -> None:
+    """The case this whole registration set was blocked on.
 
-    Keras publishes thirteen names under both ``keras.losses`` and ``keras.metrics``
-    (``BinaryCrossentropy``, ``Hinge``, ``KLDivergence``, …). This is why the metric set omits
-    the crossentropy/hinge duplicates.
+    Keras publishes these names under BOTH ``keras.losses`` and ``keras.metrics``. The
+    registry keys by name, so registering the metric used to overwrite the loss — silently,
+    since both are ``task="classification"`` configurables. It now admits both because
+    ``role`` tells them apart.
     """
-    loss_names = {c.__name__ for c in kc._CLASSIFICATION_LOSSES}
-    metric_names = {c.__name__ for c in kc._CLASSIFICATION_METRICS}
-    assert not (loss_names & metric_names)
+    registry = get_registry()
     shared = {n for n in dir(keras.losses) if n[0].isupper()} & {n for n in dir(keras.metrics) if n[0].isupper()}
-    assert shared, "expected keras to publish some names in both namespaces (the constraint being pinned)"
-    assert not (metric_names & shared), f"metric duplicates of a loss name would overwrite it: {metric_names & shared}"
+    namesakes = {c.__name__ for c in kc._CLASSIFICATION_LOSSES} & {c.__name__ for c in kc._CLASSIFICATION_METRICS}
+    assert namesakes <= shared and len(namesakes) == 7, namesakes
+
+    for name in namesakes:
+        loss = registry.get_class(name, role="loss", framework="keras")
+        metric = registry.get_class(name, role="metric", framework="keras")
+        assert loss is getattr(keras.losses, name)
+        assert metric is getattr(keras.metrics, name)
+        assert loss is not metric
+        # ...and a BARE reference is an error naming both, not a coin flip.
+        with pytest.raises(AmbiguousClassError):
+            registry.get_class(name)
+
+
+def test_registering_the_keras_set_emits_no_clobber_warning() -> None:
+    """Every duplicate here differs by ``role``, so none is a clobber."""
+    import confluid.registry as registry_module
+
+    collected: list = []
+    original = registry_module.logger
+    registry_module.logger = SimpleNamespace(  # type: ignore[assignment]
+        warning=collected.append, debug=lambda m: None, info=lambda m: None, trace=lambda m: None
+    )
+    try:
+        importlib.reload(kc)
+    finally:
+        registry_module.logger = original  # type: ignore[assignment]
+    assert collected == []
 
 
 def test_registered_classes_are_the_upstream_keras_ones() -> None:
@@ -94,8 +131,12 @@ def test_registered_classes_are_the_upstream_keras_ones() -> None:
 
 
 def test_registry_resolves_a_keras_loss_by_name() -> None:
-    """The picker's other half: a chosen name must build."""
-    cls = get_registry().get_class("SparseCategoricalCrossentropy")
+    """The picker's other half: a chosen name must build.
+
+    ``role="loss"`` is required here because the same name is also a metric — which is the
+    feature, not an inconvenience: the picker always knows which slot it is filling.
+    """
+    cls = get_registry().get_class("SparseCategoricalCrossentropy", role="loss")
     assert cls is not None, "registered under its class name — a rename would break every config naming it"
     loss = cls(from_logits=True)
     assert isinstance(loss, keras.losses.Loss)

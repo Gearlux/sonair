@@ -69,6 +69,29 @@ def _dispatch(runnable: Any, task: str) -> None:
     runnable.run()
 
 
+def _register_backend_classification(module: str) -> None:
+    """Import a backend's loss/metric registrations so a config may NAME them.
+
+    A ``!class:`` target that is a registered name (``CrossEntropyLoss``, or a selector
+    like ``SparseCategoricalCrossentropy@role=loss``) resolves only once the module that
+    registers it has been imported; a dotted path resolves through importlib either way.
+    Discovery services bootstrap every ``confluid.configurables`` entry point, but a CLI
+    does not — so each backend imports its OWN set, inside its own sub-app, where the
+    framework is already the operator's choice.
+    """
+    import importlib
+
+    importlib.import_module(module)
+
+
+def _register_torch_classification() -> None:
+    _register_backend_classification("sonair.torch_classification")
+
+
+def _register_keras_classification() -> None:
+    _register_backend_classification("sonair.keras_classification")
+
+
 # --------------------------------------------------------------------------- #
 # lightning — the implemented backend
 # --------------------------------------------------------------------------- #
@@ -82,18 +105,21 @@ lightning = LiquifyApp(
 @lightning.script_command(flow_mode="manual")
 def train(runnable: Any) -> None:
     """Train an image classifier with PyTorch Lightning (task=fit)."""
+    _register_torch_classification()
     _dispatch(runnable, "fit")
 
 
 @lightning.script_command(flow_mode="manual")
 def evaluate(runnable: Any) -> None:
     """Evaluate a trained classifier over the test set (task=test)."""
+    _register_torch_classification()
     _dispatch(runnable, "test")
 
 
 @lightning.script_command(flow_mode="manual")
 def predict(runnable: Any) -> None:
     """Stream predictions from a trained classifier to its sink (task=predict)."""
+    _register_torch_classification()
     _dispatch(runnable, "predict")
 
 
@@ -124,18 +150,21 @@ keras = LiquifyApp(
 @keras.script_command(name="train", flow_mode="manual")
 def keras_train(runnable: Any) -> None:
     """Train an image classifier with Keras 3 (task=fit)."""
+    _register_keras_classification()
     _dispatch(runnable, "fit")
 
 
 @keras.script_command(name="evaluate", flow_mode="manual")
 def keras_evaluate(runnable: Any) -> None:
     """Evaluate a trained classifier over the test set (task=test)."""
+    _register_keras_classification()
     _dispatch(runnable, "test")
 
 
 @keras.script_command(name="predict", flow_mode="manual")
 def keras_predict(runnable: Any) -> None:
     """Stream predictions from a trained classifier to its sink (task=predict)."""
+    _register_keras_classification()
     _dispatch(runnable, "predict")
 
 

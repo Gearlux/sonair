@@ -116,5 +116,8 @@ def test_framework_filter_narrows_the_loss_picker() -> None:
     # never offered a torch loss, and vice versa — the failure this prevents is a config that
     # merges cleanly and dies at run time with a type error far from its cause.
     keras_losses = reg.list_classes(task="classification", role="loss", framework="keras")
-    assert "SparseCategoricalCrossentropy" in keras_losses
     assert not (torch_losses & keras_losses)
+    # Seven Keras names are BOTH a loss and a metric, so they publish under their dotted key
+    # and the picker's real query is the filtered lookup rather than a name membership test.
+    assert reg.get_class("SparseCategoricalCrossentropy", role="loss", framework="keras") is not None
+    assert reg.get_class("SparseCategoricalCrossentropy", role="loss", framework="torch") is None

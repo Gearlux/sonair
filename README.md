@@ -364,8 +364,8 @@ decides which ones apply at all — the same split the torch backend spells as t
 
 | Target | `y_true` shape | Metrics that read it |
 |---|---|---|
-| single-label (`Label`) | int64 ids `[N]` | `SparseCategoricalAccuracy`, `SparseTopKCategoricalAccuracy` |
-| multi-label (`MultiLabel`) | float multi-hot `[N, C]` | `BinaryAccuracy`, `Precision`, `Recall`, `TruePositives` + the other three counters, `F1Score`, `FBetaScore`, `AUC`, `CategoricalAccuracy`, `TopKCategoricalAccuracy` |
+| single-label (`Label`) | int64 ids `[N]` | `SparseCategoricalAccuracy`, `SparseTopKCategoricalAccuracy`, `SparseCategoricalCrossentropy@role=metric` |
+| multi-label (`MultiLabel`) | float multi-hot `[N, C]` | `BinaryAccuracy`, `Precision`, `Recall`, `TruePositives` + the other three counters, `F1Score`, `FBetaScore`, `AUC`, `CategoricalAccuracy`, `TopKCategoricalAccuracy`, and the remaining `@role=metric` namesakes (`BinaryCrossentropy`, `CategoricalCrossentropy`, `Hinge`, `SquaredHinge`, `CategoricalHinge`, `KLDivergence`) |
 
 Mixing them is loud, not subtle: `Precision` wired beside `SparseCategoricalAccuracy` on
 10-class MNIST dies at the first batch with *"The size of tensor a (32) must match the size of
@@ -385,6 +385,26 @@ requires `0 < threshold <= 1`), so either leave it unset or feed probabilities.
 A wired `!class:` loss or metric is flowed at compile time, so both the plain and the
 instance (`!class:X()`) spelling work; an explicitly wired one is never replaced by the
 data-derived default.
+
+### Seven names that are both a loss and a metric
+
+Keras publishes `BinaryCrossentropy`, `CategoricalCrossentropy`,
+`SparseCategoricalCrossentropy`, `Hinge`, `SquaredHinge`, `CategoricalHinge` and
+`KLDivergence` under **both** `keras.losses` and `keras.metrics`. Both are registered, so a
+bare reference to one of those names is ambiguous — say which role you mean:
+
+```yaml
+loss: !class:SparseCategoricalCrossentropy@role=loss,framework=keras
+  from_logits: true
+metrics:
+  - !class:keras.metrics.SparseCategoricalAccuracy()             # dotted path
+  - !class:SparseCategoricalCrossentropy@role=metric,framework=keras()   # the namesake
+```
+
+Tracking a loss you are *not* optimizing is the point — Keras already reports the compiled
+one. Both spellings work everywhere: the dotted path is always unambiguous, and the
+`@role=` selector is the readable form. Naming one bare fails with an error listing both
+candidates rather than picking one.
 
 Two upstream families are deliberately not registered, because they cannot consume what this
 head emits and offer no knob to fix it: `keras.metrics.Accuracy` (wants already-argmaxed class

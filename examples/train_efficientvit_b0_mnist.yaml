@@ -130,6 +130,24 @@ keras: !scope:framework=keras
   logger:
     - !class:keras.callbacks.CSVLogger
       filename: ./keras_logs/mnist.csv
+  # Loss and metrics are left unset on purpose: both backends resolve them from the DATA in
+  # `initialize()` (int64 ids here -> SparseCategoricalCrossentropy + accuracy), so "not
+  # chosen" stays distinguishable from "chosen". To say it yourself, pick from the registered
+  # `keras.losses` / `keras.metrics` set (sonair/keras_classification.py) — and note that the
+  # head is a bare Dense, i.e. RAW LOGITS, which every crossentropy loss must be told:
+  #
+  #   loss: !class:keras.losses.SparseCategoricalCrossentropy
+  #     from_logits: true            # without it Keras normalizes by the row SUM: finite, wrong
+  #   metrics:
+  #     - !class:keras.metrics.SparseCategoricalAccuracy      # argmax-based: logit-safe as-is
+  #     - !class:keras.metrics.SparseTopKCategoricalAccuracy { k: 5 }
+  #
+  # Pick by TARGET SHAPE first: MNIST targets are single-label, so `_to_arrays` hands the
+  # metric int64 ids [N] and only the `Sparse*` metrics read that. The element-wise ones
+  # (Precision / Recall / BinaryAccuracy / the TP-TN-FP-FN counters) need the float multi-hot
+  # [N, C] a `recordstream.MultiLabel` target produces — wired here they die on the first
+  # batch with "The size of tensor a (32) must match the size of tensor b (320)".
+  #
   # Two real differences from the torch chain, both about the ENGINE rather than the task:
   #
   #  1. Keras is channels-LAST. The torch chain ends with `ToTensor` to transpose HWC->CHW;

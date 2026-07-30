@@ -8,7 +8,7 @@ dropped tag fails CI instead of silently emptying a picker.
 
 from confluid.registry import get_registry
 
-import sonair.classification  # noqa: F401 — import for the register(nn.CrossEntropyLoss, ...) side effect
+import sonair.torch_classification  # noqa: F401 — import for the register(nn.CrossEntropyLoss, ...) side effect
 from sonair.timm_model import TimmModel
 
 
@@ -45,7 +45,7 @@ def test_task_role_enumerable_via_registry() -> None:
 
 def test_all_classification_losses_registered() -> None:
     """Every loss in ``_CLASSIFICATION_LOSSES`` (+ SigmoidFocalLoss) is a ``role="loss"`` configurable."""
-    from sonair.classification import _CLASSIFICATION_LOSSES
+    from sonair.torch_classification import _CLASSIFICATION_LOSSES
 
     loss_names = get_registry().list_classes(task="classification", role="loss")
     for cls in _CLASSIFICATION_LOSSES:
@@ -55,7 +55,7 @@ def test_all_classification_losses_registered() -> None:
 
 def test_all_classification_metrics_registered() -> None:
     """Every metric in ``_CLASSIFICATION_METRICS`` is a ``role="metric"`` / ``classification_metric`` configurable."""
-    from sonair.classification import _CLASSIFICATION_METRICS
+    from sonair.torch_classification import _CLASSIFICATION_METRICS
 
     registry = get_registry()
     metric_names = registry.list_classes(task="classification", role="metric")
@@ -70,7 +70,7 @@ def test_all_exports_registered_losses_and_metrics() -> None:
 
     Pins the literal ``__all__`` in sync with ``_CLASSIFICATION_LOSSES`` / ``_CLASSIFICATION_METRICS``.
     """
-    import sonair.classification as c
+    import sonair.torch_classification as c
 
     for cls in (*c._CLASSIFICATION_LOSSES, *c._CLASSIFICATION_METRICS):
         assert cls.__name__ in c.__all__, f"{cls.__name__} registered but missing from __all__ (won't surface)"
@@ -81,14 +81,15 @@ def test_all_exports_registered_losses_and_metrics() -> None:
 # ---------------------------------------------------------------------------
 # `task`+`role` say what a class is FOR; `framework` says what it can be WIRED
 # TO. Without it a picker asked for "a classification loss" would offer these
-# torch losses to a Keras trainer. Every sonair registration is torch today —
-# a future backend registers its own set under its own framework.
+# torch losses to a Keras trainer. Each engine registers its OWN set from its own
+# module (`torch_classification.py` / `keras_classification.py`), which is what
+# makes the two sets disjoint rather than merely tagged.
 
 
 def test_every_sonair_registration_declares_framework_torch() -> None:
-    from sonair.classification import _CLASSIFICATION_LOSSES, _CLASSIFICATION_METRICS, SigmoidFocalLoss
     from sonair.lightning_classifier import LightningClassifier
     from sonair.timm_model import TimmModel
+    from sonair.torch_classification import _CLASSIFICATION_LOSSES, _CLASSIFICATION_METRICS, SigmoidFocalLoss
 
     tagged = (
         *_CLASSIFICATION_LOSSES,
@@ -105,10 +106,15 @@ def test_framework_filter_narrows_the_loss_picker() -> None:
     """The query a discovery consumer makes — and what it must NOT return."""
     import confluid
 
+    import sonair.keras_classification  # noqa: F401 — register the keras set too
+
     reg = confluid.get_registry()
     torch_losses = reg.list_classes(task="classification", role="loss", framework="torch")
     assert "CrossEntropyLoss" in torch_losses
     assert "SigmoidFocalLoss" in torch_losses
-    # No sonair class claims another engine yet, so a keras picker is empty
-    # rather than wrongly offering the torch set.
-    assert reg.list_classes(task="classification", role="loss", framework="keras") == set()
+    # The point of the axis: each engine's picker offers ONLY its own set. A Keras trainer is
+    # never offered a torch loss, and vice versa — the failure this prevents is a config that
+    # merges cleanly and dies at run time with a type error far from its cause.
+    keras_losses = reg.list_classes(task="classification", role="loss", framework="keras")
+    assert "SparseCategoricalCrossentropy" in keras_losses
+    assert not (torch_losses & keras_losses)

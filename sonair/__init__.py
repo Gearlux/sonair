@@ -26,7 +26,6 @@ _BACKEND_NAMES = {
     "TimmModel": ("sonair.timm_model", "lightning"),
     "KerasClassifier": ("sonair.keras_classifier", "keras"),
     "KerasModel": ("sonair.keras_model", "keras"),
-    "RecordSequence": ("sonair.keras_classifier", "keras"),
 }
 
 __all__ = [*_BACKEND_NAMES]

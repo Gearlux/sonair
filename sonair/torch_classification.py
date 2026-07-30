@@ -1,4 +1,12 @@
-"""Image-classification adapters for Marainer.
+"""The **torch** classification losses and metrics — registered, never wrapped.
+
+One module per ENGINE, because a loss is engine-bound: the classes below are
+``torch.nn`` / ``torchmetrics`` and carry ``framework="torch"``, so a picker asked
+for "a classification loss" for a Keras trainer is not offered one. The Keras twin
+is :mod:`sonair.keras_classification`; each is its own ``confluid.configurables``
+entry point, so on a torch-only install the Keras module simply fails to import and
+is skipped — which is the correct answer, not a degraded one. See
+``docs/architecture.md`` §2.
 
 Classification is the simplest fit for the classifier: it takes ``[N, 3, H, W]``
 images and emits ``[N, C]`` logits, and the loss / metric pair both consume
@@ -15,7 +23,7 @@ discoverable /
 pickable via navigaitor's task surfaces, usable straight from YAML
 (``label_smoothing`` / ``ignore_index`` / ``reduction`` …; per-class ``weight``
 needs a tensor and isn't expressible in YAML), AND StreamStudio OBJECT nodes. They
-surface in StreamStudio via the ``sonair-classification`` entry point + this
+surface in StreamStudio via the ``sonair-torch-classification`` entry point + this
 module's ``__all__`` (``scan_module`` filters by ``__module__`` = ``torch``).
 
 The one loss that needs a sonair-side class is :class:`SigmoidFocalLoss`: its
@@ -197,7 +205,7 @@ class SigmoidFocalLoss(nn.Module):
 
     YAML::
 
-        loss_fn: !class:sonair.classification.SigmoidFocalLoss
+        loss_fn: !class:sonair.torch_classification.SigmoidFocalLoss
           alpha: 0.25
           gamma: 2.0
 
@@ -239,7 +247,7 @@ class SigmoidFocalLoss(nn.Module):
 # pass (run on this module — re-exported from ``sonair/__init__.py``) surfaces each as a node. Keep
 # this list in sync with ``_CLASSIFICATION_LOSSES`` / ``_CLASSIFICATION_METRICS`` above (a literal,
 # not a comprehension, so static analysers can read the exported-symbol set);
-# ``tests/test_classification.py::test_all_exports_registered_losses_and_metrics`` pins the sync.
+# ``tests/test_categories.py::test_all_exports_registered_losses_and_metrics`` pins the sync.
 __all__ = [
     "SigmoidFocalLoss",
     # losses (torch.nn) — role="loss"

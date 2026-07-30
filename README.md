@@ -158,14 +158,15 @@ after `Normalize` (leaving `HWC`) where the torch chain adds `ToTensor` to trans
 
 Everything else is shared because it belongs to neither engine: the record stream, the
 `LabelMap` that encodes string labels, the class-name vocabulary, the predictions sink, the
-metrics sidecar. The Keras backend's own code is a ~20-line `PyDataset` adapter plus
-`compile()`/`fit()` — that ratio is the demonstration.
+metrics sidecar — and the batching, since `recordstream.keras.RecordSequence` is the
+`keras.utils.PyDataset` a `DataLoader` would have been. The Keras backend's own code is an
+eight-line batch-shaping function plus `compile()`/`fit()` — that ratio is the demonstration.
 
 ### Choosing the Keras compute backend
 
 Keras 3 runs on PyTorch, TensorFlow or JAX, chosen by `KERAS_BACKEND` **at import time**.
-sonair defaults it to `torch` (the one it always installs) when you have not chosen, so
-`sonair keras train` works out of the box:
+When you have not chosen, the first engine actually installed is used (`torch` for
+`sonair[keras]`), so `sonair keras train` works out of the box:
 
 ```bash
 sonair keras train cfg.yaml                          # torch (default)
@@ -279,9 +280,9 @@ runnable: !class:sonair.LightningClassifier
   task: fit
   # nothing multi-label-specific: MultiLabel targets in the data are enough.
   # Override either default explicitly if you want something else:
-  # loss_fn: !class:sonair.classification.SigmoidFocalLoss { alpha: 0.25 }
+  # loss_fn: !class:sonair.torch_classification.SigmoidFocalLoss { alpha: 0.25 }
   # metrics:
-  #   exact_match: !lazy:sonair.classification.MultilabelExactMatch
+  #   exact_match: !lazy:sonair.torch_classification.MultilabelExactMatch
 ```
 
 Wiring a `loss_fn` or `metrics` yourself always wins — the defaults only fill an **unset** slot
@@ -316,12 +317,88 @@ runnable: !class:sonair.LightningClassifier
         sink: ...
 ```
 
+## Losses and metrics
+
+Sonair defines no loss and no metric. It **registers** upstream ones so they are pickable in
+discovery surfaces and wirable from YAML — and it registers them **per engine**, because a
+loss is engine-bound: a `torch.nn` loss cannot be handed to `KerasClassifier`, and a
+`keras.losses` one cannot be handed to `LightningClassifier`.
+
+| Engine | Module | Registered | Tag |
+|---|---|---|---|
+| PyTorch | [`sonair/torch_classification.py`](sonair/torch_classification.py) | `torch.nn` losses + `torchmetrics.classification` `Multiclass*` / `Multilabel*` | `framework="torch"` |
+| Keras 3 | [`sonair/keras_classification.py`](sonair/keras_classification.py) | `keras.losses` + `keras.metrics` | `framework="keras"` |
+
+Each module is its own `confluid.configurables` entry point, so an install without a given
+backend simply has no registrations for it. A picker asked for "a classification loss" for a
+Keras trainer is offered only the Keras set (confluid 0.3.0's `framework` axis) — see
+[docs/architecture.md](docs/architecture.md) §2.
+
+Both backends leave `loss` / `metrics` unset by default and resolve them from the data at
+`initialize()` (`Sparse`/`CrossEntropy` for int64 ids, the binary/`BCE` family for a
+`MultiLabel` target). Everything below is for when you want to say it yourself.
+
+### Wiring a Keras loss or metric
+
+The classifier's head is a bare `Dense` with **no activation**, so it emits raw logits. That
+is one line of config on every crossentropy loss:
+
+```yaml
+keras: !scope:framework=keras
+  runnable: !class:sonair.KerasClassifier
+    loss: !class:keras.losses.SparseCategoricalCrossentropy
+      from_logits: true            # NOT optional — see below
+    metrics:
+      - !class:keras.metrics.SparseCategoricalAccuracy
+      - !class:keras.metrics.SparseTopKCategoricalAccuracy { k: 5 }
+```
+
+Keras's crossentropy losses default to `from_logits=False`, i.e. they expect probabilities.
+Handed logits they normalize by the row **sum** instead of a softmax, then clip rather than
+raise — so the loss stays finite and merely wrong, and the only symptom is a model that does
+not learn. (This cost a real MNIST run: `loss: nan`, `val_accuracy: 0.098`.)
+
+**Metrics: match the target shape first.** What the classifier hands a metric as `y_true`
+decides which ones apply at all — the same split the torch backend spells as two families
+(`Multiclass*` vs `Multilabel*`):
+
+| Target | `y_true` shape | Metrics that read it |
+|---|---|---|
+| single-label (`Label`) | int64 ids `[N]` | `SparseCategoricalAccuracy`, `SparseTopKCategoricalAccuracy` |
+| multi-label (`MultiLabel`) | float multi-hot `[N, C]` | `BinaryAccuracy`, `Precision`, `Recall`, `TruePositives` + the other three counters, `F1Score`, `FBetaScore`, `AUC`, `CategoricalAccuracy`, `TopKCategoricalAccuracy` |
+
+Mixing them is loud, not subtle: `Precision` wired beside `SparseCategoricalAccuracy` on
+10-class MNIST dies at the first batch with *"The size of tensor a (32) must match the size of
+tensor b (320)"*.
+
+**Then the logits knob**, for a shape-compatible metric:
+
+| Kind | Metrics | On a logits head |
+|---|---|---|
+| argmax / top-k | the `*Accuracy` family, `F1Score` / `FBetaScore` with the default `threshold` | nothing to set — order-preserving, identical to the probability reading |
+| thresholded | `Precision`, `Recall`, `BinaryAccuracy`, `TruePositives` + the other three counters | pass `thresholds: 0.0` (`threshold: 0.0` on `BinaryAccuracy`) — the logit-space equivalent of the probability default `0.5`, since `sigmoid(0) == 0.5` |
+| `AUC` | — | pass `from_logits: true` |
+
+`F1Score` / `FBetaScore` with an *explicit* `threshold` reject the logit-space value (Keras
+requires `0 < threshold <= 1`), so either leave it unset or feed probabilities.
+
+A wired `!class:` loss or metric is flowed at compile time, so both the plain and the
+instance (`!class:X()`) spelling work; an explicitly wired one is never replaced by the
+data-derived default.
+
+Two upstream families are deliberately not registered, because they cannot consume what this
+head emits and offer no knob to fix it: `keras.metrics.Accuracy` (wants already-argmaxed class
+ids — reports `0.0` against logits) and `PrecisionAtRecall` / `RecallAtPrecision` /
+`SensitivityAtSpecificity` / `SpecificityAtSensitivity` (sweep thresholds across `[0, 1]`).
+That only keeps them out of the *pickers* — `!class:keras.metrics.Accuracy` still resolves
+from YAML if your model really does emit class ids.
+
 ## Adapters
 
 | Symbol | Purpose |
 |--------|---------|
-| `torch.nn.CrossEntropyLoss` | The default classification loss — registered (no sonair wrapper) as `task="classification", role="loss"`; set `label_smoothing` / `ignore_index` / `reduction` from YAML. Consumes int64 class-id targets `[N]`. |
-| `SigmoidFocalLoss` | Thin `nn.Module` wrapper over `torchvision.ops.sigmoid_focal_loss` (a function, which confluid's `register` can't tag) — a pickable `task="classification", role="loss"` configurable with `alpha` / `gamma` / `reduction` knobs. Expects **float** targets the same shape as the logits (e.g. one-hot `[N, C]`), like the `BCEWithLogitsLoss` family. Defaults `reduction="mean"` (a scalar loss), not torchvision's `"none"`. |
+| `torch.nn.CrossEntropyLoss` | The default classification loss — registered (no sonair wrapper) as `task="classification", role="loss", framework="torch"`; set `label_smoothing` / `ignore_index` / `reduction` from YAML. Consumes int64 class-id targets `[N]`. |
+| `SigmoidFocalLoss` | Thin `nn.Module` wrapper over `torchvision.ops.sigmoid_focal_loss` (a function, which confluid's `register` can't tag) — a pickable `task="classification", role="loss"` configurable with `alpha` / `gamma` / `reduction` knobs. Expects **float** targets the same shape as the logits (e.g. one-hot `[N, C]`), like the `BCEWithLogitsLoss` family. Defaults `reduction="mean"` (a scalar loss), not torchvision's `"none"`. The Keras side needs no such shim — `BinaryFocalCrossentropy` is already a class. |
 | `torch.nn.BCEWithLogitsLoss` | The default **multi-label** loss (also registered, `role="loss"`). Consumes float multi-hot targets `[N, C]` shaped like the logits. |
 | `recordstream.collate_records` | The generic DataLoader collate the classifier wires in (no bespoke sonair collate). Stacks the already-tensorized input under `input_key` (default `image`) to `[N, 3, H, W]` and leaves the other keys as per-record lists; the model boundary reads it back with `recordstream.batch_tensor` / `batch_metadata` and stacks the `Label` target under `target_key` (default `class`) into an `[N]` int64 tensor — or builds an `[N, C]` float multi-hot from a `MultiLabel`. |
 | `load_lightning_checkpoint` | `marainer.torch` helper that strips Lightning's `"model."` prefix when loading a `.ckpt` saved by `sonair.LightningClassifier`. |
@@ -332,7 +409,9 @@ Both families are registered: `Multiclass*` (`MulticlassAccuracy`,
 `MulticlassF1Score`, `MulticlassAUROC`, ...), sized by `num_classes`, and
 `Multilabel*` (`MultilabelAccuracy`, `MultilabelF1Score`,
 `MultilabelExactMatch`, ...), sized by `num_labels`. The classifier picks the
-family that matches the data; name one explicitly to override.
+family that matches the data; name one explicitly to override. The Keras
+equivalents — and the one knob they need against a logits head — are in
+[Losses and metrics](#losses-and-metrics) above.
 
 ## Optional tracking via marainer
 

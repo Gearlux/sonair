@@ -18,6 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    - name: Mint GitHub App token for private Gearlux deps
+      id: app-token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ secrets.GEARLUX_APP_ID }}
+        private-key: ${{ secrets.GEARLUX_APP_PRIVATE_KEY }}
+        owner: Gearlux
+    - name: Configure git auth for Gearlux
+      run: git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
     - name: Set up Python 3.12
       uses: actions/setup-python@v5
       with:
@@ -32,7 +41,9 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/confluid.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/liquifai.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
-        uv pip install --system -e ".[dev]"
+        uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
+        uv pip install --system --no-deps git+https://github.com/Gearlux/marainer.git@main
+        uv pip install --system -e ".[dev,lightning,keras]"
     - name: Run Isort
       run: isort --check-only .
     - name: Run Black
@@ -48,6 +59,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    - name: Mint GitHub App token for private Gearlux deps
+      id: app-token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ secrets.GEARLUX_APP_ID }}
+        private-key: ${{ secrets.GEARLUX_APP_PRIVATE_KEY }}
+        owner: Gearlux
+    - name: Configure git auth for Gearlux
+      run: git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
     - name: Set up Python 3.12
       uses: actions/setup-python@v5
       with:
@@ -62,7 +82,9 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/confluid.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/liquifai.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
-        uv pip install --system -e ".[dev]"
+        uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
+        uv pip install --system --no-deps git+https://github.com/Gearlux/marainer.git@main
+        uv pip install --system -e ".[dev,lightning,keras]"
     - name: Run Tests
       run: |
         if [ -d tests ] && find tests -name '*.py' | grep -q .; then
@@ -83,6 +105,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    - name: Mint GitHub App token for private Gearlux deps
+      id: app-token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ secrets.GEARLUX_APP_ID }}
+        private-key: ${{ secrets.GEARLUX_APP_PRIVATE_KEY }}
+        owner: Gearlux
+    - name: Configure git auth for Gearlux
+      run: git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
     - name: Set up Python 3.12
       uses: actions/setup-python@v5
       with:
@@ -97,7 +128,9 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/confluid.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/liquifai.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
-        uv pip install --system -e ".[dev]"
+        uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
+        uv pip install --system --no-deps git+https://github.com/Gearlux/marainer.git@main
+        uv pip install --system -e ".[dev,lightning,keras]"
     - name: Run Examples
       run: |
         for f in examples/*.py; do
@@ -122,6 +155,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    - name: Mint GitHub App token for private Gearlux deps
+      id: app-token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ secrets.GEARLUX_APP_ID }}
+        private-key: ${{ secrets.GEARLUX_APP_PRIVATE_KEY }}
+        owner: Gearlux
+    - name: Configure git auth for Gearlux
+      run: git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
     - name: Set up Python 3.12
       uses: actions/setup-python@v5
       with:
@@ -136,7 +178,9 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/confluid.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/liquifai.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
-        uv pip install --system -e ".[dev]"
+        uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
+        uv pip install --system --no-deps git+https://github.com/Gearlux/marainer.git@main
+        uv pip install --system -e ".[dev,lightning,keras]"
         # Notebook-only dependencies live in the optional `[notebook]` extra
         # when a project ships notebooks; absence is not an error.
         uv pip install --system -e ".[notebook]" 2>/dev/null || echo "No [notebook] extras declared; continuing with defaults."

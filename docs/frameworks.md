@@ -32,8 +32,10 @@ visible from the CLI, not buried in a tracker.
 | Logging backends (`logger:`, `trackers:`) | no | wired by the runnable |
 | Dataset / ops / collate | no | `recordstream` |
 | **The runnable class** | **yes** | `sonair/<backend>_classifier.py` |
+| **Losses / metrics** | **yes** | `sonair/<framework>_classification.py` |
 
-Only the last row is backend work. That is the claim this project exists to
+Only the last two rows are backend work — and the second of them is a list of
+upstream class names, not code. That is the claim this project exists to
 demonstrate, and it is why a template's error message can honestly say "the
 CLI, the config shape and the logging backends are already wired".
 
@@ -53,14 +55,19 @@ only to change what a bare `recordstream run` does.
 
 ## Adding a backend
 
-Two steps, no plumbing.
+Three steps, no plumbing.
 
-> **Losses and metrics are engine-bound.** The ones registered in
-> [`classification.py`](../sonair/classification.py) are `torch.nn` /
-> `torchmetrics` classes — a Keras runnable needs Keras losses, and the registry
-> cannot yet tell them apart (no `framework` axis). Until it can, keep each
-> backend's registrations in its own module and do not assume a picker will
-> filter them for you: [Architecture Decisions §2](architecture.md).
+> **Losses and metrics are engine-bound, so each engine registers its own set
+> from its own module.**
+> [`torch_classification.py`](../sonair/torch_classification.py) registers the
+> `torch.nn` / `torchmetrics` classes as `framework="torch"`;
+> [`keras_classification.py`](../sonair/keras_classification.py) registers the
+> `keras.losses` / `keras.metrics` classes as `framework="keras"`. A picker asked
+> for a classification loss for a Keras trainer is offered only the Keras set —
+> that filtering is real as of confluid 0.3.0 ([Architecture Decisions
+> §2](architecture.md)). A new backend adds `<framework>_classification.py` and
+> one entry-point line; a module whose engine is not installed simply fails to
+> import and is skipped.
 
 **1. Write the runnable.** Create `sonair/<name>_classifier.py` with a class that:
 
@@ -93,6 +100,29 @@ app.add_app(keras, "keras")
 
 Declare the backend's dependencies under the matching extra in `pyproject.toml`
 and install with `pip install "sonair[keras]"`.
+
+**3. Register its losses and metrics.** Create
+`sonair/<framework>_classification.py` — two tuples of *upstream* classes, a
+`register(...)` loop each, and a literal `__all__` naming every one — then add it
+to `[project.entry-points."confluid.configurables"]`:
+
+```python
+from confluid import register
+
+_CLASSIFICATION_LOSSES = (SparseCategoricalCrossentropy, BinaryCrossentropy, ...)
+for _loss_cls in _CLASSIFICATION_LOSSES:
+    register(_loss_cls, task="classification", role="loss", framework="keras")
+```
+
+Two constraints worth knowing before you write the tuples. The registry is keyed
+by class **name**, so a name published under both the loss and metric namespaces
+(Keras has thirteen: `BinaryCrossentropy`, `Hinge`, `KLDivergence`, …) can be
+registered only once — register the loss, skip the metric duplicate. And a metric
+that cannot consume what the classifier's head emits does not belong in a picker:
+sonair's head is a bare linear layer, so `keras.metrics.Accuracy` (which wants
+already-argmaxed ids) and the `PrecisionAtRecall` family (which sweeps thresholds
+across `[0, 1]`) are left out. Leaving a class unregistered removes it from the
+pickers only — `!class:keras.metrics.Accuracy` still resolves from YAML.
 
 There is deliberately **no registry module or `Framework` dataclass** — see
 [Architecture Decisions §1](architecture.md) for why, and for the condition

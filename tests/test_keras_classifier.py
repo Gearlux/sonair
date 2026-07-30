@@ -13,7 +13,7 @@ from confluid import LazyClass
 from recordstream import ClassificationPredictionsSink, Image, Label, MultiLabel, Stream
 
 from sonair._keras import keras
-from sonair.keras_classifier import KerasClassifier, RecordSequence
+from sonair.keras_classifier import KerasClassifier
 from sonair.keras_model import KerasModel
 
 INPUT = (32, 32, 3)
@@ -58,49 +58,59 @@ def _classifier(**kw: object) -> KerasClassifier:
 
 
 # --------------------------------------------------------------------------- #
-# RecordSequence — the whole adapter between recordstream and Keras
+# The batch SHAPE — all this backend adds to recordstream's PyDataset adapter
 # --------------------------------------------------------------------------- #
+# `RecordSequence` itself is recordstream's (row order, slicing, reshuffle, collate_records) and
+# is pinned there, task-free. What is sonair's is `_to_arrays`, handed to it the way a collate_fn
+# is handed to a DataLoader — so these assert the SHAPE a classification batch takes, not batching.
 
 
 def test_batches_are_numpy_channels_last() -> None:
     """Keras is channels-LAST; the torch backend is channels-first. That is the one real
     data-shape difference between them, and it lives in the preprocessing config."""
-    seq = RecordSequence(Stream(source=_records(8, labels="ids")), batch_size=4)
-    x, y = seq[0]
+    clf = _classifier()
+    x, y = clf._sequence(Stream(source=_records(8, labels="ids")))[0]
 
     assert isinstance(x, np.ndarray) and x.shape == (4, *INPUT)
     assert x.dtype == np.float32
     assert isinstance(y, np.ndarray) and y.shape == (4,) and y.dtype == np.int64
 
 
-def test_the_last_batch_is_short_not_padded() -> None:
-    seq = RecordSequence(Stream(source=_records(10, labels="ids")), batch_size=4)
+def test_int64_targets_are_named_explicitly_not_inherited_from_the_data() -> None:
+    """Same reason the torch backend spells int64: a dataset yielding another integer width is
+    legal, and the loss is the thing with the requirement."""
+    records = [{"image": Image(np.zeros(INPUT, "float32"), layout="HWC"), "class": Label(np.int32(2))}]
+    _, y = _classifier()._sequence(Stream(source=records))[0]
 
-    assert len(seq) == 3
-    assert seq[2][0].shape[0] == 2
+    assert y.dtype == np.int64
 
 
 def test_a_multilabel_target_becomes_a_multi_hot_matrix() -> None:
     """`multi_hot` is recordstream's and returns numpy — which is why this backend needs no
     conversion and no second implementation of it."""
     records = [{"image": Image(np.zeros(INPUT, "float32"), layout="HWC"), "class": MultiLabel([0, 2])}]
-    seq = RecordSequence(Stream(source=records), batch_size=1, num_classes=3, multilabel=True)
+    clf = _classifier(num_classes=3)
+    clf.multilabel = True
 
-    assert seq[0][1].tolist() == [[1.0, 0.0, 1.0]]
+    assert clf._sequence(Stream(source=records))[0][1].tolist() == [[1.0, 0.0, 1.0]]
+
+
+def test_a_multilabel_batch_without_num_classes_says_so() -> None:
+    """The multi-hot width cannot be guessed from one batch — an all-zero column would be a
+    legitimate row, so a short matrix would be silently wrong instead of loudly missing."""
+    records = [{"image": Image(np.zeros(INPUT, "float32"), layout="HWC"), "class": MultiLabel([0, 2])}]
+    clf = _classifier()
+    clf.multilabel = True
+    clf.num_classes = None
+
+    with pytest.raises(RuntimeError, match="num_classes"):
+        clf._sequence(Stream(source=records))[0]
 
 
 def test_predict_mode_yields_inputs_only() -> None:
-    seq = RecordSequence(Stream(source=_records(4, labels="ids")), target_key=None, batch_size=2)
+    seq = _classifier()._sequence(Stream(source=_records(4, labels="ids")), with_targets=False)
 
     assert len(seq[0]) == 1
-
-
-def test_shuffling_changes_the_order_but_not_the_content() -> None:
-    records = _records(12, labels="ids")
-    ordered = RecordSequence(Stream(source=records), batch_size=12)
-    shuffled = RecordSequence(Stream(source=records), batch_size=12, shuffle=True, seed=1)
-
-    assert sorted(shuffled[0][1].tolist()) == sorted(ordered[0][1].tolist())
 
 
 # --------------------------------------------------------------------------- #
@@ -258,6 +268,7 @@ def test_the_default_loss_reads_its_input_as_logits() -> None:
     clf = _classifier(train_set=Stream(source=_records()))
     clf.initialize()
 
+    assert isinstance(clf.loss, keras.losses.SparseCategoricalCrossentropy)
     assert clf.loss.from_logits is True
 
 

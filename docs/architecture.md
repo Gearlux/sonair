@@ -66,11 +66,11 @@ what the real sub-apps have in common, not from what a dataclass could express.
 
 *2026-07-28, implemented 2026-07-29*
 
-**Context.** [`classification.py`](../sonair/classification.py) registers
-off-the-shelf losses and metrics rather than wrapping them —
-`torch.nn.CrossEntropyLoss` and the `torchmetrics.classification.Multiclass*`
-family. They were tagged `task="classification", role="loss"` / `role="metric"`,
-which say **what a class is for** but never **which engine it runs on**.
+**Context.** Sonair registers off-the-shelf losses and metrics rather than
+wrapping them — `torch.nn.CrossEntropyLoss` and the
+`torchmetrics.classification.Multiclass*` family. They were tagged
+`task="classification", role="loss"` / `role="metric"`, which say **what a class
+is for** but never **which engine it runs on**.
 
 With one backend that distinction is invisible. With a second it becomes
 wrong-by-construction: a picker asked for "a classification loss" would offer
@@ -111,12 +111,33 @@ the decision was first recorded; it is what the "wire-to" framing settles.)
   strings are persisted in saved `workflow.json` files, so qualifying them by
   framework would break every existing graph. That is a workflow-format change
   deserving its own decision, not a rider on this one. See `TASKS.md`.
+- **One registration module per engine** — `torch_classification.py` (2026-07-30,
+  renamed from `classification.py`, which read as task-scoped in a project whose
+  whole point is that the task outlives the engine) and `keras_classification.py`.
+  The tag alone would not have been enough: each module is its own
+  `confluid.configurables` entry point, so on a torch-only install the Keras
+  module fails to import and the scanner skips it — the registrations are absent
+  because the engine is, which is the honest answer rather than a set of names
+  that cannot be built. Splitting also keeps the import cost paid only by whoever
+  installed that backend.
+- **The registry is keyed by class NAME, which curates the set for you.** Keras
+  publishes thirteen names under both `keras.losses` and `keras.metrics`
+  (`BinaryCrossentropy`, `Hinge`, `KLDivergence`, …); registering both spellings
+  would silently overwrite the loss with the metric. So the Keras metric set omits
+  the duplicates. A second, independent curation applies for the same reason
+  framework-filtering does: `keras.metrics.Accuracy` wants already-argmaxed class
+  ids and the `PrecisionAtRecall` family sweeps thresholds across `[0, 1]` with no
+  `from_logits` knob, so against this project's raw-logits head they report a
+  wrong number rather than failing — and an option that cannot work is not an
+  option. Neither exclusion blocks anything: registration governs DISCOVERY, and
+  `!class:keras.metrics.Accuracy` still resolves from YAML.
 
 **Example.**
 
 ```python
-# tag at registration — classes and builder functions alike
-register(nn.CrossEntropyLoss, task="classification", role="loss", framework="torch")
+# tag at registration — classes and builder functions alike, one module per engine
+register(nn.CrossEntropyLoss, task="classification", role="loss", framework="torch")           # torch_classification.py
+register(keras.losses.BinaryCrossentropy, task="classification", role="loss", framework="keras")  # keras_classification.py
 
 # the picker query that is now answerable
 list_classes(task="classification", role="loss", framework="keras")   # -> no torch losses
@@ -124,9 +145,10 @@ list_classes(task="classification", role="loss", framework="keras")   # -> no to
 
 **What you may change.** Tag a class's framework whenever it is engine-bound;
 leave it off when it genuinely is not (a pure-python op, a path-based source).
-Do not fold framework into `category`, and do not make an untagged class
-excluded-by-default — the opt-in asymmetry is what let this ship without
-re-tagging the workspace.
+Add an engine by adding a `<framework>_classification.py` + its entry point, not
+by widening an existing module. Do not fold framework into `category`, and do not
+make an untagged class excluded-by-default — the opt-in asymmetry is what let this
+ship without re-tagging the workspace.
 
 ---
 

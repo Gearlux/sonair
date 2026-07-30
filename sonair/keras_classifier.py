@@ -9,15 +9,19 @@ the example config overrides, and nothing else.
 What that costs in code is the interesting part, because almost none of it is duplicated:
 
 * **Data** comes from recordstream unchanged — a ``Stream`` of records, the same one Lightning
-  consumes. :class:`RecordSequence` adapts it to ``keras.utils.PyDataset`` in ~20 lines by
-  reading batches with ``batch_values`` / ``multi_hot``, which return **numpy**. That is why
-  those are not torch-typed: a torch return would have forced a second implementation here.
+  consumes — and so does the BATCHING: ``recordstream.keras.RecordSequence`` is the
+  ``keras.utils.PyDataset`` a ``DataLoader`` would have been (row order, slicing, reshuffle,
+  ``collate_records``). All this backend adds is :meth:`KerasClassifier._to_arrays`, the eight
+  lines that say what a classification batch looks like — the twin of the Lightning backend's
+  ``_targets``, passed in exactly as a ``collate_fn`` is passed to a ``DataLoader``. It reads
+  batches with ``batch_values`` / ``multi_hot``, which return **numpy**: that is why those are
+  not torch-typed — a torch return would have forced a second implementation here.
 * **Labels** come from recordstream too — ``LabelMap`` fits and encodes, ``class_names`` reads
   the vocabulary back off the encoded stream.
 * **Run artifacts** come from marainer — ``save_class_names`` / ``write_metrics_sidecar``.
 * **Tracking** is marainer's ``keras_tracking_callback``.
 
-So what is actually written here is: a ``PyDataset`` adapter, ``compile()`` + ``fit()``, and the
+So what is actually written here is: a batch-shaping function, ``compile()`` + ``fit()``, and the
 task dispatch. That ratio is the demo.
 
 Keras 3 picks its backend from ``KERAS_BACKEND`` (``torch`` / ``tensorflow`` / ``jax``); this
@@ -32,8 +36,9 @@ Minimal flat YAML::
     max_epochs: 3
 """
 
+from functools import partial
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, cast
+from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Union, cast
 
 import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
@@ -49,12 +54,12 @@ from recordstream import (
     batch_metadata,
     batch_values,
     class_names,
-    collate_records,
     ensure_record_dataset,
     is_class_id,
     iter_key,
     multi_hot,
 )
+from recordstream.keras import RecordSequence
 from recordstream.runnable import ProgressReporting, entrypoint, run_entrypoint
 
 from sonair._keras import keras, keras_backend
@@ -65,7 +70,22 @@ logger = get_logger(__name__)
 #: Lightning backend uses, because the verb is a property of the TASK, not of the engine.
 ClassifierTask = Literal["fit", "evaluate", "test", "predict"]
 
-__all__ = ["ClassifierTask", "KerasClassifier", "RecordSequence"]
+# What Keras accepts in each compile slot: its own class, or the string alias it resolves to.
+# Spelled out rather than left as `Any` because `Any` types nothing (workspace mandate) and
+# gives `to_pydantic` nothing to build a widget from — navigaitor's form-spec and StreamStudio
+# read these to know that `loss` takes a `keras.losses.Loss`, which is the other half of the
+# registered set in `sonair.keras_classification` being pickable at all.
+#
+# It does NOT change how a wired value materializes: a nested `!class:` in a CONSTRUCTOR slot
+# stays a deferred `Class` marker regardless of annotation (only the instance form
+# `!class:X()` builds eagerly, the same trap the example config's `HuggingFaceSource()`
+# documents), so `_compile` flows these at use — exactly as `_callbacks()` already does for
+# the `logger` slot.
+KerasLoss = Union[str, keras.losses.Loss]
+KerasMetric = Union[str, keras.metrics.Metric]
+KerasOptimizer = Union[str, keras.optimizers.Optimizer]
+
+__all__ = ["ClassifierTask", "KerasClassifier"]
 
 
 def _first_target(source: Any, target_key: str) -> Any:
@@ -74,82 +94,6 @@ def _first_target(source: Any, target_key: str) -> Any:
         if target is not None:
             return target
     return None
-
-
-class RecordSequence(keras.utils.PyDataset):
-    """A recordstream source as a ``keras.utils.PyDataset`` of numpy batches.
-
-    The whole adapter between the two worlds, and it is short because recordstream hands over
-    numpy already: ``batch_values`` unwraps a batched record's key past its item type, and
-    ``multi_hot`` renders a multi-label column as an ``[N, C]`` matrix. Neither is torch-typed,
-    so nothing is converted twice and nothing is reimplemented for this backend.
-
-    Keras is **channels-last**: images arrive ``[N, H, W, C]``. The preprocessing config for a
-    Keras run therefore ends after ``ConvertToImage`` rather than adding a CHW ``ToTensor`` — the
-    one genuine data-shape difference between the backends, and it lives in the config where a
-    reader can see it.
-
-    Args:
-        source: Any map-style recordstream source (a ``Stream`` is one).
-        input_key: Record key holding the image.
-        target_key: Record key holding the label. ``None`` yields inputs only (predict).
-        batch_size: Rows per batch.
-        num_classes: Needed only for a multi-label target, to size the multi-hot matrix.
-        multilabel: Emit an ``[N, C]`` float multi-hot instead of ``[N]`` integer class ids.
-        shuffle: Reshuffle the row order every epoch (training).
-        seed: Shuffle seed, so a run is reproducible.
-    """
-
-    def __init__(
-        self,
-        source: Any,
-        input_key: str = "image",
-        target_key: Optional[str] = "class",
-        batch_size: int = 32,
-        num_classes: Optional[int] = None,
-        multilabel: bool = False,
-        shuffle: bool = False,
-        seed: int = 0,
-    ) -> None:
-        super().__init__()
-        self.source = source
-        self.input_key = input_key
-        self.target_key = target_key
-        self.batch_size = int(batch_size)
-        self.num_classes = num_classes
-        self.multilabel = multilabel
-        self.shuffle = shuffle
-        self._order = np.arange(len(source))
-        self._rng = np.random.default_rng(seed)
-        if shuffle:
-            self._rng.shuffle(self._order)
-
-    def __len__(self) -> int:
-        """Number of batches — Keras asks once per epoch."""
-        return int(np.ceil(len(self._order) / self.batch_size))
-
-    def __getitem__(self, index: int) -> Any:
-        rows = self._order[index * self.batch_size : (index + 1) * self.batch_size]
-        batch = collate_records([self.source[int(i)] for i in rows])
-        x = np.asarray(batch_values(batch, self.input_key), dtype="float32")
-        if self.target_key is None:
-            return (x,)
-        if self.multilabel:
-            if not self.num_classes:
-                raise RuntimeError("RecordSequence: a multi-label target needs num_classes.")
-            return x, multi_hot(batch, self.target_key, self.num_classes)
-        return x, np.asarray(batch_values(batch, self.target_key), dtype="int64")
-
-    def on_epoch_end(self) -> None:
-        """Reshuffle between epochs when training."""
-        if self.shuffle:
-            self._rng.shuffle(self._order)
-
-    def records(self) -> Iterable[Any]:
-        """The underlying records in batch order — for pairing predictions with metadata."""
-        for index in range(len(self)):
-            rows = self._order[index * self.batch_size : (index + 1) * self.batch_size]
-            yield collate_records([self.source[int(i)] for i in rows])
 
 
 @configurable(task="classification", role="trainer", framework="keras")
@@ -172,9 +116,14 @@ class KerasClassifier(ProgressReporting):
         input_key: Record key holding the image.
         target_key: Record key holding the label.
         label_map: Pin the name-to-id encoding instead of fitting it from the train targets.
-        optimizer: Keras optimizer name or instance.
-        loss: Keras loss. ``None`` picks by target shape, like the Lightning backend's sentinel.
-        metrics: Keras metric names/instances. ``None`` picks a sensible default.
+        optimizer: Keras optimizer — a string alias (``"adam"``) or a ``keras.optimizers``
+            instance.
+        loss: Keras loss — a string alias or a ``keras.losses`` instance (the registered set
+            lives in :mod:`sonair.keras_classification`; a logit-emitting head needs
+            ``from_logits=True``). ``None`` picks by target shape, like the Lightning
+            backend's sentinel.
+        metrics: Keras metrics — string aliases or ``keras.metrics`` instances. ``None`` picks
+            a sensible default.
     """
 
     def __init__(
@@ -192,9 +141,9 @@ class KerasClassifier(ProgressReporting):
         input_key: str = "image",
         target_key: str = "class",
         label_map: Optional[LabelMap] = None,
-        optimizer: Any = "adam",
-        loss: Any = None,
-        metrics: Optional[Sequence[Any]] = None,
+        optimizer: KerasOptimizer = "adam",
+        loss: Optional[KerasLoss] = None,
+        metrics: Optional[Sequence[KerasMetric]] = None,
     ) -> None:
         super().__init__()
         self.model: Lazy[Any] = model
@@ -211,13 +160,13 @@ class KerasClassifier(ProgressReporting):
         self.input_key = str(input_key)
         self.target_key = str(target_key)
         self.label_map = label_map
-        self.optimizer = optimizer
+        self.optimizer: KerasOptimizer = optimizer
         # Sentinels, for the same reason the Lightning backend uses them: the right loss and
         # metrics depend on whether the targets are single- or multi-label, which is only known
         # once `initialize()` has peeked the data. A live default here could not be told apart
         # from a user's explicit choice.
-        self.loss: Any = loss
-        self.metrics: Optional[Sequence[Any]] = metrics
+        self.loss: Optional[KerasLoss] = loss
+        self.metrics: Optional[Sequence[KerasMetric]] = metrics
         self.multilabel: bool = False
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
@@ -316,24 +265,60 @@ class KerasClassifier(ProgressReporting):
             self.metrics = ["binary_accuracy"] if self.multilabel else ["accuracy"]
 
     def _compile(self) -> None:
-        """Build the model at the resolved width, then compile it."""
+        """Build the model at the resolved width, then compile it.
+
+        The compile slots are flowed at USE, the way ``_callbacks()`` and ``predict()`` flow
+        theirs — a nested ``!class:`` in a constructor slot arrives as a deferred ``Class``
+        marker, and Keras takes an unbuilt marker for a custom callable and fails deep inside
+        ``compile`` rather than saying what is wrong.
+        """
         self._resolve_task_defaults()
         if isinstance(self.model, Fluid) or hasattr(self.model, "solidify"):
             self.model = flow(self.model, num_classes=self.num_classes)
         network = getattr(self.model, "model", self.model)
-        network.compile(optimizer=self.optimizer, loss=self.loss, metrics=list(self.metrics or []))
+        network.compile(
+            optimizer=_built(self.optimizer),
+            loss=_built(self.loss),
+            metrics=[_built(m) for m in (self.metrics or [])],
+        )
         self._network = network
 
     def _sequence(self, source: Any, shuffle: bool = False, with_targets: bool = True) -> RecordSequence:
+        """recordstream's batching adapter, wearing THIS task's batch shape.
+
+        The split is the same one torch draws: ``RecordSequence`` is the engine's DataLoader half
+        (row order, slicing, per-epoch reshuffle, ``collate_records``) and knows nothing about
+        classification; ``_to_arrays`` is handed to it the way a ``collate_fn`` is handed to a
+        ``DataLoader``.
+        """
         return RecordSequence(
             source,
-            input_key=self.input_key,
-            target_key=self.target_key if with_targets else None,
             batch_size=self.batch_size,
-            num_classes=self.num_classes,
-            multilabel=self.multilabel,
             shuffle=shuffle,
+            transform=partial(self._to_arrays, with_targets=with_targets),
         )
+
+    def _to_arrays(self, batch: Any, with_targets: bool = True) -> Any:
+        """One collated record batch → the numpy ``(x, y)`` Keras consumes.
+
+        The Keras twin of the Lightning backend's ``_targets``, and short for the same reason:
+        recordstream hands over numpy already — ``batch_values`` unwraps a batched key past its
+        item type, ``multi_hot`` renders a multi-label column as an ``[N, C]`` matrix — so nothing
+        is converted twice and nothing is reimplemented for this backend.
+
+        Keras is **channels-last**: images arrive ``[N, H, W, C]``. The preprocessing config for a
+        Keras run therefore ends after ``ConvertToImage`` rather than adding a CHW ``ToTensor`` —
+        the one genuine data-shape difference between the backends, and it lives in the config
+        where a reader can see it.
+        """
+        x = np.asarray(batch_values(batch, self.input_key), dtype="float32")
+        if not with_targets:
+            return (x,)
+        if self.multilabel:
+            if not self.num_classes:
+                raise RuntimeError("KerasClassifier: a multi-label target needs num_classes.")
+            return x, multi_hot(batch, self.target_key, self.num_classes)
+        return x, np.asarray(batch_values(batch, self.target_key), dtype="int64")
 
     def _callbacks(self) -> List[Any]:
         """Wired Keras callbacks plus OPTIONAL marainer tracking (a few lines; removable)."""
@@ -399,7 +384,7 @@ class KerasClassifier(ProgressReporting):
             raise ValueError("KerasClassifier.predict() requires a 'test_set'.")
         sink = flow(self.predictions_sink) if isinstance(self.predictions_sink, Fluid) else self.predictions_sink
         sequence = self._sequence(self.test_set, with_targets=False)
-        for index, batch in enumerate(sequence.records()):
+        for index, batch in enumerate(sequence.batches()):
             logits = self._network.predict(sequence[index][0], verbose=0)
             if sink is not None:
                 self._write_predictions(np.asarray(logits), batch, cast(PredictionsSink, sink))
@@ -459,6 +444,11 @@ class KerasClassifier(ProgressReporting):
         if self.label_map is not None:
             return list(self.label_map.class_names)
         return list(self._class_names or [])
+
+
+def _built(value: Any) -> Any:
+    """A deferred :class:`~confluid.fluid.Fluid` built; anything else verbatim."""
+    return flow(value) if isinstance(value, Fluid) else value
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:

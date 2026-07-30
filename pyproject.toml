@@ -19,9 +19,9 @@ dependencies = [
     # marainer is core because it is a TRACKING library, not a framework: its own torch and
     # framework helpers sit behind ITS extras, which the backend extras below select.
     "marainer>=0.1.0",
-    # 0.3.0 is the floor for the `framework=` discovery tag, passed at decoration
-    # time in sonair/classification.py — against 0.2.0 every registration raises
-    # TypeError at import.
+    # 0.3.0 is the floor for the `framework=` discovery tag, passed at registration
+    # time in sonair/torch_classification.py + sonair/keras_classification.py —
+    # against 0.2.0 every registration raises TypeError at import.
     "confluid>=0.3.0",
     "recordstream>=0.1.0",
     "loggair>=0.1.0",
@@ -50,12 +50,16 @@ lightning = [
     "marainer[lightning,mlflow,tensorboard]>=0.1.0",
 ]
 # Keras 3 is an API, not an engine — it needs ONE compute backend underneath (torch/TF/jax), and
-# `sonair/_keras.py` selects whichever is installed. So each Keras extra names its OWN engine; a
-# `tensorflow = ["sonair[keras]", ...]` chain would have dragged torch into a TensorFlow install,
-# which is the opposite of what selecting an extra is for.
+# `recordstream.keras` (which `sonair/_keras.py` imports through) selects whichever is installed.
+# So each Keras extra names its OWN engine; a `tensorflow = ["sonair[keras]", ...]` chain would
+# have dragged torch into a TensorFlow install, which is the opposite of what selecting an extra
+# is for.
 keras = [
     "keras>=3.0",
     "torch",                # the engine `sonair[keras]` runs Keras on
+    # The PyDataset batching adapter (`recordstream.keras.RecordSequence`) + the KERAS_BACKEND
+    # ordering this backend's keras imports depend on.
+    "recordstream[keras]>=0.1.0",
     # Tracking for a Keras run. Deliberately marainer[keras], NOT marainer[tensorflow]: the
     # callback needs the Keras API, not the TensorFlow engine.
     "marainer[keras]>=0.1.0",
@@ -63,6 +67,7 @@ keras = [
 tensorflow = [
     "keras>=3.0",           # Keras 3 IS tf.keras in TF >= 2.16
     "tensorflow>=2.16",     # ...this extra's engine
+    "recordstream[keras]>=0.1.0",
     "marainer[keras]>=0.1.0",
 ]
 jax = [
@@ -109,10 +114,12 @@ sonair-lightning = "sonair.lightning_classifier"
 sonair-timm = "sonair.timm_model"
 sonair-keras = "sonair.keras_classifier"
 sonair-keras-model = "sonair.keras_model"
-# Scan sonair.classification directly so StreamStudio / navigaitor discovery surfaces the registered
-# classification losses (torch.nn.*) and metrics (torchmetrics.classification.Multiclass*) — their
-# __module__ is torch / torchmetrics, so they're picked up via that module's __all__-gated pass.
-sonair-classification = "sonair.classification"
+# The loss/metric registrations, ONE MODULE PER ENGINE — a loss is engine-bound, so each set is
+# tagged `framework="torch"` / `framework="keras"` and lives where a missing backend can drop it
+# whole. Scanned directly because the registered classes' __module__ is torch / torchmetrics /
+# keras, which `scan_module` filters out; each module's __all__-gated pass is what surfaces them.
+sonair-torch-classification = "sonair.torch_classification"
+sonair-keras-classification = "sonair.keras_classification"
 
 # Which of this project's extras are ML FRAMEWORKS, for `aisland framework`. Selecting a name
 # here is what makes `aisland setup` add the matching extra to this project's install.

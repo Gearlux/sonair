@@ -1,5 +1,5 @@
 # mypy: disable-error-code="attr-defined"
-"""Unit coverage for :class:`sonair.classification.SigmoidFocalLoss`.
+"""Unit coverage for :class:`sonair.torch_classification.SigmoidFocalLoss`.
 
 The wrapper exists because confluid's ``register`` only tags *classes*, while
 the upstream ``torchvision.ops.sigmoid_focal_loss`` is a plain function — so
@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from confluid.registry import get_registry
 from torchvision.ops import sigmoid_focal_loss
 
-from sonair.classification import FocalLossReduction, SigmoidFocalLoss
+from sonair.torch_classification import FocalLossReduction, SigmoidFocalLoss
 
 
 def _logits_and_targets() -> tuple[torch.Tensor, torch.Tensor]:

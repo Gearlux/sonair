@@ -141,6 +141,12 @@ keras: !scope:framework=keras
   #   metrics:
   #     - !class:keras.metrics.SparseCategoricalAccuracy      # argmax-based: logit-safe as-is
   #     - !class:keras.metrics.SparseTopKCategoricalAccuracy { k: 5 }
+  #     - !class:SparseCategoricalCrossentropy@role=metric,framework=keras()
+  #
+  # That last line is the `@role=` selector: seven Keras names are BOTH a loss and a metric
+  # (BinaryCrossentropy / Hinge / KLDivergence / …), so a bare reference to one is ambiguous
+  # and confluid says so instead of guessing. A dotted path works too and never needs the
+  # selector: !class:keras.src.metrics.probabilistic_metrics.SparseCategoricalCrossentropy()
   #
   # Pick by TARGET SHAPE first: MNIST targets are single-label, so `_to_arrays` hands the
   # metric int64 ids [N] and only the `Sparse*` metrics read that. The element-wise ones

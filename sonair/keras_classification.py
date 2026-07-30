@@ -142,13 +142,17 @@ _CLASSIFICATION_LOSSES = (
 for _loss_cls in _CLASSIFICATION_LOSSES:
     register(_loss_cls, task="classification", role="loss", framework="keras")
 
-# The useful ``keras.metrics`` classification metrics. NOTE the constraint that shapes this list:
-# confluid's registry is keyed by class NAME and Keras publishes thirteen names under BOTH
-# ``keras.losses`` and ``keras.metrics`` (``BinaryCrossentropy``, ``CategoricalCrossentropy``,
-# ``SparseCategoricalCrossentropy``, ``Hinge``, ``SquaredHinge``, ``CategoricalHinge``,
-# ``KLDivergence``, …). Registering both spellings would silently overwrite the loss entry with
-# the metric one, so the metric duplicates are left out — Keras reports the compiled loss as a
-# metric anyway, which is what those classes were for.
+# The useful ``keras.metrics`` classification metrics.
+#
+# Keras publishes thirteen names under BOTH ``keras.losses`` and ``keras.metrics``, and seven
+# of them are losses this module already registers. They are registered as metrics TOO, which
+# only became possible with confluid 0.3.0's multi-class names: the registry admits a shared
+# name when a discovery tag tells the entries apart, and here ``role`` does
+# (``get_class("Hinge", role="metric")``). Until then the second registration silently
+# overwrote the first, so these seven had to be left out entirely.
+#
+# The PYTHON binding still has to be unique, hence the ``*Metric`` suffix on the module-level
+# alias — the registry name stays the class's own (``Hinge``), which is what a config writes.
 AUC = keras.metrics.AUC
 BinaryAccuracy = keras.metrics.BinaryAccuracy
 CategoricalAccuracy = keras.metrics.CategoricalAccuracy
@@ -163,6 +167,16 @@ SparseTopKCategoricalAccuracy = keras.metrics.SparseTopKCategoricalAccuracy
 TopKCategoricalAccuracy = keras.metrics.TopKCategoricalAccuracy
 TrueNegatives = keras.metrics.TrueNegatives
 TruePositives = keras.metrics.TruePositives
+# The seven loss namesakes, as metrics. Tracking a loss you are NOT optimizing is the point
+# (train with SparseCategoricalCrossentropy, watch KLDivergence alongside it); Keras reports
+# the COMPILED loss automatically, so these earn their place only for the others.
+BinaryCrossentropyMetric = keras.metrics.BinaryCrossentropy
+CategoricalCrossentropyMetric = keras.metrics.CategoricalCrossentropy
+CategoricalHingeMetric = keras.metrics.CategoricalHinge
+HingeMetric = keras.metrics.Hinge
+KLDivergenceMetric = keras.metrics.KLDivergence
+SparseCategoricalCrossentropyMetric = keras.metrics.SparseCategoricalCrossentropy
+SquaredHingeMetric = keras.metrics.SquaredHinge
 
 _CLASSIFICATION_METRICS = (
     # argmax-based, so safe on a raw-logits head with nothing to configure.
@@ -185,6 +199,17 @@ _CLASSIFICATION_METRICS = (
     FBetaScore,
     # The one metric carrying the knob: `from_logits: true`.
     AUC,
+    # The loss namesakes. Same class NAME as the loss above, different `role` — which is
+    # exactly what lets both be registered (confluid >= 0.3.0). A config picks one with
+    # `!class:Hinge@role=metric` or `get_class("Hinge", role="metric")`; a BARE `Hinge`
+    # is now an error naming both, rather than silently resolving to whichever won.
+    BinaryCrossentropyMetric,
+    CategoricalCrossentropyMetric,
+    CategoricalHingeMetric,
+    HingeMetric,
+    KLDivergenceMetric,
+    SparseCategoricalCrossentropyMetric,
+    SquaredHingeMetric,
 )
 for _metric_cls in _CLASSIFICATION_METRICS:
     register(_metric_cls, task="classification", role="metric", framework="keras")
@@ -220,4 +245,12 @@ __all__ = [
     "TopKCategoricalAccuracy",
     "TrueNegatives",
     "TruePositives",
+    # metrics (keras.metrics) — role="metric", the loss namesakes (see above)
+    "BinaryCrossentropyMetric",
+    "CategoricalCrossentropyMetric",
+    "CategoricalHingeMetric",
+    "HingeMetric",
+    "KLDivergenceMetric",
+    "SparseCategoricalCrossentropyMetric",
+    "SquaredHingeMetric",
 ]

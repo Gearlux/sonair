@@ -49,15 +49,21 @@ lightning = [
     # marainer's pl-side tracking helpers + the tracker backends this backend's configs wire.
     "marainer[lightning,mlflow,tensorboard]>=0.1.0",
 ]
+# Keras 3 is an API, not an engine — it needs ONE compute backend underneath (torch/TF/jax), and
+# `sonair/_keras.py` selects whichever is installed. So each Keras extra names its OWN engine; a
+# `tensorflow = ["sonair[keras]", ...]` chain would have dragged torch into a TensorFlow install,
+# which is the opposite of what selecting an extra is for.
 keras = [
-    "keras>=3.0",           # Keras 3 is standalone and picks its backend via KERAS_BACKEND
+    "keras>=3.0",
+    "torch",                # the engine `sonair[keras]` runs Keras on
     # Tracking for a Keras run. Deliberately marainer[keras], NOT marainer[tensorflow]: the
     # callback needs the Keras API, not the TensorFlow engine.
     "marainer[keras]>=0.1.0",
 ]
 tensorflow = [
-    "sonair[keras]",        # Keras 3 IS tf.keras in TF >= 2.16 — the engine is the only addition
-    "tensorflow>=2.16",
+    "keras>=3.0",           # Keras 3 IS tf.keras in TF >= 2.16
+    "tensorflow>=2.16",     # ...this extra's engine
+    "marainer[keras]>=0.1.0",
 ]
 jax = [
     "jax>=0.4",
@@ -107,6 +113,15 @@ sonair-keras-model = "sonair.keras_model"
 # classification losses (torch.nn.*) and metrics (torchmetrics.classification.Multiclass*) — their
 # __module__ is torch / torchmetrics, so they're picked up via that module's __all__-gated pass.
 sonair-classification = "sonair.classification"
+
+# Which of this project's extras are ML FRAMEWORKS, for `aisland framework`. Selecting a name
+# here is what makes `aisland setup` add the matching extra to this project's install.
+#
+# Only the IMPLEMENTED backends are declared. The `tensorflow` / `jax` / `mlx` / `huggingface`
+# extras above exist so the CLI's not-implemented templates can print a real install command;
+# declaring them here would install three frameworks nothing can run yet.
+[tool.aisland]
+frameworks = ["lightning", "keras"]
 
 [tool.setuptools.packages.find]
 where = ["."]

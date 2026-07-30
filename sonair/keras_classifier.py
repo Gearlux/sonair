@@ -349,7 +349,7 @@ class KerasClassifier(ProgressReporting):
                 Path(target).expanduser().parent.mkdir(parents=True, exist_ok=True)
         trackers = [flow(t) if isinstance(t, Fluid) else t for t in (self.trackers or [])]
         if trackers:
-            from marainer.tensorflow import keras_tracking_callback
+            from marainer.keras import keras_tracking_callback
 
             callbacks.append(keras_tracking_callback(trackers, params=self._tracked_params()))
         return callbacks

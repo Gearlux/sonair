@@ -5,22 +5,26 @@ description = "Image-classification models and a standard-Lightning classifier (
 authors = [{name = "Taidal"}]
 license = {text = "MIT"}
 dependencies = [
-    # marainer provides OPTIONAL experiment tracking (git/config/system-metrics/log-file) + a couple
-    # of torch utilities (ensure_record_dataset / load_lightning_checkpoint). The [lightning] extra
-    # pulls the pl-side tracking helpers; [mlflow]/[tensorboard] add those tracker backends. sonair's
-    # LightningClassifier is a standard pl.LightningModule and trains without marainer (a couple of
-    # tracking lines would drop out).
-    "marainer[lightning,mlflow,tensorboard]>=0.1.0",
+    # CORE IS BACKEND-FREE (2026-07-30). What stays here is what EVERY backend needs: the
+    # config/CLI surface, the record engine, and the task-shaped pieces that are engine-neutral.
+    # A training framework — torch, Lightning, timm, Keras — belongs to whichever backend the
+    # operator selected, so it lives in that backend's extra. Installing sonair bare gives you
+    # the CLI and the config surface; touching a backend without its extra fails with the exact
+    # install command (see `sonair/cli.py`).
+    #
+    #   pip install 'sonair[lightning]'          the reference backend (torch + pl + timm)
+    #   pip install 'sonair[keras]'              Keras 3 (runs on torch / tensorflow / jax)
+    #   pip install 'sonair[lightning,keras]'    both
+    #
+    # marainer is core because it is a TRACKING library, not a framework: its own torch and
+    # framework helpers sit behind ITS extras, which the backend extras below select.
+    "marainer>=0.1.0",
     # 0.3.0 is the floor for the `framework=` discovery tag, passed at decoration
     # time in sonair/classification.py — against 0.2.0 every registration raises
     # TypeError at import.
     "confluid>=0.3.0",
     "recordstream>=0.1.0",
     "loggair>=0.1.0",
-    "torch",
-    "torchmetrics",
-    "pytorch-lightning",
-    "timm>=1.0.0",
     "datasets>=2.0.0",
     "pillow",
     "tqdm",  # progress bar while the trainer walks train targets to fit the label encoder
@@ -28,16 +32,32 @@ dependencies = [
 requires-python = ">=3.12"
 
 [project.optional-dependencies]
-# Backend extras — one per training framework in `sonair.frameworks.FRAMEWORKS`.
-# `lightning` needs no extra (torch + pytorch-lightning are core deps, it being
-# the reference backend). The others are TEMPLATES: the extra exists so the
-# not-implemented guidance can name a real install command, and so wiring a
-# backend later is a dependency change, not a packaging change.
+# Backend extras — one per training framework, selectable singly or together:
+#
+#   uv pip install -e './sonair[lightning]'
+#   uv pip install -e './sonair[keras]'
+#   uv pip install -e './sonair[lightning,keras]'
+#
+# `lightning` and `keras` are IMPLEMENTED; the rest are templates whose verbs name the work.
+# An extra exists for each so the not-implemented guidance can print a real install command,
+# and so wiring a backend later is a dependency change rather than a packaging one.
+lightning = [
+    "torch",
+    "torchmetrics",
+    "pytorch-lightning",
+    "timm>=1.0.0",          # the model zoo TimmModel wraps
+    # marainer's pl-side tracking helpers + the tracker backends this backend's configs wire.
+    "marainer[lightning,mlflow,tensorboard]>=0.1.0",
+]
 keras = [
-    "keras>=3.0",           # Keras 3 picks its own backend (TF / JAX / PyTorch)
+    "keras>=3.0",           # Keras 3 is standalone and picks its backend via KERAS_BACKEND
+    # Tracking for a Keras run. Deliberately marainer[keras], NOT marainer[tensorflow]: the
+    # callback needs the Keras API, not the TensorFlow engine.
+    "marainer[keras]>=0.1.0",
 ]
 tensorflow = [
-    "tensorflow>=2.16",     # 2.16+ ships Keras 3 as tf.keras
+    "sonair[keras]",        # Keras 3 IS tf.keras in TF >= 2.16 — the engine is the only addition
+    "tensorflow>=2.16",
 ]
 jax = [
     "jax>=0.4",
@@ -72,7 +92,17 @@ sonair = "sonair.cli:main"
 sonair = "sonair.cli:app"
 
 [project.entry-points."confluid.configurables"]
-sonair = "sonair"
+# ONE ENTRY POINT PER BACKEND MODULE, deliberately — not a single `sonair = "sonair"` (2026-07-30).
+# Importing the package no longer registers anything: every backend name in `sonair/__init__.py`
+# is lazy so a Keras-only install never imports torch, which also means the package import has no
+# registration side effect. Naming the modules directly restores discovery AND makes it track the
+# install: a scanner imports each, and one whose backend is absent simply fails and is skipped
+# (navigaitor's bootstrap catches BaseException per module and warns). So a keras-only install
+# advertises exactly the Keras classes — which is the correct answer, not a degraded one.
+sonair-lightning = "sonair.lightning_classifier"
+sonair-timm = "sonair.timm_model"
+sonair-keras = "sonair.keras_classifier"
+sonair-keras-model = "sonair.keras_model"
 # Scan sonair.classification directly so StreamStudio / navigaitor discovery surfaces the registered
 # classification losses (torch.nn.*) and metrics (torchmetrics.classification.Multiclass*) — their
 # __module__ is torch / torchmetrics, so they're picked up via that module's __all__-gated pass.

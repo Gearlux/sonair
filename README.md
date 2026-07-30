@@ -21,8 +21,30 @@ swin, convnext, mobilenetv3, ...) and exposes its constructor knobs to YAML.
 
 ## Installation
 
+**Pick your backend.** The core is framework-free — a training framework arrives with the
+backend you select, so a Keras install does not drag in Lightning, nor the reverse:
+
 ```bash
-pip install git+https://github.com/Gearlux/sonair.git@main
+pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning]'      # PyTorch Lightning
+pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[keras]'          # Keras 3
+pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning,keras]'  # both
+```
+
+`[lightning]` is the reference backend and what the examples assume. What each selects:
+
+| install | adds |
+|---|---|
+| `sonair` | nothing — CLI and config surface only |
+| `sonair[lightning]` | `torch`, `pytorch-lightning`, `timm`, `torchmetrics` |
+| `sonair[keras]` | `keras` (Keras 3 — picks torch / tensorflow / jax at run time) |
+| `sonair[tensorflow]` | `sonair[keras]` + the TensorFlow engine |
+
+Touching a backend you did not install says so, with the command to fix it:
+
+```console
+>>> import sonair; sonair.LightningClassifier
+ImportError: sonair.LightningClassifier needs the 'lightning' backend, which is not installed.
+  pip install 'sonair[lightning]'
 ```
 
 ### Development
@@ -30,7 +52,7 @@ pip install git+https://github.com/Gearlux/sonair.git@main
 ```bash
 git clone https://github.com/Gearlux/sonair.git
 cd sonair
-pip install -e ".[dev]"
+uv pip install -e '.[lightning,dev]'      # or '.[keras,dev]', or '.[lightning,keras,dev]'
 ```
 
 ## Quick Start

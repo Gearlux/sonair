@@ -6,10 +6,9 @@ The framework is a first-class dimension of the command line::
     sonair lightning evaluate cfg.yaml
     sonair lightning predict  cfg.yaml
     sonair keras      train   cfg.yaml     # implemented (Keras 3)
-    sonair keras      evaluate cfg.yaml
-    sonair keras      predict  cfg.yaml
-    sonair tensorflow train   cfg.yaml     # template — raises with instructions
-    sonair jax        train   cfg.yaml     # template
+    sonair tensorflow train   cfg.yaml     # implemented (tf.data + GradientTape)
+    sonair fastai     train   cfg.yaml     # implemented (Learner + one-cycle)
+    sonair jax        train   cfg.yaml     # template — raises with instructions
     sonair huggingface train  cfg.yaml     # template
     sonair mlx        train   cfg.yaml     # template
 
@@ -24,8 +23,9 @@ Adding a backend: write ``sonair/<name>_classifier.py`` (see
 sub-app modelled on ``lightning``.
 """
 
+import os
 import sys
-from typing import Any, Callable, List
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 from liquifai import LiquifaiError, LiquifyApp
 from loggair import get_logger
@@ -84,108 +84,108 @@ def _register_backend_classification(module: str) -> None:
     importlib.import_module(module)
 
 
-def _register_torch_classification() -> None:
-    _register_backend_classification("sonair.torch_classification")
-
-
-def _register_keras_classification() -> None:
-    _register_backend_classification("sonair.keras_classification")
-
-
 # --------------------------------------------------------------------------- #
-# lightning — the implemented backend
+# The implemented backends
 # --------------------------------------------------------------------------- #
-
-lightning = LiquifyApp(
-    name="lightning",
-    description="PyTorch Lightning — the reference backend (timm models, Lightning loggers).",
-)
-
-
-@lightning.script_command(flow_mode="manual")
-def train(runnable: Any) -> None:
-    """Train an image classifier with PyTorch Lightning (task=fit)."""
-    _register_torch_classification()
-    _dispatch(runnable, "fit")
-
-
-@lightning.script_command(flow_mode="manual")
-def evaluate(runnable: Any) -> None:
-    """Evaluate a trained classifier over the test set (task=test)."""
-    _register_torch_classification()
-    _dispatch(runnable, "test")
-
-
-@lightning.script_command(flow_mode="manual")
-def predict(runnable: Any) -> None:
-    """Stream predictions from a trained classifier to its sink (task=predict)."""
-    _register_torch_classification()
-    _dispatch(runnable, "predict")
-
-
-app.add_app(lightning, "lightning")
-
-
-# --------------------------------------------------------------------------- #
-# keras — the second implemented backend
-# --------------------------------------------------------------------------- #
-# Written out plainly, like `lightning` above it and for the same reason: two sub-apps
-# that each call `_dispatch` share three lines, which is less than any indirection that
-# would remove the duplication. Revisit if a THIRD real backend lands.
+# Until 2026-07-30 `lightning` and `keras` were written out plainly — six decorated
+# functions — with the recorded rule "if a THIRD real backend lands, factor it out THEN,
+# with three concrete cases to generalise from" (docs/architecture.md §1). `tensorflow`
+# and `fastai` are the third and fourth, and the four sub-apps differ in exactly three
+# values: the name, the description, and which loss/metric module to import. So the
+# generalisation is a table of those three values plus a factory, and nothing else —
+# no `Framework` dataclass, no registry module, no per-backend subclass.
 #
-# Keras 3 chooses its compute backend from `KERAS_BACKEND` at import time; sonair imports
-# keras through `sonair._keras`, which defaults it to `torch` (the one this package
-# guarantees) when the operator has not chosen. So `sonair keras train` works out of the
-# box, and `KERAS_BACKEND=tensorflow sonair keras train` runs the identical config on
-# TensorFlow once that is installed.
-
-keras = LiquifyApp(
-    name="keras",
-    description="Keras 3 — one API over PyTorch / TensorFlow / JAX (set KERAS_BACKEND to pick).",
-)
+# What did NOT get folded in is the pre-import in `main()` below: `tensorflow` has to pin
+# KERAS_BACKEND before anything imports keras, which is earlier than any handler can run.
+# That asymmetry is real, so it stays visible instead of being hidden behind the table.
 
 
-# `name=` is explicit because the handlers cannot both be called `train`: liquifai derives a
-# command's name from the function name, and two module-level `def train` would collide.
-@keras.script_command(name="train", flow_mode="manual")
-def keras_train(runnable: Any) -> None:
-    """Train an image classifier with Keras 3 (task=fit)."""
-    _register_keras_classification()
-    _dispatch(runnable, "fit")
+class Backend(NamedTuple):
+    """One implemented backend: what to call it, what to say about it, what to import."""
+
+    description: str
+    #: The module whose import registers this engine's losses/metrics under a plain NAME.
+    #: `tensorflow` shares the Keras set on purpose — in TF >= 2.16 `tf.keras` IS Keras 3,
+    #: so a separate `tensorflow_classification.py` would register the same classes twice
+    #: and make every bare `!class:SparseCategoricalCrossentropy` ambiguous for no gain.
+    registrations: str
 
 
-@keras.script_command(name="evaluate", flow_mode="manual")
-def keras_evaluate(runnable: Any) -> None:
-    """Evaluate a trained classifier over the test set (task=test)."""
-    _register_keras_classification()
-    _dispatch(runnable, "test")
+IMPLEMENTED: Dict[str, Backend] = {
+    "lightning": Backend(
+        "PyTorch Lightning — the reference backend (timm models, Lightning loggers).",
+        "sonair.torch_classification",
+    ),
+    "keras": Backend(
+        "Keras 3 — one API over PyTorch / TensorFlow / JAX (set KERAS_BACKEND to pick).",
+        "sonair.keras_classification",
+    ),
+    "tensorflow": Backend(
+        "TensorFlow — a native tf.data + tf.GradientTape loop, with SavedModel export.",
+        "sonair.keras_classification",
+    ),
+    "fastai": Backend(
+        "fastai — a Learner with one-cycle scheduling, over the same torch stack.",
+        "sonair.fastai_classification",
+    ),
+}
+
+#: Verb -> the ``task`` it forces. The verb wins over any ``task:`` in the YAML.
+VERB_TASKS = {"train": "fit", "evaluate": "test", "predict": "predict"}
 
 
-@keras.script_command(name="predict", flow_mode="manual")
-def keras_predict(runnable: Any) -> None:
-    """Stream predictions from a trained classifier to its sink (task=predict)."""
-    _register_keras_classification()
-    _dispatch(runnable, "predict")
+def _backend_command(verb: str, backend: str, spec: Backend) -> Callable[[Any], None]:
+    """One implemented verb, bound to its backend.
+
+    A factory, not a default-argument closure: liquifai reads the handler's SIGNATURE to
+    build the command, so smuggling the loop variables in as defaults would advertise them
+    as ``--_backend`` / ``--_verb`` options in help and TAB completion. The signature it
+    must expose is exactly ``(runnable)`` — the parameter NAME is what liquifai's DI binds
+    to the config's ``runnable:`` key.
+    """
+
+    def command(runnable: Any) -> None:
+        _register_backend_classification(spec.registrations)
+        _dispatch(runnable, VERB_TASKS[verb])
+
+    command.__name__ = f"{backend}_{verb}"
+    command.__doc__ = f"{_VERB_DOCS[verb]} ({backend}; task={VERB_TASKS[verb]})."
+    return command
 
 
-app.add_app(keras, "keras")
+_VERB_DOCS = {
+    "train": "Train an image classifier",
+    "evaluate": "Evaluate a trained classifier over the test set",
+    "predict": "Stream predictions from a trained classifier to its sink",
+}
+
+
+def _backend_app(backend: str, spec: Backend) -> LiquifyApp:
+    """Build an implemented backend's sub-app: the same three verbs, all real."""
+    sub = LiquifyApp(name=backend, description=spec.description)
+    for verb in VERB_TASKS:
+        sub.script_command(name=verb, flow_mode="manual")(_backend_command(verb, backend, spec))
+    return sub
+
+
+for _backend, _spec in IMPLEMENTED.items():
+    app.add_app(_backend_app(_backend, _spec), _backend)
 
 
 # --------------------------------------------------------------------------- #
 # Backend templates — verbs exist so `--help` and TAB advertise the roadmap,
-# and each names the work instead of shrugging. Replace a block with a real
-# sub-app (like `lightning` above) once its runnable class exists.
+# and each names the work instead of shrugging. Graduating one means writing its
+# runnable, deleting its entry here, and adding it to IMPLEMENTED above.
 # --------------------------------------------------------------------------- #
 
 TEMPLATES = {
-    "tensorflow": "TensorFlow / tf.keras — graph execution and SavedModel export. TEMPLATE.",
     "jax": "JAX + Flax/NNX — functional transforms, jit/pmap scaling. TEMPLATE.",
     "huggingface": "Transformers `Trainer` + Accelerate — the fine-tuning path. TEMPLATE.",
     "mlx": "MLX — training on Apple-silicon unified memory. TEMPLATE.",
 }
 
 #: Every backend verb, implemented or not — used to map a verb to its scope.
-BACKENDS = ("lightning", "keras", *TEMPLATES)
+BACKENDS = (*IMPLEMENTED, *TEMPLATES)
 
 
 def _template_message(name: str, verb: str) -> str:
@@ -197,8 +197,8 @@ def _template_message(name: str, verb: str) -> str:
         f"     `run()` -> `initialize()` -> `@entrypoint`-tagged methods, and\n"
         f'     `@configurable(task="classification", role="trainer")`.\n'
         f"     Reference: sonair/lightning_classifier.py (see docs/frameworks.md).\n"
-        f"  2. Replace the `{name}` template in sonair/cli.py with a real sub-app,\n"
-        f"     modelled on the `lightning` one above it.\n"
+        f"  2. Move `{name}` from TEMPLATES to IMPLEMENTED in sonair/cli.py, naming the\n"
+        f"     module that registers its losses/metrics.\n"
         f"  3. Install the backend: pip install 'sonair[{name}]'\n\n"
         f"The verbs, the config shape (`runnable:` + `task:`) and the logging backends\n"
         f"are already wired — only the runnable class is missing."
@@ -261,12 +261,40 @@ def _inject_framework_scope(argv: List[str]) -> None:
             return
         if arg in ("--scope", "-s") and i + 1 < len(argv) and argv[i + 1].startswith("framework="):
             return
-    backend = next((a for a in argv[1:] if a in BACKENDS), None)
+    backend = _selected_backend(argv)
     if backend is not None:
         argv += ["--scope", f"framework={backend}"]
 
 
+def _selected_backend(argv: List[str]) -> Optional[str]:
+    """The backend verb in ``argv``, or ``None`` (``sonair --help`` and friends)."""
+    return next((arg for arg in argv[1:] if arg in BACKENDS), None)
+
+
+def _pin_keras_backend(backend: Optional[str]) -> None:
+    """``sonair tensorflow …`` must pin ``KERAS_BACKEND`` before ANYTHING imports keras.
+
+    Keras 3 reads the variable once, at import time, and ``recordstream.keras`` defaults it to
+    the first backend INSTALLED — torch, on any machine that also carries ``sonair[lightning]``.
+    A torch-backed ``keras.Model`` cannot be trained with ``tf.GradientTape``, so the default has
+    to be overridden for this verb.
+
+    It happens HERE, in ``main()``, rather than inside the handler, because the handler runs too
+    late: liquifai resolves the config first, and a ``!class:sonair.TensorFlowClassifier`` tag
+    imports the runnable — and therefore keras — during that resolution.
+    :mod:`sonair._tensorflow` sets the same default as a second line of defence for callers that
+    never go through this CLI (``recordstream run cfg.yaml --scope framework=tensorflow``), and
+    ``TensorFlowClassifier.initialize()`` refuses to run on the wrong engine either way.
+
+    ``setdefault``, so an explicit ``KERAS_BACKEND=…`` still wins and is then reported as a
+    mismatch instead of being silently overridden.
+    """
+    if backend == "tensorflow":
+        os.environ.setdefault("KERAS_BACKEND", "tensorflow")
+
+
 def main() -> None:
+    _pin_keras_backend(_selected_backend(sys.argv))
     _inject_framework_scope(sys.argv)
     app.run()
 

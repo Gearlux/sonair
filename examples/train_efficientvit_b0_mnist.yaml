@@ -114,10 +114,15 @@ logger:
 # Alternative backends
 # ---------------------------------------------------------------------------
 # Each is a scope block overriding ONLY the keys above this divider. `keras` is
-# LIVE — it is implemented, and `sonair keras train <this file>` runs it. The rest
-# stay commented until their runnable classes exist (see docs/frameworks.md); note
-# how little a live one has to say, because the data, the knobs and the run identity
-# are already shared.
+# LIVE — it is implemented, and `sonair keras train <this file>` runs it. `tensorflow`
+# and `fastai` are implemented too but stay COMMENTED, for a different reason than
+# `jax`: their runnable classes exist, their extras are simply not part of the
+# workspace's selected frameworks, so a live block would break `tests/test_examples_load.py`
+# on a default checkout (loading the config imports every `!class:` it names). Select
+# them — `aisland framework set lightning keras tensorflow fastai`, or
+# `pip install 'sonair[tensorflow,fastai]'` — and uncomment the block you want. Note how
+# little a live one has to say, because the data, the knobs and the run identity are
+# already shared.
 #
 keras: !scope:framework=keras
   # Everything above this line is shared verbatim — dataset, splits, batch size, epochs,
@@ -165,6 +170,48 @@ keras: !scope:framework=keras
     - !class:recordstream.ops.image.ConvertToImage
       width: 224
       height: 224
+
+# TensorFlow — a native `tf.data` + `tf.GradientTape` loop. Note what it does NOT
+# override: the model is the SAME `KerasModel`, because `tf.keras` IS Keras 3 in
+# TensorFlow >= 2.16, and so are the losses and metrics. What it adds is `export_dir`
+# (a SavedModel, the artifact that is TensorFlow's and not Keras's) and `jit_compile`
+# (XLA on the traced train step). `preprocess` is the Keras chain, for the engine
+# reasons spelled out in that block: channels-last, and no explicit normalization.
+#
+#   sonair tensorflow train examples/train_efficientvit_b0_mnist.yaml
+#
+# tensorflow: !scope:framework=tensorflow
+#   runnable: !class:sonair.TensorFlowClassifier
+#     export_dir: ./exported/mnist_mobilenetv3
+#     jit_compile: false
+#   model: !lazy:sonair.KerasModel
+#     model_name: MobileNetV3Small
+#     input_shape: [224, 224, 3]
+#     pretrained: true
+#   logger:
+#     - !class:keras.callbacks.CSVLogger
+#       filename: ./tensorflow_logs/mnist.csv
+#   preprocess:
+#     - !class:recordstream.ops.image.ConvertToImage
+#       width: 224
+#       height: 224
+
+# fastai — a `Learner` with one-cycle scheduling. This is the SMALLEST block of the
+# four, because fastai runs on torch: the model, the preprocessing chain and the batch
+# shape are the top level's verbatim, and only the loop changes. `metrics` are NAMES,
+# not `!class:` tags — fastai's classification metrics are plain functions, so there
+# is no class for a tag to resolve (see sonair/fastai_classification.py).
+#
+#   sonair fastai train examples/train_efficientvit_b0_mnist.yaml
+#
+# fastai: !scope:framework=fastai
+#   runnable: !class:sonair.FastaiClassifier
+#     learning_rate: 0.001
+#     one_cycle: true
+#     metrics: [accuracy, top_k_accuracy]
+#   logger:
+#     - !class:fastai.callback.progress.CSVLogger
+#       fname: fastai_logs/mnist.csv
 
 # jax: !scope:framework=jax
 #   runnable: !class:sonair.JaxClassifier

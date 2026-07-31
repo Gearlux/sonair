@@ -25,9 +25,11 @@ swin, convnext, mobilenetv3, ...) and exposes its constructor knobs to YAML.
 backend you select, so a Keras install does not drag in Lightning, nor the reverse:
 
 ```bash
-pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning]'      # PyTorch Lightning
-pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[keras]'          # Keras 3
-pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning,keras]'  # both
+pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning]'       # PyTorch Lightning
+pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[keras]'           # Keras 3
+pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[tensorflow]'      # native TensorFlow
+pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[fastai]'          # fastai Learner
+pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning,keras]' # any combination
 ```
 
 `[lightning]` is the reference backend and what the examples assume. What each selects:
@@ -37,7 +39,15 @@ pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning
 | `sonair` | nothing — CLI and config surface only |
 | `sonair[lightning]` | `torch`, `pytorch-lightning`, `timm`, `torchmetrics` |
 | `sonair[keras]` | `keras` (Keras 3 — picks torch / tensorflow / jax at run time) |
-| `sonair[tensorflow]` | `sonair[keras]` + the TensorFlow engine |
+| `sonair[tensorflow]` | `keras` + the TensorFlow engine |
+| `sonair[fastai]` | `fastai`, `torch`, `timm` (no Lightning — the two trainers are alternatives) |
+
+Two of those extras carry an upper bound, and both are upstream breaks rather than
+preferences: `sonair[fastai]` pins `fastcore<2` (fastai's own optimizer still calls
+`L.starmap`, which fastcore 2.x removed) and `fastprogress<1.1` (1.1 added a
+`python-fasthtml` dependency — a progress bar pulling in a web framework — and requires the
+fastcore major this cannot use). Each is commented in `pyproject.toml` with what to observe
+before dropping it.
 
 Touching a backend you did not install says so, with the command to fix it:
 
@@ -129,24 +139,29 @@ wins over any `task:` set in the config, so one config can serve all three.
 
 ## Training backends
 
-Two engines, one config. `sonair <backend> <verb>` picks the engine; everything above the
+Four engines, one config. `sonair <backend> <verb>` picks the engine; everything above the
 config's framework divider — dataset, splits, batch size, epochs, run identity — is shared
 verbatim.
 
 ```bash
-sonair lightning train examples/train_efficientvit_b0_mnist.yaml   # PyTorch Lightning
-sonair keras     train examples/train_efficientvit_b0_mnist.yaml   # Keras 3
-sonair tensorflow train cfg.yaml                                   # template — names the work
+sonair lightning  train examples/train_efficientvit_b0_mnist.yaml   # PyTorch Lightning
+sonair keras      train examples/train_efficientvit_b0_mnist.yaml   # Keras 3
+sonair tensorflow train examples/train_efficientvit_b0_mnist.yaml   # tf.data + GradientTape
+sonair fastai     train examples/train_efficientvit_b0_mnist.yaml   # Learner + one-cycle
+sonair jax        train cfg.yaml                                    # template — names the work
 ```
 
-| Backend | Status | Model wrapper | MNIST (3 epochs, this config) |
+| Backend | Model wrapper | Owns the loop with | Adds |
 |---|---|---|---|
-| `lightning` | implemented | `TimmModel` (timm, `efficientvit_b0`) | **99.52%** top-1 |
-| `keras` | implemented | `KerasModel` (`keras.applications`, `MobileNetV3Small`) | **99.18%** best val |
-| `tensorflow` / `jax` / `huggingface` / `mlx` | templates | — | the verbs exist and name the work |
+| `lightning` | `TimmModel` (timm) | `pytorch_lightning.Trainer` | the reference implementation |
+| `keras` | `KerasModel` (`keras.applications`) | `keras.Model.fit` | one API over torch / TF / JAX |
+| `tensorflow` | `KerasModel` — the same one | a traced `tf.GradientTape` loop | `tf.data`, XLA, SavedModel export |
+| `fastai` | `TimmModel` — the same one | `Learner.fit_one_cycle` | fastai's schedule and callbacks |
+| `jax` / `huggingface` / `mlx` | — | — | templates; the verbs exist and name the work |
 
-Both numbers come from the same file, changing only the verb. Different backbones, so this
-is not a benchmark — it is evidence that one config drives two engines to a comparable
+On the shipped MNIST config (3 epochs), `lightning` reaches **99.52%** top-1 and `keras`
+**99.18%** best val from the same file, changing only the verb. Different backbones, so this
+is not a benchmark — it is evidence that one config drives several engines to a comparable
 result.
 
 ### What a backend swap actually costs
@@ -162,6 +177,67 @@ metrics sidecar — and the batching, since `recordstream.keras.RecordSequence` 
 `keras.utils.PyDataset` a `DataLoader` would have been. The Keras backend's own code is an
 eight-line batch-shaping function plus `compile()`/`fit()` — that ratio is the demonstration.
 
+The other two blocks make the point twice more, from opposite directions. The `fastai` block
+is the smallest of the four: it overrides `runnable` and `logger`, and *nothing else* — no
+`model`, no `preprocess`, because fastai runs on torch and consumes the reference backend's
+`TimmModel` and its `[N, 3, H, W]` batches unchanged. The `tensorflow` block overrides no
+`model` either, for the mirror reason: in TensorFlow ≥ 2.16 `tf.keras` **is** Keras 3, so
+`KerasModel`, `keras.losses` and `keras.metrics` are the same objects the `keras` backend
+uses.
+
+### `tensorflow` — when to prefer it over `keras`
+
+`KERAS_BACKEND=tensorflow sonair keras train cfg.yaml` already runs the identical config on
+TensorFlow, so the separate backend earns its place only by doing what Keras 3 does not
+expose. It contains exactly that and nothing else:
+
+- **`tf.data`** — `tf.data.Dataset.from_generator` over the record stream, with
+  `.prefetch(tf.data.AUTOTUNE)` overlapping the record walk with the device step.
+- **A traced loop** — `tf.GradientTape` under `@tf.function`, which is what makes
+  `jit_compile: true` (XLA) a knob at all.
+- **SavedModel** — `export_dir:` writes a `tf.saved_model` directory (serving signatures,
+  frozen graph), the TensorFlow artifact with no Keras equivalent.
+
+```yaml
+runnable: !class:sonair.TensorFlowClassifier
+  export_dir: ./exported/mnist      # writes saved_model.pb + variables/ after fit
+  jit_compile: false                # XLA: faster on fixed shapes, real first-batch cost
+  prefetch: true                    # tf.data.AUTOTUNE
+```
+
+Everything else — the label handling, the batch shape, the losses and metrics, the
+prediction contract — is *inherited* from `KerasClassifier`, not re-implemented.
+
+> **One engine per process.** Keras 3 binds its compute backend at first import, and
+> `recordstream.keras` defaults it to the first engine actually installed — `torch`, on a
+> machine that also has `sonair[lightning]`. `sonair tensorflow <verb>` sets
+> `KERAS_BACKEND=tensorflow` before anything imports keras; if something else got there
+> first, `initialize()` refuses to start and names the fix rather than failing inside the
+> tape.
+
+### `fastai` — the loop, and only the loop
+
+```yaml
+runnable: !class:sonair.FastaiClassifier
+  learning_rate: 0.001
+  one_cycle: true                   # fit_one_cycle (the default) vs a flat fit
+  opt_func: Adam                    # a name in fastai.optimizer
+  metrics: [accuracy, top_k_accuracy]
+```
+
+`metrics` are **names, not `!class:` tags**, and that is a property of fastai rather than a
+shortcut taken here: `accuracy`, `error_rate` and `top_k_accuracy` are plain functions, and
+`F1Score()` / `RocAuc()` are factories that *return* one — none of them is a class, so there
+is nothing for a tag to resolve or for confluid's registry to tag. Names are resolved against
+`fastai.metrics`, and an unknown one says where names come from. `opt_func` works the same
+way against `fastai.optimizer`. Losses *are* classes and are registered normally (see below).
+
+Two behaviours worth knowing: fastai's `Learner` **always** validates, so a config with no
+`val_set` reuses the training data and logs a warning saying the reported metrics measure fit
+rather than generalization; and `predict` runs a plain `torch.no_grad()` forward rather than
+`Learner.get_preds`, because the sink contract needs each row paired with the metadata that
+travelled beside the image.
+
 ### Choosing the Keras compute backend
 
 Keras 3 runs on PyTorch, TensorFlow or JAX, chosen by `KERAS_BACKEND` **at import time**.
@@ -173,9 +249,17 @@ sonair keras train cfg.yaml                          # torch (default)
 KERAS_BACKEND=tensorflow sonair keras train cfg.yaml # the same config on TensorFlow
 ```
 
-Install with `pip install 'sonair[keras]'` — Keras alone, four small packages. Installing
-TensorFlow is a heavier decision (it moves protobuf a major version across mlflow, tensorboard
-and wandb); see `TASKS.md`.
+Install with `pip install 'sonair[keras]'` — Keras alone, four small packages. `[tensorflow]`
+adds the engine on top; it is a bigger download, but **not** a dependency conflict: a clean
+resolve of TensorFlow alongside the tracking stack (wandb, mlflow, tensorboard,
+opentelemetry-proto, grpcio-status) lands on a single protobuf everything accepts — 6.33.6,
+measured 2026-07-30.
+
+If you install it into a long-lived environment and `uv pip check` then complains about
+protobuf, that is *incremental-install drift*, not TensorFlow: uv moves the minimum it must, so
+protobuf jumps while older `wandb` / `grpcio-status` / `opentelemetry-proto` stay pinned behind
+it. Every one of those has since relaxed to `protobuf<8`. Let them upgrade too, or recreate the
+environment.
 
 
 ## Models
@@ -328,11 +412,21 @@ loss is engine-bound: a `torch.nn` loss cannot be handed to `KerasClassifier`, a
 |---|---|---|---|
 | PyTorch | [`sonair/torch_classification.py`](sonair/torch_classification.py) | `torch.nn` losses + `torchmetrics.classification` `Multiclass*` / `Multilabel*` | `framework="torch"` |
 | Keras 3 | [`sonair/keras_classification.py`](sonair/keras_classification.py) | `keras.losses` + `keras.metrics` | `framework="keras"` |
+| fastai | [`sonair/fastai_classification.py`](sonair/fastai_classification.py) | the `fastai.losses` classes (`CrossEntropyLossFlat`, `FocalLossFlat`, `LabelSmoothingCrossEntropy`, …) | `framework="torch"` |
 
 Each module is its own `confluid.configurables` entry point, so an install without a given
 backend simply has no registrations for it. A picker asked for "a classification loss" for a
 Keras trainer is offered only the Keras set (confluid 0.3.0's `framework` axis) — see
 [docs/architecture.md](docs/architecture.md) §2.
+
+Two rows in that table are less symmetric than they look, and both are the `framework` axis
+working as intended — it names the API a class can be **wired to**, not the package that
+published it. The fastai losses are tagged `torch` because that is what they consume: a
+`LightningClassifier` takes `CrossEntropyLossFlat` as happily as a `FastaiClassifier` does. And
+there is deliberately **no** `tensorflow_classification.py`: in TensorFlow ≥ 2.16 `tf.keras`
+*is* Keras 3, so `TensorFlowClassifier` uses the Keras set — a second module would register the
+same classes under a second tag and make every bare `!class:SparseCategoricalCrossentropy`
+ambiguous for no gain.
 
 Both backends leave `loss` / `metrics` unset by default and resolve them from the data at
 `initialize()` (`Sparse`/`CrossEntropy` for int64 ids, the binary/`BCE` family for a
@@ -457,5 +551,8 @@ Run-node results panel automatically.
 | `confluid` | YAML-driven dependency injection (`@configurable`, `!class:`, `!ref:`). |
 | `recordstream` | Record / Stream pipeline plumbing. |
 | `loggair` | Structured logging. |
-| `timm` | Underlying timm classification backbones. |
-| `torch`, `torchmetrics`, `pytorch-lightning` | Standard PyTorch stack. |
+| `timm` | Underlying timm classification backbones (`[lightning]`, `[fastai]`). |
+| `torch`, `torchmetrics`, `pytorch-lightning` | Standard PyTorch stack (`[lightning]`). |
+| `keras` | Keras 3 — the API both `[keras]` and `[tensorflow]` wire to. |
+| `tensorflow` | The engine under `[tensorflow]`, and what makes SavedModel export possible. |
+| `fastai` | The `Learner` and the `*Flat` losses (`[fastai]`). |

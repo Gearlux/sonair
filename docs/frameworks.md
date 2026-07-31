@@ -4,19 +4,20 @@ Sonair is a demonstration that **the config is the program**: the same
 `runnable:` YAML, the same verbs, and the same logging backends hold while the
 training engine underneath changes. The CLI makes that axis explicit.
 
-Why it is shaped this way — and why the registry has no `framework` axis yet —
-is recorded in [Architecture Decisions](architecture.md).
+Why it is shaped this way is recorded in
+[Architecture Decisions](architecture.md).
 
 ```bash
-sonair lightning train    cfg.yaml     # implemented
-sonair lightning evaluate cfg.yaml
-sonair lightning predict  cfg.yaml
+sonair lightning  train    cfg.yaml    # implemented — PyTorch Lightning
+sonair lightning  evaluate cfg.yaml
+sonair lightning  predict  cfg.yaml
 
-sonair keras       train  cfg.yaml    # implemented (Keras 3)
-sonair tensorflow  train  cfg.yaml    # template
-sonair jax         train  cfg.yaml    # template
-sonair huggingface train  cfg.yaml    # template
-sonair mlx         train  cfg.yaml    # template
+sonair keras      train  cfg.yaml     # implemented — Keras 3
+sonair tensorflow train  cfg.yaml     # implemented — tf.data + tf.GradientTape
+sonair fastai     train  cfg.yaml     # implemented — Learner + one-cycle
+sonair jax        train  cfg.yaml     # template
+sonair huggingface train cfg.yaml     # template
+sonair mlx        train  cfg.yaml     # template
 ```
 
 `sonair --help` lists the backends; `sonair <backend> --help` lists its verbs.
@@ -32,12 +33,20 @@ visible from the CLI, not buried in a tracker.
 | Logging backends (`logger:`, `trackers:`) | no | wired by the runnable |
 | Dataset / ops / collate | no | `recordstream` |
 | **The runnable class** | **yes** | `sonair/<backend>_classifier.py` |
-| **Losses / metrics** | **yes** | `sonair/<framework>_classification.py` |
+| **The model wrapper** | *sometimes* | `sonair/<backend>_model.py` |
+| **Losses / metrics** | *sometimes* | `sonair/<framework>_classification.py` |
 
-Only the last two rows are backend work — and the second of them is a list of
+Only the last three rows are backend work — and the last of them is a list of
 upstream class names, not code. That is the claim this project exists to
 demonstrate, and it is why a template's error message can honestly say "the
 CLI, the config shape and the logging backends are already wired".
+
+Two of those rows say *sometimes* because two of the four implemented backends
+add neither. `TensorFlowClassifier` reuses `KerasModel` and the Keras loss set
+(in TensorFlow >= 2.16, `tf.keras` **is** Keras 3); `FastaiClassifier` reuses
+`TimmModel` and the torch loss set (fastai runs on torch). A backend adds a
+module only when it adds a genuinely new wiring surface — see
+[Architecture Decisions §5](architecture.md).
 
 ## The verb → task mapping
 
@@ -81,30 +90,35 @@ Three steps, no plumbing.
 reference implementation; `recordstream/docs/runnable.md` documents the
 runnable protocol itself.
 
-**2. Replace its template block** in [`sonair/cli.py`](../sonair/cli.py) with a
-real sub-app, modelled on `lightning` right above it — drop the name from
-`TEMPLATES` and write the three verbs out:
+**2. Move it from `TEMPLATES` to `IMPLEMENTED`** in
+[`sonair/cli.py`](../sonair/cli.py). Both are tables of the three values a
+backend's sub-app differs by, so promoting one is a two-line edit and no new
+code:
 
 ```python
-keras = LiquifyApp(name="keras", description="Keras 3 — one API over TF / JAX / PyTorch.")
-
-@keras.script_command(name="train", flow_mode="manual")
-def train(runnable: Any) -> None:
-    """Train an image classifier with Keras (task=fit)."""
-    _dispatch(runnable, "fit")
-
-# ... evaluate / predict likewise
-
-app.add_app(keras, "keras")
+IMPLEMENTED: Dict[str, Backend] = {
+    ...,
+    "jax": Backend(
+        "JAX + Flax/NNX — functional transforms, jit/pmap scaling.",
+        "sonair.jax_classification",      # or an existing set, if it shares one
+    ),
+}
 ```
 
-Declare the backend's dependencies under the matching extra in `pyproject.toml`
-and install with `pip install "sonair[keras]"`.
+`_backend_app` builds the three `train` / `evaluate` / `predict` verbs from that
+entry — each `flow_mode="manual"`, each importing the named registration module
+and calling `_dispatch` with the verb's task. Declare the backend's dependencies
+under the matching extra in `pyproject.toml` and install with
+`pip install "sonair[jax]"`.
 
-**3. Register its losses and metrics.** Create
-`sonair/<framework>_classification.py` — two tuples of *upstream* classes, a
-`register(...)` loop each, and a literal `__all__` naming every one — then add it
-to `[project.entry-points."confluid.configurables"]`:
+**3. Register its losses and metrics — if it needs a set of its own.** Two of the
+four implemented backends do not: `tensorflow` names
+`sonair.keras_classification` (TF >= 2.16's `tf.keras` IS Keras 3) and `fastai`'s
+losses are torch callables, registered `framework="torch"`. When the engine's
+loss API *is* new, create `sonair/<framework>_classification.py` — tuples of
+*upstream* classes, a `register(...)` loop each, and a literal `__all__` naming
+every one — then add it to
+`[project.entry-points."confluid.configurables"]`:
 
 ```python
 from confluid import register
@@ -116,27 +130,29 @@ for _loss_cls in _CLASSIFICATION_LOSSES:
 
 Two constraints worth knowing before you write the tuples. The registry is keyed
 by class **name**, so a name published under both the loss and metric namespaces
-(Keras has thirteen: `BinaryCrossentropy`, `Hinge`, `KLDivergence`, …) can be
-registered only once — register the loss, skip the metric duplicate. And a metric
-that cannot consume what the classifier's head emits does not belong in a picker:
-sonair's head is a bare linear layer, so `keras.metrics.Accuracy` (which wants
-already-argmaxed ids) and the `PrecisionAtRecall` family (which sweeps thresholds
-across `[0, 1]`) are left out. Leaving a class unregistered removes it from the
-pickers only — `!class:keras.metrics.Accuracy` still resolves from YAML.
+(Keras has thirteen: `BinaryCrossentropy`, `Hinge`, `KLDivergence`, …) needs a tag
+that tells the two entries apart — `role` does, so both are registered and a
+config picks one with `!class:Hinge@role=metric`. And a metric that cannot consume
+what the classifier's head emits does not belong in a picker: sonair's head is a
+bare linear layer, so `keras.metrics.Accuracy` (which wants already-argmaxed ids)
+and the `PrecisionAtRecall` family (which sweeps thresholds across `[0, 1]`) are
+left out. Leaving a class unregistered removes it from the pickers only —
+`!class:keras.metrics.Accuracy` still resolves from YAML.
 
-There is deliberately **no registry module or `Framework` dataclass** — see
-[Architecture Decisions §1](architecture.md) for why, and for the condition
-(a third implemented backend) that would justify adding one.
+There is still **no registry module or `Framework` dataclass** — the tables in
+`cli.py` are data, not machinery. See [Architecture Decisions
+§1](architecture.md) for what the fourth backend changed and what it did not.
 
 ## Adding a *new* framework
 
 A new template is one line in `TEMPLATES`; a new working backend is a sub-app
 like the one above.
 
-Registered so far: **PyTorch** (via Lightning — the working one), **Keras 3**,
-**TensorFlow**, **JAX** (Flax/NNX), **Hugging Face Transformers** `Trainer` +
-Accelerate, and **MLX** (Apple silicon; its extra carries a platform marker so
-`pip install "sonair[mlx]"` stays installable elsewhere).
+Implemented: **PyTorch** (via Lightning — the reference), **Keras 3**,
+**TensorFlow** (a native `tf.data` + `tf.GradientTape` loop) and **fastai**.
+Registered as templates: **JAX** (Flax/NNX), **Hugging Face Transformers**
+`Trainer` + Accelerate, and **MLX** (Apple silicon; its extra carries a platform
+marker so `pip install "sonair[mlx]"` stays installable elsewhere).
 
 Still unregistered — for non-deep-learning baselines,
 **scikit-learn** and the gradient-boosting family (**XGBoost** / **LightGBM** /
@@ -195,13 +211,13 @@ A template fails with the file to create, the reference to copy, and the exact
 registry line that switches it on:
 
 ```console
-$ sonair tensorflow train
-Error: `sonair tensorflow train` is not implemented yet — tensorflow is a backend TEMPLATE.
+$ sonair jax train
+Error: `sonair jax train` is not implemented yet — jax is a backend TEMPLATE.
 ...
-  1. Create sonair/tensorflow_classifier.py with a runnable class: ...
-  2. Replace the `tensorflow` template in sonair/cli.py with a real sub-app,
-     modelled on the `lightning` one above it.
-  3. Install the backend: pip install 'sonair[tensorflow]'
+  1. Create sonair/jax_classifier.py with a runnable class: ...
+  2. Move `jax` from TEMPLATES to IMPLEMENTED in sonair/cli.py, naming the
+     module that registers its losses/metrics.
+  3. Install the backend: pip install 'sonair[jax]'
 ```
 
 That is exactly how the `keras` backend got built (2026-07-29): the template named the

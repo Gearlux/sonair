@@ -60,6 +60,50 @@ TEMPLATES = {"keras": "Keras 3 — one API over TF / JAX / PyTorch. TEMPLATE.", 
 module for fewer than three implemented backends; when you do, generalise from
 what the real sub-apps have in common, not from what a dataclass could express.
 
+### 1a. …and the amendment the fourth backend triggered
+
+*2026-07-30*
+
+`tensorflow` and `fastai` were the third and fourth implemented backends, so the
+condition the record above set was met. What twelve near-identical handlers had
+in common turned out to be exactly three values — the name, the description, and
+which loss/metric module to import — so the generalisation is a table of those
+three plus a factory, and stops there:
+
+```python
+class Backend(NamedTuple):
+    description: str
+    registrations: str          # the module whose import registers this engine's set
+
+IMPLEMENTED: Dict[str, Backend] = {
+    "lightning": Backend("PyTorch Lightning — the reference backend …", "sonair.torch_classification"),
+    "tensorflow": Backend("TensorFlow — a native tf.data + tf.GradientTape loop …",
+                          "sonair.keras_classification"),   # tf.keras IS Keras 3
+    ...
+}
+
+def _backend_app(backend: str, spec: Backend) -> LiquifyApp:
+    sub = LiquifyApp(name=backend, description=spec.description)
+    for verb in VERB_TASKS:
+        sub.script_command(name=verb, flow_mode="manual")(_backend_command(verb, backend, spec))
+    return sub
+```
+
+Note what stayed OUT of the table. `sonair tensorflow` must pin
+`KERAS_BACKEND=tensorflow` before anything imports keras — earlier than any
+handler can run, since liquifai resolves the config (and therefore imports the
+runnable) first. That is a genuine asymmetry between the backends, so it lives
+visibly in `main()` as `_pin_keras_backend` rather than as a fifth column that
+would be `None` three times out of four.
+
+The predictions the original record made held up: the generalisation came from
+three real cases, and it is still data plus one factory rather than a `Framework`
+dataclass with `implemented` / `target_module` / `install_hint` properties.
+
+**What you may change.** Add rows to `IMPLEMENTED` / `TEMPLATES`. Do not grow
+`Backend` to carry per-backend *behaviour* — a field that only one backend uses
+is the signal that the behaviour belongs in the one place that needs it.
+
 ---
 
 ## 2. The framework axis: an explicit tag, with MRO inference as fallback
@@ -217,3 +261,209 @@ the one place that answers "what does this data need?". Do not reintroduce a
 live default in the constructor signature, and do not add a `multilabel:`
 config knob: the target item type already says it, and a knob could disagree
 with the data.
+
+---
+
+## 4. The TensorFlow backend is a subclass, and only of the loop
+
+*2026-07-30*
+
+**Context.** `TASKS.md` carried an open question for a year: does
+`sonair tensorflow train` need a runnable at all? `KERAS_BACKEND=tensorflow
+sonair keras train cfg.yaml` already executes the identical config on
+TensorFlow, because Keras 3 IS `tf.keras` in TensorFlow >= 2.16. A backend whose
+only content is "the Keras backend again" would make the project's central claim
+— that a backend costs almost nothing — true by tautology rather than by
+evidence.
+
+**Decision.** Implement it, but only for what Keras 3 does not expose, and make
+that boundary structural: `TensorFlowClassifier` **subclasses**
+`KerasClassifier` and overrides sixteen names, every one of them about `tf.data`,
+the traced loop, or the SavedModel.
+
+- `_dataset` — `tf.data.Dataset.from_generator` over the same `RecordSequence`,
+  plus `.prefetch(tf.data.AUTOTUNE)`.
+- `_train_step_fn` / `_eval_step_fn` / `_predict_step_fn` — `tf.GradientTape`
+  under `@tf.function`, which is what makes `jit_compile` (XLA) a knob.
+- `_compile` — keeps the parent's NAME (the parent's `initialize()` calls it)
+  and replaces the body: a compiled model owns its own training step, which is
+  precisely what this backend exists to replace.
+- `_export` — `keras.Model.export`, implemented only on the TensorFlow engine.
+
+Everything else — the label peek, `LabelMap` fitting, `num_classes` resolution,
+`_to_arrays`, the prediction contract, the artifacts — is *inherited*, not
+copied.
+
+**Consequences.**
+
+- The tag is `framework="keras"`, not `"tensorflow"`. Record §2 settled that the
+  axis names the API a class is wired TO, and this class is wired to
+  `keras.losses`, `keras.metrics` and `KerasModel`. It joins the Keras picker
+  alongside `KerasClassifier`, which is correct: both consume the same parts.
+- There is therefore **no `tensorflow_classification.py`**. A second module would
+  register the same `keras.losses` classes under a second framework tag, and a
+  bare `!class:SparseCategoricalCrossentropy@role=loss` would become ambiguous
+  everywhere navigaitor bootstraps every entry point — a real ergonomic
+  regression bought with nothing.
+- The constructor **restates every parameter of its parent** rather than taking
+  `**kwargs`. Static introspection (`to_pydantic` → form specs, MCP schemas,
+  editor widgets) reads the signature; `**kwargs` would type-check and erase the
+  config surface.
+- `_resolve_task_defaults` had to diverge, and the reason is exact: the Keras
+  backend can default `metrics` to `["accuracy"]` because `compile()` resolves
+  that alias *contextually*, against the loss and the target shape. A
+  hand-written loop has no `compile()`, and `keras.metrics.get("accuracy")`
+  returns the elementwise-equality function — which reports `0.0` forever
+  against a raw-logits head. The defaults here are the concrete classes
+  `compile()` would have chosen, and `_as_metric` maps the alias the same way.
+- The override set is pinned by a test. Erosion here is the failure mode: a
+  method that is really about *classification* drifting into this class would
+  silently un-share it from every other backend.
+
+**Example.**
+
+```python
+@tf.function(jit_compile=True if self.jit_compile else None)
+def train_step(x, y):
+    with tf.GradientTape() as tape:
+        logits = network(x, training=True)
+        loss = loss_fn(y, logits)
+    variables = network.trainable_variables
+    optimizer.apply_gradients(zip(tape.gradient(loss, variables), variables))
+    for metric in metrics:
+        metric.update_state(y, logits)
+    return loss
+```
+
+**What you may change.** Add TensorFlow-specific behaviour (distribution
+strategies, a different export format). Do not add classification behaviour —
+that belongs on `KerasClassifier`, where every backend gets it. If a change here
+would also be right for the Keras backend, it goes there instead.
+
+---
+
+## 5. A backend adds a module only when it adds a wiring surface
+
+*2026-07-30*
+
+**Context.** With one backend, "a backend is a runnable + a model wrapper + a
+loss set" looked like the shape of the thing. Records §1 and §2 both describe
+that shape, and `docs/frameworks.md` documented it as a three-step recipe. Then
+two backends landed that need only the first: `TensorFlowClassifier` and
+`FastaiClassifier`.
+
+The temptation in both cases was symmetry — a `tensorflow_model.py` beside
+`keras_model.py`, a `fastai_classification.py` full of re-registrations — so that
+every backend would have the same three files. That symmetry would have been
+pure duplication: `TensorFlowModel` would be `KerasModel` with the class name
+changed, because `tf.keras.applications` *is* `keras.applications`.
+
+**Decision.** A backend contributes a module only where it contributes something
+a config can WIRE. Concretely:
+
+| Backend | Runnable | Model wrapper | Loss/metric set |
+|---|---|---|---|
+| `lightning` | `lightning_classifier.py` | `timm_model.py` | `torch_classification.py` |
+| `keras` | `keras_classifier.py` | `keras_model.py` | `keras_classification.py` |
+| `tensorflow` | `tensorflow_classifier.py` | *reuses `KerasModel`* | *reuses the Keras set* |
+| `fastai` | `fastai_classifier.py` | *reuses `TimmModel`* | `fastai_classification.py` |
+
+fastai gets a loss module because its `*Flat` family is genuinely new wiring —
+but tagged `framework="torch"`, since a Lightning run consumes those losses just
+as well. It gets no model module because fastai *is* torch.
+
+**Consequences.**
+
+- `sonair/__init__.py`'s `_BACKEND_NAMES` gains one lazy name per backend, not
+  three. `sonair[tensorflow]` and `sonair[fastai]` therefore advertise a smaller
+  surface than the other two, which is honest: there is less to wire.
+- The asymmetry is *visible in the docs* rather than smoothed over — the
+  "what each layer owns" table in `docs/frameworks.md` says *sometimes* for two
+  rows, and the config example shows the `fastai` scope block overriding two keys
+  where `keras` overrides four.
+- This is the strongest evidence the project has for its own claim. The `fastai`
+  block in `examples/train_efficientvit_b0_mnist.yaml` changes the runnable class
+  and the logger, and reuses the model, the preprocessing chain and the batch
+  shape *verbatim*. Nothing had to be generalised to make that work — it fell out
+  of the record model and the `@entrypoint` dispatch already being engine-free.
+
+**Example.**
+
+```yaml
+# the whole cost of the fastai backend, in config
+fastai: !scope:framework=fastai
+  runnable: !class:sonair.FastaiClassifier
+    metrics: [accuracy, top_k_accuracy]
+  logger:
+    - !class:fastai.callback.progress.CSVLogger
+      fname: fastai_logs/mnist.csv
+```
+
+**What you may change.** Add a model wrapper or a loss module when the backend
+genuinely introduces one. Do not add one for symmetry — a wrapper that differs
+from an existing one only by name is a rename, and the config already says which
+engine is running.
+
+---
+
+## 6. `KERAS_BACKEND` is pinned in three places, on purpose
+
+*2026-07-30*
+
+**Context.** Keras 3 binds its compute engine ONCE, at import time, from
+`KERAS_BACKEND`. `recordstream.keras` sets a default — the first engine actually
+*installed*, in the order torch → tensorflow → jax — which is right for a Keras
+run (any engine will do) and wrong for `TensorFlowClassifier`, whose
+`tf.GradientTape` loop cannot differentiate a torch-backed `keras.Model`. On the
+workspace's own machine, which has `sonair[lightning]`, that default is `torch`.
+
+The failure this produces is the bad kind: it surfaces deep inside the tape,
+several minutes into a run, saying nothing about import order.
+
+**Decision.** Three layers, each covering an entry path the previous one cannot
+reach, plus a runtime check that turns any remaining miss into one clear line.
+
+1. **`main()` → `_pin_keras_backend`** — the CLI path. It runs before liquifai
+   resolves the config, which matters because resolving `!class:sonair.TensorFlowClassifier`
+   *imports* the runnable, and therefore keras. A handler would be too late.
+2. **`sonair/_tensorflow.py`** — the import path, for callers that never touch
+   this CLI (`recordstream run cfg.yaml --scope framework=tensorflow`). It also
+   re-exports the `keras` handle, so `tensorflow_classifier.py` imports keras,
+   TensorFlow and the backend probe from ONE module — which removes an ordering
+   hazard rather than documenting it: isort sorts `sonair._keras` *above*
+   `sonair._tensorflow`, so importing the handle from its usual home would load
+   keras one line before the default meant to steer it.
+3. **`TensorFlowClassifier.initialize()`** — the check. If keras is already bound
+   to another engine, it raises with the engine it found, the variable to set,
+   and the alternative (`sonair keras`, which runs the same config on whatever is
+   loaded).
+
+All three use `setdefault`, so an explicit `KERAS_BACKEND=jax` still wins and is
+then *reported* rather than silently overridden.
+
+**Consequences.**
+
+- The import ordering in `tensorflow_classifier.py` is load-bearing, so it is
+  pinned by tests that read the module as TEXT — and those tests deliberately run
+  even where TensorFlow is absent, because the machines that can break the
+  ordering are exactly the ones without it.
+- **One engine per process** is inherited from Keras and cannot be worked around.
+  A full test run imports `test_keras_classifier.py` first and binds torch, so
+  the TensorFlow loop tests skip and are run as their own invocation
+  (`KERAS_BACKEND=tensorflow pytest tests/test_tensorflow_classifier.py`). A
+  marker that pretended otherwise would report coverage that never executed.
+
+**Example.**
+
+```python
+# sonair/_tensorflow.py — the setdefault MUST precede both imports
+os.environ.setdefault("KERAS_BACKEND", "tensorflow")
+
+import tensorflow as tf                                    # noqa: E402
+from recordstream.keras import keras, keras_backend        # noqa: E402
+```
+
+**What you may change.** Add a fourth entry path's pin if one appears. Do not
+replace `setdefault` with an assignment (it would silently override a deliberate
+choice), and do not drop the `initialize()` check because "the CLI already sets
+it" — the check is what makes the other two debuggable when they miss.

@@ -70,6 +70,34 @@ tensorflow = [
     "recordstream[keras]>=0.1.0",
     "marainer[keras]>=0.1.0",
 ]
+# fastai is a LAYER ON TORCH, not an engine of its own — its losses are `nn.Module`s and its
+# `Learner` consumes plain `torch.utils.data.DataLoader`s. So this extra names torch's stack
+# (which is also why `TimmModel` is the model wrapper a fastai config wires, unchanged from the
+# lightning backend) plus fastai itself. No `pytorch-lightning`: the two trainers are
+# alternatives, and a fastai-only install should not carry a Trainer it never builds.
+fastai = [
+    "fastai>=2.7",
+    # TWO UPPER BOUNDS, both for upstream breaks measured on 2026-07-30 with fastai 2.8.7 —
+    # not preferences, and each removable the moment upstream ships a fix:
+    #
+    #  * fastcore 2.x dropped `L.starmap`, which fastai's own `Optimizer.set_hypers` still
+    #    calls, so `Learner.fit_one_cycle` dies at the first `create_opt()` with
+    #    `AttributeError: 'list' object has no attribute 'starmap'`. fastai declares only
+    #    `fastcore>=1.8.0`, so a fresh resolve picks 2.1.x and every fastai run fails.
+    #  * fastprogress >= 1.1 added a `python-fasthtml` dependency (a progress bar pulling in a
+    #    web framework), which drags `starlette` past what other workspace packages pin — and
+    #    fastprogress 1.1.x ALSO requires fastcore 2.x, so it cannot coexist with the bound
+    #    above (it fails at import: `mtime_policy() got an unexpected keyword argument 'arg'`).
+    #    fastprogress 1.0.5 has no dependencies at all, which is what a progress bar should have.
+    "fastcore<2",
+    "fastprogress<1.1",
+    "torch",
+    "timm>=1.0.0",          # the model zoo `TimmModel` wraps — shared with the lightning backend
+    "recordstream[torch]>=0.1.0",
+    # marainer.torch carries the Lightning-checkpoint loader `TimmModel` reads; the tracker
+    # backends a fastai config wires are the same ones every other backend uses.
+    "marainer[torch,mlflow,tensorboard]>=0.1.0",
+]
 jax = [
     "jax>=0.4",
     "flax>=0.8",            # NNX is the current Flax module API
@@ -114,21 +142,45 @@ sonair-lightning = "sonair.lightning_classifier"
 sonair-timm = "sonair.timm_model"
 sonair-keras = "sonair.keras_classifier"
 sonair-keras-model = "sonair.keras_model"
+# The TensorFlow and fastai runnables. Neither brings a model wrapper of its own: TF >= 2.16's
+# `tf.keras` IS Keras 3, so `TensorFlowClassifier` takes the same `KerasModel`, and fastai is
+# torch, so `FastaiClassifier` takes the same `TimmModel`. A backend that adds no new wiring
+# surface adds no new module — see docs/architecture.md §5.
+sonair-tensorflow = "sonair.tensorflow_classifier"
+sonair-fastai = "sonair.fastai_classifier"
 # The loss/metric registrations, ONE MODULE PER ENGINE — a loss is engine-bound, so each set is
 # tagged `framework="torch"` / `framework="keras"` and lives where a missing backend can drop it
 # whole. Scanned directly because the registered classes' __module__ is torch / torchmetrics /
 # keras, which `scan_module` filters out; each module's __all__-gated pass is what surfaces them.
 sonair-torch-classification = "sonair.torch_classification"
 sonair-keras-classification = "sonair.keras_classification"
+# fastai's OWN losses (the `*Flat` family) — registered `framework="torch"`, because that is
+# what they are: `nn.Module`s a Lightning run can consume just as well. There is deliberately no
+# `sonair-tensorflow-classification`: TF >= 2.16 exposes Keras 3 as `tf.keras`, so the
+# TensorFlow backend's loss/metric set IS the Keras one, already registered above.
+sonair-fastai-classification = "sonair.fastai_classification"
 
 # Which of this project's extras are ML FRAMEWORKS, for `aisland framework`. Selecting a name
 # here is what makes `aisland setup` add the matching extra to this project's install.
 #
-# Only the IMPLEMENTED backends are declared. The `tensorflow` / `jax` / `mlx` / `huggingface`
-# extras above exist so the CLI's not-implemented templates can print a real install command;
-# declaring them here would install three frameworks nothing can run yet.
+# Only the IMPLEMENTED backends are declared. The `jax` / `mlx` / `huggingface` extras above
+# exist so the CLI's not-implemented templates can print a real install command; declaring them
+# here would install three frameworks nothing can run yet.
+#
+# Declaring a name here only puts it on the MENU — what gets installed is the separate
+# selection in `project-frameworks.toml` (`aisland framework set …`), so listing a name costs
+# nothing until someone selects it.
+#
+# NO protobuf conflict, contrary to what this comment claimed until 2026-07-30. A clean
+# resolve of `tensorflow + wandb + mlflow + tensorboard + opentelemetry-proto + grpcio-status`
+# lands on ONE protobuf (6.33.6, measured) that all of them accept. The "TF forces protobuf
+# 3.20.3 -> 7.35.1 and breaks the tracking stack" observation came from `uv pip install
+# tensorflow` into an already-STALE venv: uv moves the minimum it must, so protobuf jumped
+# while wandb (0.25.0, `<7`), grpcio-status (1.80.0, `<7`) and opentelemetry-proto (1.27.0,
+# `<5`) stayed put. All three relaxed to `<8` in releases that are already out. Let them move
+# too — or recreate the venv — and TensorFlow resolves like any other extra.
 [tool.aisland]
-frameworks = ["lightning", "keras"]
+frameworks = ["lightning", "keras", "tensorflow", "fastai"]
 
 [tool.setuptools.packages.find]
 where = ["."]

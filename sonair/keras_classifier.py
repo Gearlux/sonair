@@ -146,7 +146,10 @@ class KerasClassifier(ProgressReporting):
         metrics: Optional[Sequence[KerasMetric]] = None,
     ) -> None:
         super().__init__()
-        self.model: Lazy[Any] = model
+        # `keras.Model`, not `Lazy[Any]`: the DEFERRED-ness is declared once, on the ctor
+        # param above, which is what `lazy_param_names` / `to_pydantic` read. Restating it
+        # here would only make the attribute a union no method could call through.
+        self.model: keras.Model = model
         self.train_set: Optional[Lazy[RecordSource]] = train_set
         self.val_set: Optional[Lazy[RecordSource]] = None
         self.test_set: Optional[Lazy[RecordSource]] = test_set
@@ -271,17 +274,28 @@ class KerasClassifier(ProgressReporting):
         theirs — a nested ``!class:`` in a constructor slot arrives as a deferred ``Class``
         marker, and Keras takes an unbuilt marker for a custom callable and fails deep inside
         ``compile`` rather than saying what is wrong.
+
+        A bare ``flow()`` is the whole guard: it returns a live object, a string alias and a
+        list unchanged (``confluid.fluid.flow`` opens with that idempotency check), so an
+        ``isinstance(..., Fluid)`` around any of these calls only restates it.
+
+        The model included. It reaches here deferred — ``!lazy:`` is skipped by confluid's
+        auto-flow walkers precisely so the dataset-derived width can be injected now — and a
+        model that is ALREADY live comes back untouched, keeping the width its own constructor
+        was given (the runtime kwarg is dropped, which is what makes the call unconditional).
+
+        Everything after that is addressed to ``self.model`` directly, with no unwrapping step:
+        :class:`~sonair.keras_model.KerasModel` IS a ``keras.Model``, so it and a bare
+        ``keras.Model`` are the same thing to this call — the reason a
+        ``getattr(self.model, "model", self.model)`` used to stand here and no longer does.
         """
         self._resolve_task_defaults()
-        if isinstance(self.model, Fluid) or hasattr(self.model, "solidify"):
-            self.model = flow(self.model, num_classes=self.num_classes)
-        network = getattr(self.model, "model", self.model)
-        network.compile(
-            optimizer=_built(self.optimizer),
-            loss=_built(self.loss),
-            metrics=[_built(m) for m in (self.metrics or [])],
+        self.model = flow(self.model, num_classes=self.num_classes)
+        self.model.compile(
+            optimizer=flow(self.optimizer),
+            loss=flow(self.loss),
+            metrics=[flow(m) for m in (self.metrics or [])],
         )
-        self._network = network
 
     def _sequence(self, source: Any, shuffle: bool = False, with_targets: bool = True) -> RecordSequence:
         """recordstream's batching adapter, wearing THIS task's batch shape.
@@ -322,7 +336,7 @@ class KerasClassifier(ProgressReporting):
 
     def _callbacks(self) -> List[Any]:
         """Wired Keras callbacks plus OPTIONAL marainer tracking (a few lines; removable)."""
-        callbacks = [flow(cb) if isinstance(cb, Fluid) else cb for cb in self.callbacks]
+        callbacks = [flow(cb) for cb in self.callbacks]
         for callback in callbacks:
             # Keras's file-writing callbacks (`CSVLogger`, `ModelCheckpoint`) open their path
             # without creating its parent, so a perfectly reasonable `./keras_logs/run.csv`
@@ -332,7 +346,7 @@ class KerasClassifier(ProgressReporting):
             target = getattr(callback, "filename", None) or getattr(callback, "filepath", None)
             if isinstance(target, (str, Path)):
                 Path(target).expanduser().parent.mkdir(parents=True, exist_ok=True)
-        trackers = [flow(t) if isinstance(t, Fluid) else t for t in (self.trackers or [])]
+        trackers = [flow(t) for t in (self.trackers or [])]
         if trackers:
             from marainer.keras import keras_tracking_callback
 
@@ -356,7 +370,7 @@ class KerasClassifier(ProgressReporting):
             raise ValueError("KerasClassifier.fit() requires a 'train_set'.")
         train_seq = self._sequence(self.train_set, shuffle=True)
         val_seq = self._sequence(self.val_set) if self.val_set is not None else None
-        history = self._network.fit(
+        history = self.model.fit(
             train_seq, validation_data=val_seq, epochs=self.max_epochs, callbacks=self._callbacks()
         )
         self._history = {k: [float(x) for x in v] for k, v in history.history.items()}
@@ -373,7 +387,7 @@ class KerasClassifier(ProgressReporting):
     def test(self) -> None:
         if self.test_set is None:
             raise ValueError("KerasClassifier.test() requires a 'test_set'.")
-        results = self._network.evaluate(self._sequence(self.test_set), return_dict=True, callbacks=self._callbacks())
+        results = self.model.evaluate(self._sequence(self.test_set), return_dict=True, callbacks=self._callbacks())
         self._computed_metrics = {k: float(v) for k, v in results.items()}
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
@@ -382,10 +396,10 @@ class KerasClassifier(ProgressReporting):
     def predict(self) -> None:
         if self.test_set is None:
             raise ValueError("KerasClassifier.predict() requires a 'test_set'.")
-        sink = flow(self.predictions_sink) if isinstance(self.predictions_sink, Fluid) else self.predictions_sink
+        sink = flow(self.predictions_sink)
         sequence = self._sequence(self.test_set, with_targets=False)
         for index, batch in enumerate(sequence.batches()):
-            logits = self._network.predict(sequence[index][0], verbose=0)
+            logits = self.model.predict(sequence[index][0], verbose=0)
             if sink is not None:
                 self._write_predictions(np.asarray(logits), batch, cast(PredictionsSink, sink))
         if sink is not None and hasattr(sink, "close"):
@@ -420,16 +434,23 @@ class KerasClassifier(ProgressReporting):
         return None
 
     def _live_trackers(self) -> List[Tracker]:
-        return [flow(t) if isinstance(t, Fluid) else t for t in (self.trackers or [])]
+        return [flow(t) for t in (self.trackers or [])]
 
     # ---- @outputs ------------------------------------------------------------ #
     @property
     @output
     def trained_model(self) -> Any:
-        """The live trained Keras model (post-run ``@output``). Raises while still deferred."""
+        """The live trained model (post-run ``@output``). Raises while still deferred.
+
+        Whatever was wired, unwrapped by nobody — which is also what the torch backends return.
+        A :class:`~sonair.keras_model.KerasModel` IS a ``keras.Model`` AND carries
+        ``num_classes``, which an evaluation run reads straight off its model slot, so this
+        output docks into a downstream classifier and still answers ``predict`` /
+        ``output_shape`` for a consumer that wants the network.
+        """
         if isinstance(self.model, Fluid):
             raise RuntimeError("trained_model is only available after run() — the model is still deferred.")
-        return getattr(self.model, "model", self.model)
+        return self.model
 
     @property
     @output
@@ -444,11 +465,6 @@ class KerasClassifier(ProgressReporting):
         if self.label_map is not None:
             return list(self.label_map.class_names)
         return list(self._class_names or [])
-
-
-def _built(value: Any) -> Any:
-    """A deferred :class:`~confluid.fluid.Fluid` built; anything else verbatim."""
-    return flow(value) if isinstance(value, Fluid) else value
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:

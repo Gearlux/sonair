@@ -29,6 +29,9 @@ pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning
 pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[keras]'           # Keras 3
 pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[tensorflow]'      # native TensorFlow
 pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[fastai]'          # fastai Learner
+pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[huggingface]'     # transformers Trainer
+pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[jax]'             # jitted optax loop
+pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[mlx]'             # Apple-silicon MLX
 pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning,keras]' # any combination
 ```
 
@@ -41,6 +44,9 @@ pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning
 | `sonair[keras]` | `keras` (Keras 3 — picks torch / tensorflow / jax at run time) |
 | `sonair[tensorflow]` | `keras` + the TensorFlow engine |
 | `sonair[fastai]` | `fastai`, `torch`, `timm` (no Lightning — the two trainers are alternatives) |
+| `sonair[huggingface]` | `transformers`, `accelerate` (the Hub zoo + `Trainer`) |
+| `sonair[jax]` | `jax`, `flax`, `optax` (no zoo — the shared conv spec, written in Flax) |
+| `sonair[mlx]` | `mlx` (Apple silicon only — empty elsewhere, so the install still succeeds) |
 
 Two of those extras carry an upper bound, and both are upstream breaks rather than
 preferences: `sonair[fastai]` pins `fastcore<2` (fastai's own optimizer still calls
@@ -100,6 +106,14 @@ The config roots at a top-level `runnable:` key carrying a `task:` — the same
 config serves training, evaluation, and prediction by switching the task (or by
 picking the matching `sonair` verb, which wins over the YAML's `task`).
 
+`train_loader` / `val_loader` / `test_loader` are deferred slots: `batch_size` and
+`num_workers` are the ergonomic knobs, but wiring the loader itself replaces it
+wholesale — that is how you reach `pin_memory`, `drop_last`, or a sampler. The
+**fastai** backend declares the same three slots under the same names (it consumes
+plain torch loaders), so this block drives either backend unchanged. Its only
+difference is the default `collate_fn`, which is `_to_tuple` rather than
+`collate_records`, because fastai unpacks a batch positionally.
+
 ### Full end-to-end example
 
 `examples/train_efficientvit_b0_mnist.yaml` trains an efficientvit classifier on
@@ -139,7 +153,7 @@ wins over any `task:` set in the config, so one config can serve all three.
 
 ## Training backends
 
-Four engines, one config. `sonair <backend> <verb>` picks the engine; everything above the
+Seven engines, one config — every backend the CLI advertises is implemented. `sonair <backend> <verb>` picks the engine; everything above the
 config's framework divider — dataset, splits, batch size, epochs, run identity — is shared
 verbatim.
 
@@ -148,7 +162,9 @@ sonair lightning  train examples/train_efficientvit_b0_mnist.yaml   # PyTorch Li
 sonair keras      train examples/train_efficientvit_b0_mnist.yaml   # Keras 3
 sonair tensorflow train examples/train_efficientvit_b0_mnist.yaml   # tf.data + GradientTape
 sonair fastai     train examples/train_efficientvit_b0_mnist.yaml   # Learner + one-cycle
-sonair jax        train cfg.yaml                                    # template — names the work
+sonair huggingface train examples/train_efficientvit_b0_mnist.yaml  # transformers Trainer
+sonair jax        train examples/train_efficientvit_b0_mnist.yaml   # jitted optax loop
+sonair mlx        train examples/train_efficientvit_b0_mnist.yaml   # Apple-silicon unified memory
 ```
 
 | Backend | Model wrapper | Owns the loop with | Adds |
@@ -157,7 +173,9 @@ sonair jax        train cfg.yaml                                    # template �
 | `keras` | `KerasModel` (`keras.applications`) | `keras.Model.fit` | one API over torch / TF / JAX |
 | `tensorflow` | `KerasModel` — the same one | a traced `tf.GradientTape` loop | `tf.data`, XLA, SavedModel export |
 | `fastai` | `TimmModel` — the same one | `Learner.fit_one_cycle` | fastai's schedule and callbacks |
-| `jax` / `huggingface` / `mlx` | — | — | templates; the verbs exist and name the work |
+| `huggingface` | `HuggingFaceModel` (the Hub) | `transformers.Trainer` | fine-tuning a pretrained checkpoint |
+| `jax` | `FlaxModel` (the shared spec) | a jitted `optax` loop | functional transforms; no zoo to wrap |
+| `mlx` | `MlxModel` (the shared spec) | `mlx.optimizers` + `nn.value_and_grad` | unified memory; Apple silicon only |
 
 On the shipped MNIST config (3 epochs), `lightning` reaches **99.52%** top-1 and `keras`
 **99.18%** best val from the same file, changing only the verb. Different backbones, so this
@@ -184,6 +202,23 @@ is the smallest of the four: it overrides `runnable` and `logger`, and *nothing 
 `model` either, for the mirror reason: in TensorFlow ≥ 2.16 `tf.keras` **is** Keras 3, so
 `KerasModel`, `keras.losses` and `keras.metrics` are the same objects the `keras` backend
 uses.
+
+### The model slot takes your own model
+
+Each wrapper subclasses its engine's model base — `TimmModel` is an `nn.Module`, `KerasModel`
+is a `keras.Model` — so the slot is not restricted to them. Anything of the right kind is
+wired the same way, and a classifier drives it identically:
+
+```yaml
+# instead of `!lazy:sonair.KerasModel`, wire a keras.Model subclass of your own.
+# Note the parens: the instance form builds it now, where `!lazy:` defers.
+model: !class:my_project.MyClassifier()
+```
+
+The wrappers are worth using because they are LAZY: the network is built when the classifier
+flows them, with the dataset-derived `num_classes` injected, so the class count never has to
+be written in the config. A model that is already live keeps the width its own constructor was
+given — the injection is skipped rather than applied — so size it yourself when you wire one.
 
 ### `tensorflow` — when to prefer it over `keras`
 

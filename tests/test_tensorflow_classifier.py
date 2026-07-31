@@ -142,6 +142,7 @@ def test_it_overrides_only_the_tensorflow_specific_behaviour() -> None:
         "test",
         "predict",
         "_export",  # SavedModel
+        "_input_shape",  # the export signature's shape — SavedModel plumbing, TF-only
     }
 
 
@@ -193,12 +194,20 @@ def keras_module() -> Any:
     return keras
 
 
-class _Shim:
-    """The ``.model`` + ``.num_classes`` shape a model wrapper exposes (what ``KerasModel`` is)."""
+def _Shim(model: Any, num_classes: int) -> Any:
+    """A wired model carrying ``num_classes`` — what a sonair model wrapper looks like.
 
-    def __init__(self, model: Any, num_classes: int) -> None:
-        self.model = model
-        self.num_classes = num_classes
+    This used to be a CLASS holding the network in a ``.model`` attribute, because the
+    classifier unwrapped its slot with ``getattr(self.model, "model", self.model)``. That
+    unwrapping is gone (2026-07-31): ``KerasModel`` IS a ``keras.Model``, so the classifier
+    addresses the wired object directly and a wrapper-shaped fake no longer satisfies it —
+    every traced step needs ``trainable_variables`` and ``__call__`` on the object ITSELF.
+
+    So the fake is now the network, with the one attribute the eval path reads bolted on. Kept
+    as a factory rather than inlined so the ~10 call sites below read unchanged.
+    """
+    model.num_classes = num_classes
+    return model
 
 
 class _CaptureSink:

@@ -276,7 +276,9 @@ def test_a_yaml_wired_loss_and_metric_reach_compile_built(tmp_path: Path) -> Non
     assert isinstance(clf.loss, Fluid)  # deferred as materialized...
     clf._compile()
 
-    network = clf._network
+    # `clf.model` IS the compiled `keras.Model` — `KerasModel` subclasses it, so `_compile()`
+    # compiles the wired object itself and its Keras-owned state reads back off it directly.
+    network = clf.model
     assert isinstance(network.loss, keras.losses.SparseCategoricalCrossentropy)  # ...live at compile
     assert network.loss.from_logits is True
     kinds = {type(m).__name__: m for m in network._compile_metrics._user_metrics}
@@ -289,7 +291,7 @@ def test_the_instance_form_with_parens_works_too(tmp_path: Path) -> None:
     clf = _materialize(_WIRED.replace("SparseCategoricalCrossentropy\n", "SparseCategoricalCrossentropy()\n"), tmp_path)
     assert isinstance(clf.loss, keras.losses.SparseCategoricalCrossentropy)
     clf._compile()
-    assert clf._network.loss.from_logits is True
+    assert clf.model.loss.from_logits is True
 
 
 def test_an_explicitly_wired_loss_is_never_replaced_by_the_sentinel(tmp_path: Path) -> None:
@@ -297,7 +299,7 @@ def test_an_explicitly_wired_loss_is_never_replaced_by_the_sentinel(tmp_path: Pa
     clf = _materialize(_WIRED, tmp_path)
     clf.multilabel = True  # a sentinel would now pick BinaryCrossentropy
     clf._compile()
-    assert isinstance(clf._network.loss, keras.losses.SparseCategoricalCrossentropy)
+    assert isinstance(clf.model.loss, keras.losses.SparseCategoricalCrossentropy)
 
 
 def test_a_registered_loss_and_metric_drive_a_real_compile_and_fit() -> None:

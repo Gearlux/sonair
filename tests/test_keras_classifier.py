@@ -136,6 +136,74 @@ def test_the_model_is_built_at_the_derived_width() -> None:
     assert clf.trained_model.output_shape[-1] == 3
 
 
+def test_a_live_model_is_left_exactly_as_it_arrived() -> None:
+    """Why `_compile` flows the model UNCONDITIONALLY, with no `isinstance` around it.
+
+    Handed a live object, `flow()` returns that same object and silently DROPS the runtime
+    kwarg — so a live model keeps the width its own constructor was given, and the call costs
+    nothing. The deferred path is pinned by `test_the_model_is_built_at_the_derived_width`.
+    """
+    live = KerasModel(model_name="MobileNetV3Small", input_shape=INPUT, num_classes=3)
+    clf = _classifier(model=live, num_classes=7)
+    clf._compile()
+
+    assert clf.model is live
+    assert live.num_classes == 3
+    assert clf.trained_model.output_shape[-1] == 3
+
+
+# --------------------------------------------------------------------------- #
+# The model slot: `KerasModel` IS a `keras.Model`
+# --------------------------------------------------------------------------- #
+# The Keras half of the mirroring — `TimmModel` IS an `nn.Module`, so this IS a `keras.Model`.
+# What it buys is that the classifier addresses `self.model` with no unwrapping step, which is
+# what let `getattr(self.model, "model", self.model)` be deleted from every call site.
+
+
+def test_keras_model_is_a_keras_model() -> None:
+    """The structural claim the classifier's call sites rest on."""
+    assert issubclass(KerasModel, keras.Model)
+
+
+def test_the_model_slot_takes_a_BARE_keras_model_too() -> None:
+    """The payoff: a plain `keras.Model` — which has no `.model` attribute at all — is wired in
+    the same slot and trains identically, because the classifier never unwraps anything."""
+    inputs = keras.Input(shape=INPUT)
+    bare = keras.Model(inputs, keras.layers.Dense(3)(keras.layers.GlobalAveragePooling2D()(inputs)))
+
+    clf = _classifier(model=bare, train_set=Stream(source=_records()))
+    clf.run()
+
+    assert clf.trained_model is bare
+    assert "loss" in clf.computed_metrics
+
+
+def test_a_never_flowed_model_still_builds_on_first_use() -> None:
+    """Why the build lives in `build()` and not in `call()`.
+
+    Keras refuses to let a BUILT layer add sub-layers, so creating the network on the first
+    `call()` dies with "You cannot add new elements of state…". `build()` runs before that
+    first call, which keeps a directly-constructed instance usable without `flow()`.
+    """
+    model = KerasModel(model_name="MobileNetV3Small", input_shape=INPUT, num_classes=3)
+    assert model._model is None  # nothing built by the constructor (lazy-init mandate)
+
+    logits = model(np.zeros((2, *INPUT), "float32"))
+
+    assert tuple(logits.shape) == (2, 3)
+    assert model._model is not None
+
+
+def test_output_shape_is_the_one_member_that_needs_a_hop() -> None:
+    """`output_shape` is Functional-only — a subclassed model raises for it, so it is the single
+    member forwarded by hand. Everything else on the Keras surface is inherited."""
+    model = KerasModel(model_name="MobileNetV3Small", input_shape=INPUT, num_classes=3)
+
+    assert model.output_shape[-1] == 3
+    for inherited in ("compile", "fit", "evaluate", "predict", "save", "save_weights", "export"):
+        assert getattr(type(model), inherited) is getattr(keras.Model, inherited), inherited
+
+
 def test_fit_reports_metrics() -> None:
     clf = _classifier(train_set=Stream(source=_records()))
     clf.run()

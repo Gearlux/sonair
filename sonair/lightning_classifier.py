@@ -242,7 +242,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         the dtype named for it. Multi-label wants an ``[N, C]`` float multi-hot (what
         ``BCEWithLogitsLoss`` and friends consume), single-label an ``[N]`` int64 class-id
         vector — ``int64`` explicitly, because a dataset yielding int32 label tensors is legal
-        and ``CrossEntropyLoss`` rejects it with *"expected scalar type Long but found Int"*.
+        and ``CrossEntropyLoss`` rejects it with *"expected target dtype to be Long or Byte, but got Int"*.
         """
         if self.multilabel:
             if not self.num_classes:

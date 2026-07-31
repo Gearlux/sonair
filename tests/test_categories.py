@@ -121,3 +121,44 @@ def test_framework_filter_narrows_the_loss_picker() -> None:
     # and the picker's real query is the filtered lookup rather than a name membership test.
     assert reg.get_class("SparseCategoricalCrossentropy", role="loss", framework="keras") is not None
     assert reg.get_class("SparseCategoricalCrossentropy", role="loss", framework="torch") is None
+
+
+# ---------------------------------------------------------------------------
+# The two backends that add a TRAINER but no new wiring surface
+# ---------------------------------------------------------------------------
+# `TensorFlowClassifier` consumes the Keras API (TF >= 2.16's `tf.keras` IS Keras 3) and
+# `FastaiClassifier` consumes the torch API, so each joins an EXISTING framework's picker
+# rather than opening a third and a fourth. That is the axis working as designed — it names
+# the API a class is wired to, not the package that published it.
+
+
+def test_the_tensorflow_trainer_joins_the_keras_picker() -> None:
+    import pytest
+
+    pytest.importorskip("tensorflow", reason="needs sonair[tensorflow]")
+    from sonair.tensorflow_classifier import TensorFlowClassifier  # noqa: F401
+
+    trainers = get_registry().list_classes(task="classification", role="trainer", framework="keras")
+    assert {"KerasClassifier", "TensorFlowClassifier"} <= trainers
+
+
+def test_the_fastai_trainer_joins_the_torch_picker() -> None:
+    import pytest
+
+    pytest.importorskip("fastai", reason="needs sonair[fastai]")
+    from sonair.fastai_classifier import FastaiClassifier  # noqa: F401
+
+    trainers = get_registry().list_classes(task="classification", role="trainer", framework="torch")
+    assert {"LightningClassifier", "FastaiClassifier"} <= trainers
+
+
+def test_the_fastai_losses_join_the_torch_loss_picker() -> None:
+    """They are `nn.Module`s, so a Lightning run can consume them too — tagging them "fastai"
+    would have hidden a working option from the picker for no reason."""
+    import pytest
+
+    pytest.importorskip("fastai", reason="needs sonair[fastai]")
+    from sonair.fastai_classification import _CLASSIFICATION_LOSSES
+
+    losses = get_registry().list_classes(task="classification", role="loss", framework="torch")
+    assert {cls.__name__ for cls in _CLASSIFICATION_LOSSES} <= losses

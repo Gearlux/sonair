@@ -5,7 +5,9 @@ a training framework arrives with the backend you select::
 
     pip install 'sonair[lightning]'          # PyTorch Lightning — the reference backend
     pip install 'sonair[keras]'              # Keras 3 (runs on torch / tensorflow / jax)
-    pip install 'sonair[lightning,keras]'    # both
+    pip install 'sonair[tensorflow]'         # a native tf.data + GradientTape loop
+    pip install 'sonair[fastai]'             # a fastai Learner over the same torch stack
+    pip install 'sonair[lightning,keras]'    # any combination
 
 Which is why every backend name below resolves LAZILY (PEP 562): importing ``sonair`` must not
 require a framework the operator did not choose, so a Keras-only install never drags in torch —
@@ -21,11 +23,18 @@ __version__ = "0.2.0"
 #: Backend-owned name -> (defining module, the extra that installs it). Resolved on first
 #: attribute access. Keep in step with the extras in ``pyproject.toml``: a name here whose
 #: extra does not exist would advertise an install command that fails.
+#
+# Two backends deliberately contribute NO model wrapper: TensorFlow >= 2.16 exposes Keras 3 as
+# ``tf.keras``, so ``TensorFlowClassifier`` takes ``KerasModel``; fastai is torch, so
+# ``FastaiClassifier`` takes ``TimmModel``. A backend that adds no new wiring surface adds no
+# new name here (``docs/architecture.md`` §5).
 _BACKEND_NAMES = {
     "LightningClassifier": ("sonair.lightning_classifier", "lightning"),
     "TimmModel": ("sonair.timm_model", "lightning"),
     "KerasClassifier": ("sonair.keras_classifier", "keras"),
     "KerasModel": ("sonair.keras_model", "keras"),
+    "TensorFlowClassifier": ("sonair.tensorflow_classifier", "tensorflow"),
+    "FastaiClassifier": ("sonair.fastai_classifier", "fastai"),
 }
 
 __all__ = [*_BACKEND_NAMES]

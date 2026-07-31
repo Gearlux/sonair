@@ -277,8 +277,16 @@ def test_a_probability_loss_on_logits_disagrees_with_the_correct_one() -> None:
     logits = np.array([[12.0, -8.0, 3.0]], dtype="float32")
     y = np.array([1], dtype="int64")
 
-    wrong = float(keras.losses.get("sparse_categorical_crossentropy")(y, logits))
-    right = float(keras.losses.SparseCategoricalCrossentropy(from_logits=True)(y, logits))
+    # Reduced through `keras.ops.convert_to_numpy`, not `float(...)`, so this stays
+    # engine-portable — which matters now that `sonair tensorflow` gives a reason to run the
+    # suite with KERAS_BACKEND=tensorflow. The functional form returns a PER-ROW value, and a
+    # shape-(1,) `tf.Tensor` refuses `float()`; a bare `np.asarray` then fails the other way, on
+    # a torch tensor that lives on MPS. Keras's own converter handles both.
+    def _scalar(value: object) -> float:
+        return float(keras.ops.convert_to_numpy(value).mean())
+
+    wrong = _scalar(keras.losses.get("sparse_categorical_crossentropy")(y, logits))
+    right = _scalar(keras.losses.SparseCategoricalCrossentropy(from_logits=True)(y, logits))
 
     assert not np.isclose(wrong, right), "if these agree, the from_logits distinction has changed"
 

@@ -20,16 +20,19 @@ import pytest
 from confluid import configurable
 
 from sonair import cli
-from sonair.cli import TEMPLATES, BackendNotImplementedError
+from sonair.cli import IMPLEMENTED, TEMPLATES, BackendNotImplementedError
 
 VERBS = ("train", "evaluate", "predict")
 VERB_TASKS = {"train": "fit", "evaluate": "test", "predict": "predict"}
 
+#: The backends that actually train, restated here rather than imported blind — this list is
+#: the test's own claim about what sonair ships, so a backend silently disappearing from
+#: `cli.IMPLEMENTED` has to fail something.
+EXPECTED_IMPLEMENTED = ("lightning", "keras", "tensorflow", "fastai")
 
-#: The backends that actually train. A template graduating moves it to this list, and the
-#: two tests below then hold it to the SAME verb surface as the others — which is the whole
-#: claim of the framework dimension.
-IMPLEMENTED = ("lightning", "keras")
+
+def test_the_implemented_set_is_the_one_we_expect() -> None:
+    assert tuple(IMPLEMENTED) == EXPECTED_IMPLEMENTED
 
 
 def test_every_backend_is_mounted() -> None:
@@ -47,12 +50,35 @@ def test_every_backend_exposes_the_same_verbs(backend: str) -> None:
     assert set(cli.app._sub_apps[backend]._commands) == set(VERBS)
 
 
+@pytest.mark.parametrize("backend", IMPLEMENTED)
 @pytest.mark.parametrize("verb", VERBS)
-def test_lightning_verbs_take_a_promoted_config_and_a_runnable(verb: str) -> None:
-    """`@script_command` gives config promotion; the param name drives liquifai DI."""
-    sub = cli.app._sub_apps["lightning"]
+def test_implemented_verbs_take_a_promoted_config_and_a_runnable(backend: str, verb: str) -> None:
+    """`@script_command` gives config promotion; the param NAME drives liquifai DI.
+
+    The handlers are built by a factory (four backends x three verbs), and the one thing a
+    factory can get wrong is the signature — liquifai reads it, so a smuggled loop variable
+    would surface as a `--_backend` flag in help and TAB completion.
+    """
+    sub = cli.app._sub_apps[backend]
     assert verb in sub._script_cmds
     assert list(inspect.signature(sub._commands[verb]).parameters) == ["runnable"]
+
+
+@pytest.mark.parametrize("backend", IMPLEMENTED)
+def test_every_implemented_backend_names_a_real_registration_module(backend: str) -> None:
+    """The loss/metric module each sub-app imports must exist — a typo would surface only at
+    run time, as an unresolvable `!class:` name several minutes into a session."""
+    import importlib.util
+
+    module = IMPLEMENTED[backend].registrations
+    assert importlib.util.find_spec(module) is not None, f"{backend} names a missing module {module!r}"
+
+
+def test_tensorflow_shares_the_keras_registrations() -> None:
+    """In TF >= 2.16 `tf.keras` IS Keras 3, so a separate `tensorflow_classification.py` would
+    register the same classes under a second framework tag — making every bare
+    `!class:SparseCategoricalCrossentropy` ambiguous for no gain."""
+    assert IMPLEMENTED["tensorflow"].registrations == IMPLEMENTED["keras"].registrations
 
 
 @pytest.mark.parametrize("backend", TEMPLATES)
@@ -78,10 +104,16 @@ class _FakeRunnable:
         self.ran = True
 
 
+@pytest.mark.parametrize("backend", IMPLEMENTED)
 @pytest.mark.parametrize("verb,task", sorted(VERB_TASKS.items()))
-def test_verb_overrides_the_configured_task(verb: str, task: str) -> None:
+def test_verb_overrides_the_configured_task(backend: str, verb: str, task: str) -> None:
+    if backend in ("tensorflow", "fastai"):
+        pytest.importorskip(
+            {"tensorflow": "tensorflow", "fastai": "fastai"}[backend],
+            reason=f"the {backend} sub-app imports its loss registrations",
+        )
     runnable = _FakeRunnable(task="something-else")
-    cli.app._sub_apps["lightning"]._commands[verb](runnable=runnable)
+    cli.app._sub_apps[backend]._commands[verb](runnable=runnable)
     assert runnable.task == task, "the verb must win over the YAML's task"
     assert runnable.ran
 
@@ -184,7 +216,7 @@ def test_template_exits_1_through_the_cli(monkeypatch: pytest.MonkeyPatch, capsy
     """End-to-end: one clean `Error:` line, exit 1 — not an unhandled traceback."""
     from liquifai.context import set_context
 
-    monkeypatch.setattr(sys, "argv", ["sonair", "tensorflow", "train"])
+    monkeypatch.setattr(sys, "argv", ["sonair", "jax", "train"])
     set_context(None)  # type: ignore[arg-type]
 
     with pytest.raises(SystemExit) as ei:
@@ -228,6 +260,41 @@ def test_no_backend_verb_injects_nothing() -> None:
     argv = ["sonair", "--help"]
     cli._inject_framework_scope(argv)
     assert argv == ["sonair", "--help"]
+
+
+@pytest.mark.parametrize("argv,expected", [(["sonair", "tensorflow", "train", "c.yaml"], "tensorflow")])
+def test_the_tensorflow_verb_pins_keras_backend_before_anything_imports_keras(
+    monkeypatch: pytest.MonkeyPatch, argv: list, expected: str
+) -> None:
+    """Keras reads KERAS_BACKEND once, at import time, and `recordstream.keras` defaults it to
+    the first backend INSTALLED — torch, on a machine that also has sonair[lightning]. The
+    handler is too late to fix that: liquifai resolves the config first, and a
+    `!class:sonair.TensorFlowClassifier` tag imports keras during that resolution."""
+    monkeypatch.delenv("KERAS_BACKEND", raising=False)
+    cli._pin_keras_backend(cli._selected_backend(argv))
+    import os
+
+    assert os.environ.get("KERAS_BACKEND") == expected
+
+
+def test_an_explicit_keras_backend_is_never_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`setdefault`, so a deliberate choice survives — `initialize()` then reports the mismatch."""
+    import os
+
+    monkeypatch.setenv("KERAS_BACKEND", "jax")
+    cli._pin_keras_backend("tensorflow")
+
+    assert os.environ["KERAS_BACKEND"] == "jax"
+
+
+@pytest.mark.parametrize("backend", [b for b in ("lightning", "keras", "fastai", "jax") if b])
+def test_no_other_backend_touches_keras_backend(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
+    import os
+
+    monkeypatch.delenv("KERAS_BACKEND", raising=False)
+    cli._pin_keras_backend(backend)
+
+    assert "KERAS_BACKEND" not in os.environ
 
 
 @pytest.mark.parametrize(

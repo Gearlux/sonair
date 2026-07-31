@@ -150,11 +150,15 @@ the decision was first recorded; it is what the "wire-to" framing settles.)
   cross-*task* options (a segmentation model in a classification model slot — "a
   model is a model"), ranked after the preferred tier. Cross-*framework* options
   are not offered at all, because they are not a choice: they cannot run.
-- **StreamStudio is deliberately out of scope.** Its object sockets are
-  string-equality-enforced by ComfyUI (`RECORDSTREAM_OBJECT:model`) and the type
-  strings are persisted in saved `workflow.json` files, so qualifying them by
-  framework would break every existing graph. That is a workflow-format change
-  deserving its own decision, not a rider on this one. See `TASKS.md`.
+- **StreamStudio followed on 2026-07-31**, once it had its own decision — the axis
+  reached the canvas without the workflow-format break this record feared. Its
+  object sockets now carry the engine as a third segment inside a comma UNION
+  (`RECORDSTREAM_OBJECT:loss:torch,RECORDSTREAM_OBJECT:loss`), which both
+  ComfyUI halves read as "compatible if the sets intersect" — so a saved graph
+  keeps loading and an untagged class keeps connecting. The union carries the
+  claim; the *rule* is applied by a backend `VALIDATE_INPUTS` and a canvas
+  `onConnectInput` hook, because no arrangement of type strings can express
+  "exclusion requires two claims" on its own. See streamstudio's `AGENTS.md`.
 - **One registration module per engine** — `torch_classification.py` (2026-07-30,
   renamed from `classification.py`, which read as task-scoped in a project whose
   whole point is that the task outlives the engine) and `keras_classification.py`.

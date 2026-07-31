@@ -19,6 +19,8 @@ import pytest
 pytest.importorskip("fastai", reason="the fastai backend needs sonair[fastai]")
 
 import torch  # noqa: E402 - after the skip, so a fastai-less install never imports it for this file
+from confluid import Fluid, LazyClass, flow, lazy_param_names  # noqa: E402
+from torch.utils.data import DataLoader  # noqa: E402
 
 from sonair.fastai_classifier import FastaiClassifier, _as_metric, _as_opt_func, _named_values  # noqa: E402
 
@@ -160,6 +162,72 @@ def test_the_batch_shape_matches_the_lightning_backend() -> None:
     batch = collate_records(records)
     assert torch.equal(x, batch_tensor(batch, "image"))
     assert torch.equal(y, batch_tensor(batch, "class", dtype=torch.int64))
+
+
+# ---------------------------------------------------------------------------
+# Loader construction — the SAME deferred slots the Lightning backend declares
+# ---------------------------------------------------------------------------
+# This backend used to build its loaders inline in a private `_loader()` helper. That made
+# `batch_size`/`num_workers` the ONLY thing a config could say about the data path — no
+# `pin_memory`, no `drop_last`, no sampler — while the Lightning backend exposed the whole
+# loader as a replaceable slot. The difference was an accident of writing order, not a fastai
+# constraint: fastai consumes plain torch loaders.
+
+
+def test_the_loader_slots_match_the_lightning_backends() -> None:
+    """Same names, same deferral, so one config idiom drives both backends."""
+    from sonair.lightning_classifier import LightningClassifier
+
+    slots = {"train_loader", "val_loader", "test_loader"}
+    assert slots <= lazy_param_names(FastaiClassifier)
+    assert slots <= lazy_param_names(LightningClassifier)
+
+    clf = FastaiClassifier(model=None, batch_size=8, num_workers=2)
+    for name in slots:
+        stub = getattr(clf, name)
+        assert isinstance(stub, Fluid), f"{name} must stay deferred until run() supplies dataset="
+        assert stub.kwargs["batch_size"] == 8
+        assert stub.kwargs["persistent_workers"] is True  # derived from num_workers, as in Lightning
+
+
+def test_the_only_divergence_from_lightning_is_the_collate() -> None:
+    """fastai unpacks a batch POSITIONALLY, so `_to_tuple` sits where `collate_records` sits."""
+    clf = FastaiClassifier(model=None, num_classes=3)
+    train, val = cast(Fluid, clf.train_loader), cast(Fluid, clf.val_loader)
+
+    assert train.kwargs["collate_fn"] == clf._to_tuple
+    assert train.kwargs["shuffle"] is True
+    assert val.kwargs["shuffle"] is False
+
+
+def test_a_wired_loader_replaces_the_baked_stub() -> None:
+    """What the alignment buys: the loader is a post-construction slot, as in Lightning."""
+    clf = FastaiClassifier(model=None, num_classes=3)
+    clf.train_loader = LazyClass(DataLoader, batch_size=1, drop_last=True, collate_fn=clf._to_tuple)
+
+    loader = flow(clf.train_loader, dataset=_records(4))
+
+    assert loader.batch_size == 1 and loader.drop_last is True
+
+
+def test_predict_gets_record_batches_from_the_SAME_slot() -> None:
+    """The predict path overrides `collate_fn` at flow time rather than owning a second loader.
+
+    The sink needs the metadata `_to_tuple` drops, so predict wants record dicts — but every
+    other knob the operator set on `test_loader` must still apply.
+    """
+    from recordstream import collate_records
+
+    clf = FastaiClassifier(model=None, num_classes=3, batch_size=2)
+    records = _records(4)
+
+    tuples = flow(clf.test_loader, dataset=records)
+    dicts = flow(clf.test_loader, dataset=records, collate_fn=collate_records)
+
+    assert isinstance(next(iter(tuples)), tuple)
+    assert isinstance(next(iter(dicts)), dict), "predict must see the record dict, not the tuple"
+    assert dicts.batch_size == 2, "the override must not discard the slot's other kwargs"
+    assert flow(clf.test_loader, dataset=records).collate_fn == clf._to_tuple, "stub not mutated"
 
 
 # ---------------------------------------------------------------------------
@@ -399,9 +467,16 @@ def test_eval_verbs_without_a_test_set_are_clear_errors(method: str) -> None:
 
 
 def test_a_non_module_model_is_a_clear_error() -> None:
-    clf = FastaiClassifier(model="not a model")
+    """Raised at the flow site in `initialize()`, so a wrong model fails during SETUP rather
+    than several minutes into a fit inside `Learner`.
+
+    The fit path is what this covers, because it is the only one that reaches the check: an
+    eval task resolves `num_classes` OFF the model first (`_initialize_eval`) and so rejects a
+    non-model earlier, with its own equally clear message.
+    """
+    clf = FastaiClassifier(model="not a model", train_set=_stream(_records(4)), num_classes=3)
     with pytest.raises(TypeError, match="nn.Module"):
-        clf._live_model()
+        clf.initialize()
 
 
 # ---------------------------------------------------------------------------

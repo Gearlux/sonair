@@ -15,14 +15,16 @@ sonair lightning  predict  cfg.yaml
 sonair keras      train  cfg.yaml     # implemented — Keras 3
 sonair tensorflow train  cfg.yaml     # implemented — tf.data + tf.GradientTape
 sonair fastai     train  cfg.yaml     # implemented — Learner + one-cycle
-sonair jax        train  cfg.yaml     # template
-sonair huggingface train cfg.yaml     # template
-sonair mlx        train  cfg.yaml     # template
+sonair huggingface train cfg.yaml     # implemented — transformers Trainer
+sonair jax        train  cfg.yaml     # implemented — jitted optax loop
+sonair mlx        train  cfg.yaml     # implemented — Apple-silicon unified memory
 ```
 
 `sonair --help` lists the backends; `sonair <backend> --help` lists its verbs.
-Templates advertise the same three verbs on purpose — the roadmap should be
-visible from the CLI, not buried in a tracker.
+Every backend the CLI advertises is now implemented — the roadmap is finished.
+Templates were how it advertised the unbuilt ones (the verbs existed and raised
+an actionable error naming the file to create); `TEMPLATES` is empty today, and
+the machinery stays because it is how the NEXT backend will be advertised.
 
 ## What each layer owns
 
@@ -41,12 +43,14 @@ upstream class names, not code. That is the claim this project exists to
 demonstrate, and it is why a template's error message can honestly say "the
 CLI, the config shape and the logging backends are already wired".
 
-Two of those rows say *sometimes* because two of the four implemented backends
-add neither. `TensorFlowClassifier` reuses `KerasModel` and the Keras loss set
-(in TensorFlow >= 2.16, `tf.keras` **is** Keras 3); `FastaiClassifier` reuses
-`TimmModel` and the torch loss set (fastai runs on torch). A backend adds a
-module only when it adds a genuinely new wiring surface — see
-[Architecture Decisions §5](architecture.md).
+Two of those rows say *sometimes* because backends differ in what they add.
+`TensorFlowClassifier` reuses `KerasModel` and the Keras loss set (in TensorFlow
+>= 2.16, `tf.keras` **is** Keras 3); `FastaiClassifier` reuses `TimmModel` and
+the torch loss set (fastai runs on torch). `HuggingFaceClassifier` brings a model
+wrapper but **no loss set at all**, because an `AutoModelForImageClassification`
+computes its own loss from `config.problem_type` — there is nothing for a config
+to wire. A backend adds a module only when it adds a genuinely new wiring
+surface — see [Architecture Decisions §5](architecture.md).
 
 ## The verb → task mapping
 

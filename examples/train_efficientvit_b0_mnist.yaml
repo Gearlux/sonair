@@ -184,10 +184,29 @@ keras: !scope:framework=keras
 #   runnable: !class:sonair.TensorFlowClassifier
 #     export_dir: ./exported/mnist_mobilenetv3
 #     jit_compile: false
+#   # THE MODEL SLOT TAKES FOUR THINGS HERE — one active, three alternatives. They differ
+#   # in what they wrap, not in how they are wired, which is the point:
+#   #
+#   #   KerasModel         a keras.applications zoo backbone, pretrained. Best accuracy;
+#   #                      `tf.keras` IS Keras 3, so this is TF-native despite the name.
+#   #   TensorFlowConvNet  the shared conv spec in raw tf.nn ops (sonair/convnet_spec.py).
+#   #                      No pretrained weights — it exists so the same architecture can be
+#   #                      compared against its Flax, MLX and Keras twins.
+#   #   KerasConvNet       the same spec in keras.layers — runs on any Keras engine.
+#   #   TensorFlowModel    a SavedModel you already have (Kaggle Models, or one this
+#   #                      project exported). Set `num_classes`: a SavedModel is an opaque
+#   #                      graph that does not declare its head width.
 #   model: !lazy:sonair.KerasModel
 #     model_name: MobileNetV3Small
 #     input_shape: [224, 224, 3]
 #     pretrained: true
+#   # model: !lazy:sonair.TensorFlowConvNet
+#   #   input_shape: [224, 224, 3]
+#   # model: !lazy:sonair.KerasConvNet
+#   #   input_shape: [224, 224, 3]
+#   # model: !lazy:sonair.TensorFlowModel
+#   #   saved_model: ./exported/mnist_mobilenetv3
+#   #   num_classes: 10
 #   logger:
 #     - !class:keras.callbacks.CSVLogger
 #       filename: ./tensorflow_logs/mnist.csv
@@ -213,7 +232,66 @@ keras: !scope:framework=keras
 #     - !class:fastai.callback.progress.CSVLogger
 #       fname: fastai_logs/mnist.csv
 
+# huggingface — `transformers.Trainer` fine-tuning a Hub checkpoint. The block is bigger
+# than fastai's for one honest reason: this backend swaps the MODEL as well as the loop, so
+# it needs its own `model:` and a `preprocess` sized to that checkpoint. What it does NOT
+# need is a `loss` — an `AutoModelForImageClassification` computes its own from
+# `config.problem_type`, which is why this backend registers no loss set at all.
+#
+#   sonair huggingface train examples/train_efficientvit_b0_mnist.yaml
+#
+# huggingface: !scope:framework=huggingface
+#   runnable: !class:sonair.HuggingFaceClassifier
+#     learning_rate: 0.00005      # transformers' fine-tuning default — two orders below
+#                                 # a from-scratch LR, because we start from real weights
+#     metrics: [accuracy]
+#   model: !lazy:sonair.HuggingFaceModel
+#     model_name: google/vit-base-patch16-224
+#     pretrained: true
+
+# jax — a jitted optax loop over a Flax model. The `model:` block is the interesting part:
+# there is NO Flax zoo to wrap (transformers dropped Flax in v5, flaxmodels last released in
+# 2023), so `FlaxModel` implements sonair's own shared conv spec — the SAME architecture that
+# `KerasConvNet`, `TensorFlowConvNet` and `MlxModel` implement, so a cross-framework
+# comparison compares frameworks rather than four different networks. It has no pretrained
+# weights, which is why the accuracy here is far below the zoo-backed backends above.
+#
+# Losses and optimizers are NAMES, not `!class:` tags — optax ships functions and factories,
+# so there is no class for a tag to resolve (see sonair/jax_classifier.py).
+#
+#   sonair jax train examples/train_efficientvit_b0_mnist.yaml
+#
 # jax: !scope:framework=jax
 #   runnable: !class:sonair.JaxClassifier
+#     learning_rate: 0.001
+#     optimizer: adam
+#     metrics: [accuracy]
 #   model: !lazy:sonair.FlaxModel
-#     model_name: efficientvit_b0
+#     input_shape: [224, 224, 3]     # channels LAST, like the keras block
+#   preprocess:                      # ...and so the chain STOPS before a CHW ToTensor
+#     - !class:recordstream.ops.image.ConvertToImage
+#       width: 224
+#       height: 224
+
+# mlx — Apple-silicon unified memory. The block is the jax one with two words changed, which
+# is the point: same architecture (`sonair/convnet_spec.py`, its fourth implementation), same
+# channels-last preprocessing, same knobs. What differs is underneath — no host/device copy,
+# and lazy arrays the loop has to `mx.eval`.
+#
+# `sonair[mlx]` is empty off Apple silicon (the extra carries a platform marker), so this
+# block simply cannot run on a Linux CI box. Losses and optimizers are NAMES: `mlx.nn.losses`
+# ships functions and `mlx.optimizers` ships classes, so neither is a `!class:` tag.
+#
+#   sonair mlx train examples/train_efficientvit_b0_mnist.yaml
+#
+# mlx: !scope:framework=mlx
+#   runnable: !class:sonair.MlxClassifier
+#     learning_rate: 0.001
+#     optimizer: Adam                # a CLASS name here, unlike jax's optax factory
+#     metrics: [accuracy]
+#   model: !lazy:sonair.MlxModel
+#     input_shape: [224, 224, 3]
+#   preprocess:
+#     - !class:recordstream.ops.image.ConvertToImage
+#       width: 224
+#       height: 224

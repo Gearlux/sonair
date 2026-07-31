@@ -101,6 +101,7 @@ fastai = [
 jax = [
     "jax>=0.4",
     "flax>=0.8",            # NNX is the current Flax module API
+    "optax>=0.2",           # the optimizers and losses; JAX itself ships neither
 ]
 huggingface = [
     "transformers>=4.40",
@@ -168,7 +169,7 @@ sonair-fastai-classification = "sonair.fastai_classification"
 # here would install three frameworks nothing can run yet.
 #
 # Declaring a name here only puts it on the MENU — what gets installed is the separate
-# selection in `project-frameworks.toml` (`aisland framework set …`), so listing a name costs
+# selection in `frameworks.toml` (`aisland framework set …`), so listing a name costs
 # nothing until someone selects it.
 #
 # NO protobuf conflict, contrary to what this comment claimed until 2026-07-30. A clean
@@ -180,7 +181,7 @@ sonair-fastai-classification = "sonair.fastai_classification"
 # `<5`) stayed put. All three relaxed to `<8` in releases that are already out. Let them move
 # too — or recreate the venv — and TensorFlow resolves like any other extra.
 [tool.aisland]
-frameworks = ["lightning", "keras", "tensorflow", "fastai"]
+frameworks = ["lightning", "keras", "tensorflow", "fastai", "huggingface", "jax", "mlx"]
 
 [tool.setuptools.packages.find]
 where = ["."]

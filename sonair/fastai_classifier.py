@@ -8,11 +8,15 @@ owns the epoch: ``Learner.fit_one_cycle`` instead of ``pytorch_lightning.Trainer
 
 So the interesting number here is not how little was written but how little was *replaced*:
 
-* **Data** is a plain ``torch.utils.data.DataLoader`` over the record stream with
-  :func:`~recordstream.collate_records` — the same one the Lightning backend builds. fastai
-  takes plain PyTorch loaders directly (``DataLoaders(train_dl, valid_dl)``), so nothing is
-  adapted; :meth:`FastaiClassifier._to_tuple` only says what a classification batch looks like,
-  the twin of the Lightning backend's ``_targets`` and the Keras backend's ``_to_arrays``.
+* **Data** comes from the same deferred ``train_loader`` / ``val_loader`` / ``test_loader``
+  slots the Lightning backend declares — ``LazyClass(DataLoader, …)`` baked in ``__init__``
+  with the ergonomic ``batch_size`` / ``num_workers`` knobs, flowed at run time with the
+  ``dataset=`` that does not exist yet. fastai takes plain PyTorch loaders directly
+  (``DataLoaders(train_dl, valid_dl)``), so the LOADER needs no adaptation at all; the one
+  substitution is the ``collate_fn``, where :meth:`FastaiClassifier._to_tuple` stands in for
+  ``collate_records`` because fastai unpacks a batch positionally. That method is the twin of
+  the Lightning backend's ``_targets`` and the Keras backend's ``_to_arrays``, and it is the
+  whole of what this backend says about batches.
 * **The model** is ``sonair.TimmModel``, unchanged and un-wrapped. A fastai config's `model:`
   block is byte-identical to a Lightning one.
 * **Losses** are ``fastai.losses`` classes, registered ``framework="torch"`` in
@@ -41,12 +45,11 @@ note that only the runnable's class differs::
     max_epochs: 3
 """
 
-from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union, cast
 
 import torch
-from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
+from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from fastai import metrics as fastai_metrics
 from fastai import optimizer as fastai_optimizer
 
@@ -80,7 +83,6 @@ from recordstream import (
 )
 from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint, run_entrypoint
 from torch.utils.data import DataLoader
-from torch.utils.data import Dataset as TorchDataset
 
 logger = get_logger(__name__)
 
@@ -173,7 +175,13 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         metrics: Optional[Sequence[FastaiMetric]] = None,
     ) -> None:
         super().__init__()
-        self.model: Lazy[Any] = model
+        # `torch.nn.Module`, not `Lazy[Any]`: the deferred-ness is declared once, on the ctor
+        # param, which is what `lazy_param_names` / `to_pydantic` read. A union here would only
+        # stop every method calling through the slot (`.eval()`, `.parameters()`).
+        # The cast is the whole of it: the ctor accepts a deferred marker (that is what
+        # `Mandatory[Lazy[Any]]` above declares, and what `lazy_param_names` reads), while the
+        # ATTRIBUTE's useful type is what it holds once `initialize()` has flowed it.
+        self.model: torch.nn.Module = cast(torch.nn.Module, model)
         self.train_set: Optional[Lazy[RecordSource]] = train_set
         self.val_set: Optional[Lazy[RecordSource]] = val_set
         self.test_set: Optional[Lazy[RecordSource]] = test_set
@@ -192,6 +200,26 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         self.one_cycle = one_cycle
         self.weight_decay = weight_decay
         self.opt_func: FastaiOptimizer = opt_func
+        # Deferred loader stubs, baked here exactly as the Lightning backend bakes them, and
+        # for the same payoff: `batch_size`/`num_workers` stay ergonomic flat-config knobs while
+        # the LOADER itself remains a post-construction slot a config can replace wholesale
+        # (`pin_memory`, `drop_last`, a sampler — none of which was reachable while this backend
+        # built its loaders inline). `run()` flows each with the `dataset=` that does not exist
+        # yet, which is the whole reason they are deferred rather than built now.
+        #
+        # The ONE divergence from the Lightning stubs is the collate, and it is this backend's
+        # single genuine adaptation: fastai unpacks a batch POSITIONALLY, so `_to_tuple` sits
+        # where `collate_records` sits there. `predict()` flows `test_loader` with
+        # `collate_fn=collate_records` to get the record dict back — see the note there.
+        loader_kw = dict(
+            collate_fn=self._to_tuple,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            persistent_workers=num_workers != 0,
+        )
+        self.train_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=True, **loader_kw)
+        self.val_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=False, **loader_kw)
+        self.test_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=False, **loader_kw)
         # Sentinels, for the same reason every other backend uses them: the right loss and
         # metrics depend on whether the targets are single- or multi-label, which is only known
         # once `initialize()` has peeked the data. A live default here could not be told apart
@@ -225,8 +253,12 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         else:
             self._initialize_eval()
         self._resolve_task_defaults()
-        if isinstance(self.model, Fluid) or hasattr(self.model, "solidify"):
-            self.model = flow(self.model, num_classes=self.num_classes)
+        self.model = flow(self.model, num_classes=self.num_classes)
+        # Checked HERE, at the flow site, rather than behind an accessor at each use: a wrong
+        # model should fail during setup with its own name in the message, not several minutes
+        # into a fit inside `Learner`. This is a validation, not a guard around `flow`.
+        if not isinstance(self.model, torch.nn.Module):
+            raise TypeError(f"FastaiClassifier needs a torch nn.Module, got {type(self.model).__name__}.")
 
     def _initialize_fit(self) -> None:
         self.train_set = ensure_record_dataset(self.train_set)
@@ -296,40 +328,6 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
             self.metrics = ["accuracy_multi"] if self.multilabel else ["accuracy"]
 
     # ---- data --------------------------------------------------------------- #
-    def _loader(self, source: Any, shuffle: bool, with_targets: bool = True) -> DataLoader:
-        """A plain torch ``DataLoader`` of ``(x, y)`` tuples — what fastai's ``Learner`` consumes.
-
-        Identical to the Lightning backend's loader but for the collate: fastai's training loop
-        unpacks a batch positionally (``*b[:n_inp], *b[n_inp:]``), so the batch has to BE a
-        tuple rather than the record dict a ``LightningModule`` reads by key. That is the whole
-        adaptation — hence :meth:`_to_tuple` sitting where a ``collate_fn`` goes.
-        """
-        return DataLoader(
-            _as_torch_dataset(source),
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            num_workers=self.num_workers,
-            persistent_workers=self.num_workers > 0,
-            collate_fn=partial(self._to_tuple, with_targets=with_targets),
-        )
-
-    def _record_loader(self, source: Any) -> DataLoader:
-        """A loader of COLLATED RECORD BATCHES — the shape :meth:`predict` needs.
-
-        Prediction pairs each output row with the metadata that travelled beside the image, and
-        :meth:`_to_tuple` has already dropped it. So the predict path keeps the record dict and
-        reads it with recordstream's generic ``batch_tensor`` / ``batch_metadata``, exactly as
-        the Lightning backend does.
-        """
-        return DataLoader(
-            _as_torch_dataset(source),
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            persistent_workers=self.num_workers > 0,
-            collate_fn=collate_records,
-        )
-
     def _to_tuple(self, records: Sequence[Any], with_targets: bool = True) -> Tuple[torch.Tensor, ...]:
         """One list of records → the ``(x, y)`` tuple fastai consumes.
 
@@ -358,16 +356,21 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         pass, so unlike ``pytorch_lightning.Trainer`` it has no "no validation" mode. When no
         ``val_set`` is wired the training data is reused, which keeps a run working but makes
         the reported metrics training metrics — worth saying out loud, hence the warning.
+
+        The loaders come from the deferred ``train_loader`` / ``val_loader`` slots, flowed with
+        the ``dataset=`` that did not exist at construction — the same two lines the Lightning
+        backend's ``fit()`` writes.
         """
-        train = self._loader(self.train_set, shuffle=True)
+        train_ds = ensure_record_dataset(self.train_set)
+        train = flow(self.train_loader, dataset=train_ds)
         if self.val_set is not None:
-            return DataLoaders(train, self._loader(self.val_set, shuffle=False))
+            return DataLoaders(train, flow(self.val_loader, dataset=ensure_record_dataset(self.val_set)))
         logger.warning(
             "No 'val_set' wired: fastai's Learner always validates, so the TRAINING data is being "
             "used for validation and the reported metrics measure fit, not generalization. Wire a "
             "'val_set' to get a real held-out score."
         )
-        return DataLoaders(train, self._loader(self.train_set, shuffle=False))
+        return DataLoaders(train, flow(self.val_loader, dataset=train_ds))
 
     # ---- the learner -------------------------------------------------------- #
     def _build_learner(self, dataloaders: DataLoaders) -> Learner:
@@ -375,8 +378,8 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         path = self._artifact_dir()
         learner = Learner(
             dataloaders,
-            self._live_model(),
-            loss_func=_built(self.loss),
+            self.model,
+            loss_func=flow(self.loss),
             opt_func=_as_opt_func(self.opt_func),
             lr=self.learning_rate,
             metrics=[_as_metric(m) for m in (self.metrics or [])],
@@ -394,21 +397,13 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         opens ``learn.path/fname`` without creating it, so a perfectly reasonable
         ``./fastai_logs/run.csv`` would die *after* the data walk and the model build.
         """
-        callbacks = [flow(cb) if isinstance(cb, Fluid) else cb for cb in self.callbacks]
+        callbacks = [flow(cb) for cb in self.callbacks]
         base = Path(self._artifact_dir() or ".")
         for callback in callbacks:
             fname = getattr(callback, "fname", None)
             if isinstance(fname, (str, Path)):
                 (base / fname).expanduser().parent.mkdir(parents=True, exist_ok=True)
         return callbacks
-
-    def _live_model(self) -> torch.nn.Module:
-        """The built model as an ``nn.Module`` — a wrapper's backbone, or the module itself."""
-        model = flow(self.model) if isinstance(self.model, Fluid) else self.model
-        self.model = model
-        if isinstance(model, torch.nn.Module):
-            return model
-        raise TypeError(f"FastaiClassifier needs a torch nn.Module, got {type(model).__name__}.")
 
     # ---- the four entry points ---------------------------------------------- #
     @entrypoint("fit", role="trainer", primary=True)
@@ -434,7 +429,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
     def test(self) -> None:
         if self.test_set is None:
             raise ValueError("FastaiClassifier.test() requires a 'test_set'.")
-        loader = self._loader(self.test_set, shuffle=False)
+        loader = flow(self.test_loader, dataset=ensure_record_dataset(self.test_set))
         learner = self._build_learner(DataLoaders(loader, loader))
         values = learner.validate()
         self._computed_metrics = _named_values(learner, values)
@@ -449,14 +444,21 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         returns only the stacked predictions, and the sink contract needs each row paired with
         the metadata from the record it came from. One walk over the record loader keeps the two
         in step by construction.
+
+        Same ``test_loader`` slot as :meth:`test`, flowed with ``collate_fn=collate_records`` —
+        a runtime kwarg overrides the stored one, so this swaps the batch shape back to the
+        record dict without a second loader. The default collate is ``_to_tuple``, which has
+        already dropped the metadata the sink needs; every other knob the operator set on the
+        slot (workers, batch size, a sampler) still applies.
         """
         if self.test_set is None:
             raise ValueError("FastaiClassifier.predict() requires a 'test_set'.")
-        sink = flow(self.predictions_sink) if isinstance(self.predictions_sink, Fluid) else self.predictions_sink
-        model = self._live_model().eval()
+        sink = flow(self.predictions_sink)
+        model = self.model.eval()
         device = next(model.parameters()).device
+        records = flow(self.test_loader, dataset=ensure_record_dataset(self.test_set), collate_fn=collate_records)
         with torch.no_grad():
-            for batch in self._record_loader(self.test_set):
+            for batch in records:
                 logits = model(batch_tensor(batch, self.input_key, device))
                 if sink is not None:
                     self._write_predictions(logits, batch, cast(PredictionsSink, sink))
@@ -496,7 +498,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         return None
 
     def _live_trackers(self) -> List[Tracker]:
-        return [flow(t) if isinstance(t, Fluid) else t for t in (self.trackers or [])]
+        return [flow(t) for t in (self.trackers or [])]
 
     # ---- @outputs ------------------------------------------------------------ #
     @property
@@ -522,24 +524,6 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         return list(self._class_names or [])
 
 
-def _built(value: Any) -> Any:
-    """A deferred :class:`~confluid.fluid.Fluid` built; anything else verbatim."""
-    return flow(value) if isinstance(value, Fluid) else value
-
-
-def _as_torch_dataset(source: Any) -> "TorchDataset[Any]":
-    """``ensure_record_dataset``'s result, told to the type checker as a torch ``Dataset``.
-
-    ``DataLoader`` is duck-typed at RUN time — it needs ``__getitem__`` and ``__len__``, which a
-    map-style ``recordstream.Stream`` has — but its stubs demand the nominal
-    ``torch.utils.data.Dataset`` base, which a ``Stream`` deliberately does not inherit (that
-    would put torch in recordstream's core). The Lightning backend never hits this because it
-    defers loader construction through a ``LazyClass``; this backend builds the loader directly,
-    so the mismatch is stated here, once, instead of at both call sites.
-    """
-    return cast("TorchDataset[Any]", ensure_record_dataset(source))
-
-
 def _as_metric(value: FastaiMetric) -> Any:
     """A fastai metric from a callable or from its NAME in ``fastai.metrics``.
 
@@ -549,7 +533,7 @@ def _as_metric(value: FastaiMetric) -> Any:
     name is the only thing a YAML config can write, so this resolves it and says which names
     exist when it cannot.
     """
-    built = _built(value)
+    built = flow(value)
     if not isinstance(built, str):
         return built
     metric = getattr(fastai_metrics, built, None)
@@ -563,7 +547,7 @@ def _as_metric(value: FastaiMetric) -> Any:
 
 def _as_opt_func(value: FastaiOptimizer) -> Any:
     """A fastai optimizer function from a callable or its name (``"Adam"``, ``"SGD"``, …)."""
-    built = _built(value)
+    built = flow(value)
     if not isinstance(built, str):
         return built
     opt = getattr(fastai_optimizer, built, None)

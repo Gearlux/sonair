@@ -28,7 +28,7 @@ VERB_TASKS = {"train": "fit", "evaluate": "test", "predict": "predict"}
 #: The backends that actually train, restated here rather than imported blind — this list is
 #: the test's own claim about what sonair ships, so a backend silently disappearing from
 #: `cli.IMPLEMENTED` has to fail something.
-EXPECTED_IMPLEMENTED = ("lightning", "keras", "tensorflow", "fastai")
+EXPECTED_IMPLEMENTED = ("lightning", "keras", "tensorflow", "fastai", "huggingface", "jax", "mlx")
 
 
 def test_the_implemented_set_is_the_one_we_expect() -> None:
@@ -67,10 +67,16 @@ def test_implemented_verbs_take_a_promoted_config_and_a_runnable(backend: str, v
 @pytest.mark.parametrize("backend", IMPLEMENTED)
 def test_every_implemented_backend_names_a_real_registration_module(backend: str) -> None:
     """The loss/metric module each sub-app imports must exist — a typo would surface only at
-    run time, as an unresolvable `!class:` name several minutes into a session."""
+    run time, as an unresolvable `!class:` name several minutes into a session.
+
+    `None` is a legitimate answer, not a missing one: a backend whose engine computes its own
+    loss (huggingface) has nothing a config could wire, so there is no module to name.
+    """
     import importlib.util
 
     module = IMPLEMENTED[backend].registrations
+    if module is None:
+        return
     assert importlib.util.find_spec(module) is not None, f"{backend} names a missing module {module!r}"
 
 
@@ -213,10 +219,18 @@ def test_template_error_is_a_notimplementederror_too(backend: str) -> None:
 
 
 def test_template_exits_1_through_the_cli(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
-    """End-to-end: one clean `Error:` line, exit 1 — not an unhandled traceback."""
+    """End-to-end: one clean `Error:` line, exit 1 — not an unhandled traceback.
+
+    The backend is taken from `TEMPLATES` rather than named, so graduating one does not break
+    this test — and once the last template graduates it skips instead of failing, which is the
+    honest outcome for a test whose subject no longer exists.
+    """
     from liquifai.context import set_context
 
-    monkeypatch.setattr(sys, "argv", ["sonair", "jax", "train"])
+    if not TEMPLATES:
+        pytest.skip("every backend is implemented — there is no template left to fail")
+    template = next(iter(TEMPLATES))
+    monkeypatch.setattr(sys, "argv", ["sonair", template, "train"])
     set_context(None)  # type: ignore[arg-type]
 
     with pytest.raises(SystemExit) as ei:

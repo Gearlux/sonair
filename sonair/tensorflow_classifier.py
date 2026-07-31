@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
-from confluid import Fluid, Lazy, Mandatory, configurable, flow
+from confluid import Lazy, Mandatory, configurable, flow
 from loggair import get_logger
 from marainer.artifacts import save_class_names, write_metrics_sidecar
 from recordstream import LabelMap, PredictionsSink, RecordSource
@@ -58,7 +58,7 @@ from recordstream.runnable import entrypoint
 # `tests/test_tensorflow_classifier.py`. This import must also precede `sonair.keras_classifier`
 # (which reaches keras too); isort keeps that order, since `_tensorflow` < `keras_classifier`.
 from sonair._tensorflow import keras, keras_backend, tf
-from sonair.keras_classifier import ClassifierTask, KerasClassifier, KerasLoss, KerasMetric, KerasOptimizer, _built
+from sonair.keras_classifier import ClassifierTask, KerasClassifier, KerasLoss, KerasMetric, KerasOptimizer
 
 logger = get_logger(__name__)
 
@@ -213,15 +213,13 @@ class TensorFlowClassifier(KerasClassifier):
 
         The name is the parent's (``initialize()`` calls it) but the body is the divergence: a
         compiled model owns its own training step, which is precisely what this backend replaces.
-        The slots are flowed at USE through ``_built`` for the same reason the parent does it —
-        a nested ``!class:`` in a CONSTRUCTOR slot arrives as a deferred marker.
+        The slots are flowed at USE for the same reason the parent does it — a nested
+        ``!class:`` in a CONSTRUCTOR slot arrives as a deferred marker.
         """
         self._resolve_task_defaults()
-        if isinstance(self.model, Fluid) or hasattr(self.model, "solidify"):
-            self.model = flow(self.model, num_classes=self.num_classes)
-        self._network = getattr(self.model, "model", self.model)
+        self.model = flow(self.model, num_classes=self.num_classes)
         self._optimizer = _as_optimizer(self.optimizer)
-        self._loss_fn = _built(self.loss)
+        self._loss_fn = flow(self.loss)
         self._metric_objects = [_as_metric(m, multilabel=self.multilabel) for m in (self.metrics or [])]
 
     # ---- tf.data ------------------------------------------------------------- #
@@ -250,7 +248,7 @@ class TensorFlowClassifier(KerasClassifier):
         Built once and reused across epochs: a fresh ``@tf.function`` each epoch would retrace
         the whole graph every time, which is slower than the eager loop it replaced.
         """
-        network, optimizer, loss_fn, metrics = self._network, self._optimizer, self._loss_fn, self._metric_objects
+        network, optimizer, loss_fn, metrics = self.model, self._optimizer, self._loss_fn, self._metric_objects
 
         @tf.function(jit_compile=True if self.jit_compile else None)
         def train_step(x: Any, y: Any) -> Any:
@@ -267,7 +265,7 @@ class TensorFlowClassifier(KerasClassifier):
 
     def _eval_step_fn(self) -> Any:
         """The forward pass plus metric update — no tape, and ``training=False``."""
-        network, loss_fn, metrics = self._network, self._loss_fn, self._metric_objects
+        network, loss_fn, metrics = self.model, self._loss_fn, self._metric_objects
 
         @tf.function(jit_compile=True if self.jit_compile else None)
         def eval_step(x: Any, y: Any) -> Any:
@@ -280,7 +278,7 @@ class TensorFlowClassifier(KerasClassifier):
 
     def _predict_step_fn(self) -> Any:
         """Logits only — the graph half of :meth:`predict`."""
-        network = self._network
+        network = self.model
 
         @tf.function(jit_compile=True if self.jit_compile else None)
         def predict_step(x: Any) -> Any:
@@ -326,10 +324,10 @@ class TensorFlowClassifier(KerasClassifier):
         # `apply_gradients`, and doing that inside a `tf.function` creates variables during
         # tracing — legal on the first trace, an error on any retrace (a short final batch is
         # enough to trigger one).
-        self._optimizer.build(self._network.trainable_variables)
+        self._optimizer.build(self.model.trainable_variables)
         train_step, eval_step = self._train_step_fn(), self._eval_step_fn()
 
-        callbacks = keras.callbacks.CallbackList(self._callbacks(), add_history=True, model=self._network)
+        callbacks = keras.callbacks.CallbackList(self._callbacks(), add_history=True, model=self.model)
         callbacks.set_params({"epochs": self.max_epochs, "steps": len(sequence), "verbose": 0})
         callbacks.on_train_begin()
 
@@ -375,7 +373,7 @@ class TensorFlowClassifier(KerasClassifier):
         """
         if self.test_set is None:
             raise ValueError("TensorFlowClassifier.predict() requires a 'test_set'.")
-        sink = flow(self.predictions_sink) if isinstance(self.predictions_sink, Fluid) else self.predictions_sink
+        sink = flow(self.predictions_sink)
         predict_step = self._predict_step_fn()
         sequence = self._sequence(self.test_set, with_targets=False)
         for batch in sequence.batches():
@@ -394,13 +392,40 @@ class TensorFlowClassifier(KerasClassifier):
         ``keras.Model.export`` emits a ``tf.saved_model`` directory (serving signatures, frozen
         graph) and is only implemented on the TensorFlow engine, which is the concrete reason a
         run picks this backend over ``sonair keras``.
+
+        Two writers, because the model slot takes two kinds of thing. A `keras.Model` has
+        `export`, which builds the serving signature for you. A raw `tf.Module` — which is what
+        `sonair.tensorflow_model.TensorFlowConvNet` is — does NOT, so it goes through
+        `tf.saved_model.save` with an explicitly traced signature. Branching on the capability
+        rather than on the class keeps anything else callable working too.
         """
         if not self.export_dir:
             return
         path = Path(self.export_dir).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._network.export(str(path))
+        if hasattr(self.model, "export"):
+            self.model.export(str(path))
+        else:
+            # `tf.saved_model.save` needs a concrete function to serialize, and a bare
+            # `tf.Module.__call__` is untraced Python. Tracing it here at the batch shape the
+            # run actually used is what makes the export loadable by `TensorFlowModel`.
+            spec = tf.TensorSpec(shape=(None, *self._input_shape()), dtype=tf.float32)
+            call = tf.function(lambda x: self.model(x, training=False)).get_concrete_function(spec)
+            tf.saved_model.save(self.model, str(path), signatures={"serving_default": call})
         logger.info(f"Exported SavedModel to {path}")
+
+    def _input_shape(self) -> Tuple[int, ...]:
+        """The per-record input shape, for the export signature.
+
+        Read off the model when it declares one (every sonair model wrapper does), else off a
+        real batch — which always works but costs one dataset read.
+        """
+        declared = getattr(self.model, "input_shape", None)
+        if declared:
+            return tuple(declared)
+        source = self.test_set or self.val_set or self.train_set
+        sequence = self._sequence(source, with_targets=False)
+        return tuple(np.asarray(sequence[0][0]).shape[1:])
 
 
 def _output_signature(batch: Any) -> Tuple[Any, ...]:
@@ -415,12 +440,19 @@ def _output_signature(batch: Any) -> Tuple[Any, ...]:
 
 
 def _as_optimizer(value: Any) -> Any:
-    """A live ``keras.optimizers.Optimizer`` from an instance, a class, or a string alias."""
-    built = _built(value)
+    """A live ``keras.optimizers.Optimizer`` from an instance, a class, or a string alias.
+
+    The bare-CLASS branch is tested BEFORE ``flow()`` rather than after, which is the one place
+    in this backend where the order matters: ``flow()`` INSTANTIATES a bare type on the way past
+    — and for a confluid-registered class it does so through ``materialize()``, where sibling
+    config keys broadcast into the constructor. Classifying it first keeps a class meaning
+    exactly "call it with no arguments", which is what the annotation promises.
+    """
+    if isinstance(value, type) and issubclass(value, keras.optimizers.Optimizer):
+        return value()
+    built = flow(value)
     if isinstance(built, keras.optimizers.Optimizer):
         return built
-    if isinstance(built, type) and issubclass(built, keras.optimizers.Optimizer):
-        return built()
     return keras.optimizers.get(built)
 
 
@@ -433,12 +465,14 @@ def _as_metric(value: Any, multilabel: bool) -> Any:
     function, which scores 0.0 against a raw-logits head. Mapping it by ``multilabel`` here is
     the same choice ``compile()`` would have made, so a config that writes the alias behaves as
     its author expects instead of reporting a silent zero.
+
+    The bare-CLASS branch precedes ``flow()`` for the reason :func:`_as_optimizer` spells out.
     """
-    built = _built(value)
+    if isinstance(value, type) and issubclass(value, keras.metrics.Metric):
+        return value()
+    built = flow(value)
     if isinstance(built, keras.metrics.Metric):
         return built
-    if isinstance(built, type) and issubclass(built, keras.metrics.Metric):
-        return built()
     if isinstance(built, str) and built in ("accuracy", "acc"):
         return keras.metrics.BinaryAccuracy(threshold=0.0) if multilabel else keras.metrics.SparseCategoricalAccuracy()
     resolved = keras.metrics.get(built)

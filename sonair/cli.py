@@ -108,7 +108,11 @@ class Backend(NamedTuple):
     #: `tensorflow` shares the Keras set on purpose — in TF >= 2.16 `tf.keras` IS Keras 3,
     #: so a separate `tensorflow_classification.py` would register the same classes twice
     #: and make every bare `!class:SparseCategoricalCrossentropy` ambiguous for no gain.
-    registrations: str
+    #:
+    #: `None` means the backend has NOTHING to register, which is a real state rather than an
+    #: oversight: a `transformers` model computes its own loss from `config.problem_type`, so
+    #: there is no loss a config could wire (`docs/architecture.md` §5).
+    registrations: Optional[str] = None
 
 
 IMPLEMENTED: Dict[str, Backend] = {
@@ -128,6 +132,18 @@ IMPLEMENTED: Dict[str, Backend] = {
         "fastai — a Learner with one-cycle scheduling, over the same torch stack.",
         "sonair.fastai_classification",
     ),
+    "huggingface": Backend(
+        "Transformers `Trainer` + Accelerate — fine-tuning a Hub checkpoint.",
+        # No registrations: the model computes its own loss (see the Backend field note).
+    ),
+    "jax": Backend(
+        "JAX — a jitted optax loop over a Flax model (functional transforms).",
+        # No registrations: optax losses are plain FUNCTIONS, so a config names them.
+    ),
+    "mlx": Backend(
+        "MLX — training on Apple-silicon unified memory (macOS arm64 only).",
+        # No registrations: `mlx.nn.losses` are plain FUNCTIONS, so a config names them.
+    ),
 }
 
 #: Verb -> the ``task`` it forces. The verb wins over any ``task:`` in the YAML.
@@ -145,7 +161,8 @@ def _backend_command(verb: str, backend: str, spec: Backend) -> Callable[[Any], 
     """
 
     def command(runnable: Any) -> None:
-        _register_backend_classification(spec.registrations)
+        if spec.registrations is not None:
+            _register_backend_classification(spec.registrations)
         _dispatch(runnable, VERB_TASKS[verb])
 
     command.__name__ = f"{backend}_{verb}"
@@ -178,11 +195,7 @@ for _backend, _spec in IMPLEMENTED.items():
 # runnable, deleting its entry here, and adding it to IMPLEMENTED above.
 # --------------------------------------------------------------------------- #
 
-TEMPLATES = {
-    "jax": "JAX + Flax/NNX — functional transforms, jit/pmap scaling. TEMPLATE.",
-    "huggingface": "Transformers `Trainer` + Accelerate — the fine-tuning path. TEMPLATE.",
-    "mlx": "MLX — training on Apple-silicon unified memory. TEMPLATE.",
-}
+TEMPLATES: Dict[str, str] = {}
 
 #: Every backend verb, implemented or not — used to map a verb to its scope.
 BACKENDS = (*IMPLEMENTED, *TEMPLATES)

@@ -369,12 +369,55 @@ a config can WIRE. Concretely:
 |---|---|---|---|
 | `lightning` | `lightning_classifier.py` | `timm_model.py` | `torch_classification.py` |
 | `keras` | `keras_classifier.py` | `keras_model.py` | `keras_classification.py` |
-| `tensorflow` | `tensorflow_classifier.py` | *reuses `KerasModel`* | *reuses the Keras set* |
+| `tensorflow` | `tensorflow_classifier.py` | `tensorflow_model.py` † | *reuses the Keras set* |
 | `fastai` | `fastai_classifier.py` | *reuses `TimmModel`* | `fastai_classification.py` |
+| `huggingface` | `huggingface_classifier.py` | `huggingface_model.py` | *none — the model computes its own loss* |
+| `jax` | `jax_classifier.py` | `flax_model.py` | *none — optax ships functions, not classes* |
 
 fastai gets a loss module because its `*Flat` family is genuinely new wiring —
 but tagged `framework="torch"`, since a Lightning run consumes those losses just
 as well. It gets no model module because fastai *is* torch.
+
+### † The amendment: `tensorflow` DOES contribute a model module (2026-07-31)
+
+The reasoning above was right about what it examined and wrong about its scope.
+It said a `TensorFlowModel` would be `KerasModel` with the name changed, because
+`tf.keras.applications` *is* `keras.applications` — true, and it rules out a
+duplicate **zoo wrapper over keras.applications**. It does not rule out anything
+else, and `keras.applications` is not TensorFlow's only model source. Two things
+landed that duplicate nothing:
+
+- **`TensorFlowModel`** loads a **SavedModel** (`tf.saved_model.load`) — the
+  format Kaggle Models serves, where TF Hub redirected, and what any
+  `model.export()` writes. A different zoo, no new dependency. (`tensorflow-hub`
+  is deliberately unused: last release 2024-01-30.)
+- **`TensorFlowConvNet`** implements the shared conv spec in raw `tf.nn` ops on a
+  `tf.Module`, wrapping nothing at all.
+
+Both are tagged `framework="keras"`, which reads wrong and is deliberate: the
+axis names the API a class is **wired to** (§2), and `TensorFlowClassifier` — the
+only trainer that can consume them — declares `"keras"` itself. A `"tensorflow"`
+tag would describe the imports better and hide both classes from the one slot
+picker that should offer them.
+
+Two consequences the implementation had to handle, both measured rather than
+anticipated:
+
+- A `tf.Module` has no `keras.Model.export`, so `_export` branches on the
+  capability and falls back to `tf.saved_model.save` with an explicitly traced
+  signature.
+- `tf.saved_model.load` restores tracked DATA, not the Python class, so
+  `tf.Module.variables` — a computed property — is **gone** from the restored
+  object. A Keras export reports its variables; a module export reports none
+  while its children hold all of them. `_restored_trainable_variables` therefore
+  takes the declared list when there is one and otherwise walks the trackable
+  tree. Without that, every SavedModel this project exports would look
+  un-fine-tunable.
+
+**The rule this generalises.** A decision record's rationale is scoped to what it
+examined. When a new case arrives, check whether the *reasoning* covers it before
+citing the *conclusion* — "no `TensorFlowModel`" was a conclusion about zoo
+wrappers, and reading it as a ban on the module cost a plan revision.
 
 **Consequences.**
 
@@ -471,3 +514,89 @@ from recordstream.keras import keras, keras_backend        # noqa: E402
 replace `setdefault` with an assignment (it would silently override a deliberate
 choice), and do not drop the `initialize()` check because "the CLI already sets
 it" — the check is what makes the other two debuggable when they miss.
+
+## 7. A model wrapper subclasses its engine's model base
+
+*2026-07-31*
+
+**Context.** `KerasModel` wraps a `keras.applications` backbone plus a fresh
+head. It began as a plain class holding the built network in `self._model` and
+exposing it as a `model` property — so every call site that wanted to *drive*
+the network wrote:
+
+```python
+network = getattr(self.model, "model", self.model)
+network.compile(...)
+```
+
+That line appeared three times across two backends, and it is doing something
+subtle: a bare `keras.Model` has **no `.model` attribute** (measured), so the
+`getattr` fallback is spanning two incompatible shapes at every use. The
+asymmetry was the tell — the torch twin needs no such line, because `TimmModel`
+IS an `nn.Module` and a `LightningModule` can simply call it.
+
+Delegating the surface by hand (`def compile(self, **kw): self.model.compile(**kw)`,
+and the same for `fit` / `evaluate` / `predict` / `export` / `save`) was tried
+first. It works, but it re-declares in the wrapper an interface that inheritance
+gives for free, and every member added upstream is one the wrapper silently
+lacks.
+
+**Decision.** The wrapper subclasses its engine's model base, mirroring the torch
+side exactly: `TimmModel(nn.Module)` ⇒ `KerasModel(keras.Model)`. `compile`,
+`fit`, `evaluate`, `predict`, `export`, `save`, `save_weights` and
+`trainable_variables` are then inherited, and a classifier addresses whatever is
+wired into its `model` slot with no unwrapping step — the wrapper and a bare
+`keras.Model` are the same kind of thing.
+
+Two members remain hand-written, each for a measured reason:
+
+- **`build(input_shape)`** carries the lazy build. Keras forbids a layer from
+  adding sub-layers once built, so creating the network on the first `call()`
+  dies with *"You cannot add new elements of state … to a layer that is already
+  built"*. `build()` runs before that first call, which is what keeps a
+  directly-constructed, never-flowed instance usable. The normal path never
+  reaches it — `flow()` fires `solidify()` first, and the cache makes the second
+  trigger free.
+- **`output_shape`** is Functional-only; a subclassed model raises
+  `AttributeError` for it. The inner network IS functional, so it is one hop.
+
+**Consequences.**
+
+- The zero-arg / lazy-init mandate still holds: `KerasModel()` constructs, builds
+  nothing, and validates required config at build time.
+- `_compile()` now compiles the WIRED OBJECT, so its Keras-owned state
+  (`loss`, `_compile_metrics`) reads back off `self.model` directly rather than
+  off an inner network.
+- `trained_model` returns the wrapper. That is a fix, not a side effect: the
+  wrapper carries `num_classes`, which an evaluation run reads straight off its
+  model slot, so the output now docks into a downstream classifier — a bare
+  `keras.Model` never could.
+- The `getattr` had been doubling as a TYPE escape hatch (it returns `Any`), so
+  deleting it surfaced 14 mypy `union-attr` errors: `self.model: Lazy[Any]` is
+  `Union[Any, Fluid]`, and a method call through the `Fluid` arm is rejected. The
+  answer is not an accessor — one was written and thrown away — but the
+  annotation: the ATTRIBUTE carries the real type (`self.model: keras.Model`)
+  while the CONSTRUCTOR param keeps `Mandatory[Lazy[Any]]`, which is the only
+  place the marker is machine-read. Restating `Lazy` on the attribute bought
+  nothing and cost every direct call.
+
+**Example.**
+
+```python
+@configurable(task="classification", role="model", lazy=True, framework="keras")
+class KerasModel(keras.Model):
+    def build(self, input_shape=None):   # the ONE place a subclass may create state
+        self.solidify()
+        super().build(input_shape)
+
+    def call(self, x, training=False):   # the twin of TimmModel.forward
+        return self.model(x, training=training)
+
+# ...so the classifier just drives it, and a bare keras.Model works identically:
+self.model.compile(optimizer=..., loss=..., metrics=[...])
+```
+
+**What you may change.** Add a member only when inheritance genuinely cannot
+supply it, and say which measured behaviour forced it — the two above name
+theirs. Do not reintroduce `getattr(self.model, "model", self.model)`: if a call
+site seems to need it, the wrapper is missing a base class, not a fallback.

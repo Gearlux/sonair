@@ -7,6 +7,9 @@ a training framework arrives with the backend you select::
     pip install 'sonair[keras]'              # Keras 3 (runs on torch / tensorflow / jax)
     pip install 'sonair[tensorflow]'         # a native tf.data + GradientTape loop
     pip install 'sonair[fastai]'             # a fastai Learner over the same torch stack
+    pip install 'sonair[huggingface]'        # transformers Trainer, fine-tuning a Hub model
+    pip install 'sonair[jax]'                # a jitted optax loop over a Flax model
+    pip install 'sonair[mlx]'                # Apple-silicon unified memory (macOS arm64)
     pip install 'sonair[lightning,keras]'    # any combination
 
 Which is why every backend name below resolves LAZILY (PEP 562): importing ``sonair`` must not
@@ -24,10 +27,13 @@ __version__ = "0.2.0"
 #: attribute access. Keep in step with the extras in ``pyproject.toml``: a name here whose
 #: extra does not exist would advertise an install command that fails.
 #
-# Two backends deliberately contribute NO model wrapper: TensorFlow >= 2.16 exposes Keras 3 as
-# ``tf.keras``, so ``TensorFlowClassifier`` takes ``KerasModel``; fastai is torch, so
-# ``FastaiClassifier`` takes ``TimmModel``. A backend that adds no new wiring surface adds no
-# new name here (``docs/architecture.md`` §5).
+# fastai deliberately contributes NO model wrapper: it is torch, so ``FastaiClassifier`` takes
+# ``TimmModel``. A backend that adds no new wiring surface adds no new name here
+# (``docs/architecture.md`` §5).
+#
+# TensorFlow used to be in that sentence too, and the reasoning was narrower than it looked: a
+# zoo wrapper over ``tf.keras.applications`` WOULD be ``KerasModel`` renamed, but a SavedModel
+# loader and a raw-``tf.nn`` net duplicate nothing. Hence the two names below.
 _BACKEND_NAMES = {
     "LightningClassifier": ("sonair.lightning_classifier", "lightning"),
     "TimmModel": ("sonair.timm_model", "lightning"),
@@ -35,6 +41,15 @@ _BACKEND_NAMES = {
     "KerasModel": ("sonair.keras_model", "keras"),
     "TensorFlowClassifier": ("sonair.tensorflow_classifier", "tensorflow"),
     "FastaiClassifier": ("sonair.fastai_classifier", "fastai"),
+    "HuggingFaceClassifier": ("sonair.huggingface_classifier", "huggingface"),
+    "HuggingFaceModel": ("sonair.huggingface_model", "huggingface"),
+    "JaxClassifier": ("sonair.jax_classifier", "jax"),
+    "FlaxModel": ("sonair.flax_model", "jax"),
+    "KerasConvNet": ("sonair.keras_model", "keras"),
+    "TensorFlowModel": ("sonair.tensorflow_model", "tensorflow"),
+    "TensorFlowConvNet": ("sonair.tensorflow_model", "tensorflow"),
+    "MlxClassifier": ("sonair.mlx_classifier", "mlx"),
+    "MlxModel": ("sonair.mlx_model", "mlx"),
 }
 
 __all__ = [*_BACKEND_NAMES]

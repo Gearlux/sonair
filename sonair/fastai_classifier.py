@@ -66,6 +66,7 @@ from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
 from marainer.run_names import generate_run_name
 from marainer.tracking.base import Tracker
+from marainer.tracking.provenance import capture_log_file, log_run_context
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -410,6 +411,11 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         logger.info(f"sonair fastai training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("FastaiClassifier.fit() requires a 'train_set'.")
+        # Provenance through marainer's plain FUNCTIONS — `runnable=self` so the
+        # hyperparameters and the resolved config come from marainer's ONE derivation
+        # rather than a dict this backend transcribes for itself.
+        trackers = self._live_trackers()
+        manifest = log_run_context(trackers, runnable=self)
         learner = self._build_learner(self._dataloaders())
         if self.one_cycle:
             learner.fit_one_cycle(self.max_epochs, lr_max=self.learning_rate)
@@ -417,8 +423,12 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
             learner.fit(self.max_epochs, lr=self.learning_rate)
         self._computed_metrics = _recorded_metrics(learner)
         logger.info(f"Training complete: {self._computed_metrics}")
-        save_class_names(self._class_names, self._artifact_dir(), self._live_trackers())
+        save_class_names(self._class_names, self._artifact_dir(), trackers)
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
+        # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
+        # manifest exists: left unfinished it stays `running`, and marainer's atexit hook then
+        # calls a successful run `interrupted`.
+        capture_log_file(trackers, manifest=manifest, status="success")
 
     @entrypoint("evaluate", role="evaluator")
     def evaluate(self) -> None:

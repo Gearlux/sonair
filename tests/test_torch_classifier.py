@@ -25,6 +25,7 @@ pytest.importorskip("torch", reason="needs sonair[torch]")
 # `importorskip` above is what keeps the file collectable on an install without the extra.
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
+from marainer import CsvTracker  # noqa: E402
 from recordstream import Stream  # noqa: E402
 from recordstream.items import Image, Label  # noqa: E402
 
@@ -403,3 +404,50 @@ def test_the_run_dispatch_covers_every_task() -> None:
     from recordstream.runnable import runnable_entrypoints
 
     assert {"fit", "evaluate", "test", "predict"} <= set(runnable_entrypoints(TorchClassifier))
+
+
+# --------------------------------------------------------------------------- #
+# tracking: one derivation, shared with the Lightning backend
+# --------------------------------------------------------------------------- #
+
+
+def test_provenance_derives_the_hyperparameters_from_the_runnable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This backend must not hand-write a params dict.
+
+    It used to spell six keys by hand while the Lightning backend walked the object graph,
+    so the two gave different answers to "what were the hyperparameters?". Both now hand the
+    runnable to marainer, which owns the one derivation.
+    """
+    from marainer.tracking import provenance
+
+    seen: Dict[str, Any] = {}
+
+    def spy(trackers: Any, params: Any = None, **kwargs: Any) -> Any:
+        seen["params"] = params
+        seen["runnable"] = kwargs.get("runnable")
+        return None
+
+    monkeypatch.setattr(provenance, "log_run_context", spy)
+    trainer = _clf(max_epochs=7)
+    trainer._log_run_context([CsvTracker()])
+
+    assert seen["runnable"] is trainer  # the object, not a dict transcribed from it
+    # `device` is the one value that is NOT config — it is resolved at run time.
+    assert set(seen["params"]) == {"device"}
+
+
+def test_provenance_is_skipped_without_trackers() -> None:
+    assert _clf()._log_run_context([]) is None
+
+
+def test_fit_finishes_the_manifest(tmp_path: Path) -> None:
+    """A finished run must not be left at `running` for the atexit hook to call interrupted."""
+    import yaml
+
+    clf = _clf(train_set=_records(8), max_epochs=1)
+    # `trackers` is a post-construction slot, set the way confluid would.
+    clf.trackers = [CsvTracker(experiment_name="e", run_name="r", save_dir=str(tmp_path))]
+    clf.run()
+    manifest = yaml.safe_load((tmp_path / "e" / "r" / "manifest.yaml").read_text())
+    assert manifest["status"] == "success"
+    assert manifest["params"]  # derived from the runnable, not hand-written

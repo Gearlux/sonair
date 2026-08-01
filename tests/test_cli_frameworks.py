@@ -1,99 +1,103 @@
-"""The framework axis of the CLI — `sonair <backend> <verb>`.
+"""The framework axis of the CLI — `sonair <verb> cfg.yaml --framework <name>`.
 
-Pins three things:
+The backend is a dimension of the CONFIG that the CLI passes through, not a
+subcommand. These tests pin the seams that make that honest:
 
-1. Every backend is mounted with the same three verbs, so a template advertises
-   the roadmap instead of hiding it.
-2. An IMPLEMENTED backend's verb binds the config's ``runnable:`` key and forces
-   the verb's task (the verb wins over the YAML).
-3. A TEMPLATE backend's verb fails through liquifai's failure contract — one
-   clean message + exit 1, naming the work — not an unhandled crash.
+1. Three verbs, each binding the config's ``runnable:`` key and forcing the
+   verb's task (the verb wins over the YAML).
+2. ``--framework`` normalizes to the ``--scope framework=…`` liquifai reads, in
+   every spelling, so the flag means one thing whatever the config declares.
+3. The two things that must happen BEFORE the config is loaded — pinning
+   ``KERAS_BACKEND`` and importing a backend's loss/metric registrations — read
+   the framework from ``argv``, which is the only source available that early.
+4. The shipped example resolves to a complete runnable under EVERY framework it
+   declares. That is the regression pin for the bug this shape was built to
+   remove: a scope block swapping ``runnable:`` used to take the ``model:``
+   nested under it, and ``--framework torch`` died with
+   ``TorchClassifier.__init__() missing 1 required positional argument: 'model'``.
 """
 
 import inspect
-import sys
+import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Set
 
+import confluid
 import pytest
 from confluid import configurable
 
 from sonair import cli
-from sonair.cli import IMPLEMENTED, TEMPLATES, BackendNotImplementedError
+from sonair.cli import FRAMEWORKS, VERB_TASKS, Framework
 
 VERBS = ("train", "evaluate", "predict")
-VERB_TASKS = {"train": "fit", "evaluate": "test", "predict": "predict"}
 
-#: The backends that actually train, restated here rather than imported blind — this list is
-#: the test's own claim about what sonair ships, so a backend silently disappearing from
-#: `cli.IMPLEMENTED` has to fail something.
-EXPECTED_IMPLEMENTED = ("lightning", "torch", "keras", "tensorflow", "fastai", "huggingface", "jax", "mlx")
+#: The backends sonair ships, restated here rather than imported blind — this list is the
+#: test's own claim, so one silently disappearing from `cli.FRAMEWORKS` has to fail something.
+EXPECTED_FRAMEWORKS = ("lightning", "torch", "keras", "tensorflow", "fastai", "huggingface", "jax", "mlx")
 
-
-def test_the_implemented_set_is_the_one_we_expect() -> None:
-    assert tuple(IMPLEMENTED) == EXPECTED_IMPLEMENTED
+EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "train_efficientvit_b0_mnist.yaml"
 
 
-def test_every_backend_is_mounted() -> None:
-    assert set(cli.app._sub_apps) == {*IMPLEMENTED, *TEMPLATES}
+def test_the_framework_set_is_the_one_we_expect() -> None:
+    assert tuple(FRAMEWORKS) == EXPECTED_FRAMEWORKS
 
 
-def test_an_implemented_backend_is_not_also_a_template() -> None:
-    """A graduated backend must be removed from TEMPLATES, or its verbs would still raise."""
-    assert not set(IMPLEMENTED) & set(TEMPLATES)
+def test_the_verbs_are_the_whole_command_surface() -> None:
+    """Three verbs plus the listing — the backend is a flag, not 24 subcommands."""
+    assert set(cli.app._commands) == {*VERBS, "frameworks"}
+    assert not cli.app._sub_apps, "a backend must not reappear as a sub-app"
 
 
-@pytest.mark.parametrize("backend", [*IMPLEMENTED, *TEMPLATES])
-def test_every_backend_exposes_the_same_verbs(backend: str) -> None:
-    """Templates advertise train/evaluate/predict too — the roadmap is visible."""
-    assert set(cli.app._sub_apps[backend]._commands) == set(VERBS)
-
-
-@pytest.mark.parametrize("backend", IMPLEMENTED)
 @pytest.mark.parametrize("verb", VERBS)
-def test_implemented_verbs_take_a_promoted_config_and_a_runnable(backend: str, verb: str) -> None:
+def test_every_verb_takes_a_promoted_config_and_a_runnable(verb: str) -> None:
     """`@script_command` gives config promotion; the param NAME drives liquifai DI.
 
-    The handlers are built by a factory (four backends x three verbs), and the one thing a
-    factory can get wrong is the signature — liquifai reads it, so a smuggled loop variable
-    would surface as a `--_backend` flag in help and TAB completion.
+    The handlers are built by a factory, and the one thing a factory can get wrong is the
+    signature — liquifai reads it, so a smuggled loop variable would surface as a `--_verb`
+    flag in help and TAB completion.
     """
-    sub = cli.app._sub_apps[backend]
-    assert verb in sub._script_cmds
-    assert list(inspect.signature(sub._commands[verb]).parameters) == ["runnable"]
+    assert verb in cli.app._script_cmds
+    assert list(inspect.signature(cli.app._commands[verb]).parameters) == ["runnable"]
 
 
-@pytest.mark.parametrize("backend", IMPLEMENTED)
-def test_every_implemented_backend_names_a_real_registration_module(backend: str) -> None:
-    """The loss/metric module each sub-app imports must exist — a typo would surface only at
-    run time, as an unresolvable `!class:` name several minutes into a session.
+def test_the_frameworks_listing_names_every_backend(capsys: Any) -> None:
+    """`sonair frameworks` replaces what the eight sub-apps used to advertise in --help."""
+    cli.app._commands["frameworks"]()
+    out = capsys.readouterr().out
+    for name, spec in FRAMEWORKS.items():
+        assert name in out
+        assert spec.description in out
+
+
+@pytest.mark.parametrize("framework", FRAMEWORKS)
+def test_every_framework_names_a_real_registration_module(framework: str) -> None:
+    """The loss/metric module must exist — a typo would surface only at run time, as an
+    unresolvable `!class:` name several minutes into a session.
 
     `None` is a legitimate answer, not a missing one: a backend whose engine computes its own
     loss (huggingface) has nothing a config could wire, so there is no module to name.
     """
     import importlib.util
 
-    module = IMPLEMENTED[backend].registrations
+    module = FRAMEWORKS[framework].registrations
     if module is None:
         return
-    assert importlib.util.find_spec(module) is not None, f"{backend} names a missing module {module!r}"
+    assert importlib.util.find_spec(module) is not None, f"{framework} names a missing module {module!r}"
 
 
 def test_tensorflow_shares_the_keras_registrations() -> None:
     """In TF >= 2.16 `tf.keras` IS Keras 3, so a separate `tensorflow_classification.py` would
     register the same classes under a second framework tag — making every bare
     `!class:SparseCategoricalCrossentropy` ambiguous for no gain."""
-    assert IMPLEMENTED["tensorflow"].registrations == IMPLEMENTED["keras"].registrations
+    assert FRAMEWORKS["tensorflow"].registrations == FRAMEWORKS["keras"].registrations
 
 
-@pytest.mark.parametrize("backend", TEMPLATES)
-@pytest.mark.parametrize("verb", VERBS)
-def test_template_verbs_take_no_config(backend: str, verb: str) -> None:
-    """A template must fail before liquifai resolves a config for a missing class."""
-    sub = cli.app._sub_apps[backend]
-    assert verb not in sub._script_cmds
-    assert list(inspect.signature(sub._commands[verb]).parameters) == []
+def test_every_framework_names_a_declared_pip_extra() -> None:
+    """`sonair frameworks` reads as an install menu, so each name must be installable."""
+    extras = tomllib.loads((EXAMPLE.parent.parent / "pyproject.toml").read_text())["project"]["optional-dependencies"]
+    for framework in FRAMEWORKS:
+        assert framework in extras, f"--framework {framework} has no matching `sonair[{framework}]` extra"
 
 
 # ---------------------------------------------------------------------------
@@ -110,16 +114,10 @@ class _FakeRunnable:
         self.ran = True
 
 
-@pytest.mark.parametrize("backend", IMPLEMENTED)
 @pytest.mark.parametrize("verb,task", sorted(VERB_TASKS.items()))
-def test_verb_overrides_the_configured_task(backend: str, verb: str, task: str) -> None:
-    if backend in ("tensorflow", "fastai"):
-        pytest.importorskip(
-            {"tensorflow": "tensorflow", "fastai": "fastai"}[backend],
-            reason=f"the {backend} sub-app imports its loss registrations",
-        )
+def test_verb_overrides_the_configured_task(verb: str, task: str) -> None:
     runnable = _FakeRunnable(task="something-else")
-    cli.app._sub_apps[backend]._commands[verb](runnable=runnable)
+    cli.app._commands[verb](runnable=runnable)
     assert runnable.task == task, "the verb must win over the YAML's task"
     assert runnable.ran
 
@@ -147,7 +145,6 @@ def test_dispatch_builds_with_the_flat_configs_top_level_keys(monkeypatch: pytes
     A bare ``flow()`` leaves ``train_set`` at ``None`` and ``max_epochs`` at the
     constructor default, SILENTLY, and the run proceeds looking configured.
     """
-    import confluid
     from liquifai.context import LiquifyContext, get_context, set_context
 
     text = (
@@ -191,174 +188,200 @@ def test_dispatch_uses_the_shared_materialize_helper(monkeypatch: pytest.MonkeyP
 
 
 # ---------------------------------------------------------------------------
-# Templates fail informatively
+# `--framework` is the scope flag, spelled ergonomically
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("backend", TEMPLATES)
-def test_template_verb_raises_with_instructions(backend: str) -> None:
-    with pytest.raises(BackendNotImplementedError) as ei:
-        cli.app._sub_apps[backend]._commands["train"]()
-
-    message = str(ei.value)
-    assert "not implemented yet" in message
-    assert f"sonair/{backend}_classifier.py" in message  # the file to create
-    assert "lightning_classifier.py" in message  # the reference to copy
-    assert "sonair/cli.py" in message  # where to replace the template
-    # The install hint is raised as PLAIN text — liquifai >= 0.1.1 escapes it in its own
-    # failure renderer. Escaping here too would print the literal backslash.
-    assert f"pip install 'sonair[{backend}]'" in message
-    assert "\\[" not in message, "double-escaped: liquifai owns the markup escaping now"
+@pytest.mark.parametrize("flag", [["--framework", "keras"], ["--framework=keras"]])
+def test_the_framework_flag_normalizes_to_a_scope(flag: List[str]) -> None:
+    """liquifai binds `--KEY VAL` only for dimensions the config DECLARES; against a config
+    with no `!scope:framework=…` block a bare `--framework keras` would be read as an
+    override instead. Rewriting makes the flag mean one thing either way."""
+    argv = ["sonair", "train", "cfg.yaml", *flag]
+    cli._normalize_framework_flag(argv)
+    assert argv == ["sonair", "train", "cfg.yaml", "--scope", "framework=keras"]
 
 
-@pytest.mark.parametrize("backend", TEMPLATES)
-def test_template_error_is_a_notimplementederror_too(backend: str) -> None:
-    """Dual inheritance: liquifai renders it cleanly, `except NotImplementedError` still catches."""
-    with pytest.raises(NotImplementedError):
-        cli.app._sub_apps[backend]._commands["predict"]()
+@pytest.mark.parametrize(
+    "explicit",
+    [["--scope", "framework=keras"], ["--scope=framework=keras"], ["-s", "framework=keras"]],
+)
+def test_an_explicit_scope_spelling_is_left_alone(explicit: List[str]) -> None:
+    argv = ["sonair", "train", "cfg.yaml", *explicit]
+    before = list(argv)
+    cli._normalize_framework_flag(argv)
+    assert argv == before
 
 
-def test_template_exits_1_through_the_cli(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
-    """End-to-end: one clean `Error:` line, exit 1 — not an unhandled traceback.
-
-    The backend is taken from `TEMPLATES` rather than named, so graduating one does not break
-    this test — and once the last template graduates it skips instead of failing, which is the
-    honest outcome for a test whose subject no longer exists.
-    """
-    from liquifai.context import set_context
-
-    if not TEMPLATES:
-        pytest.skip("every backend is implemented — there is no template left to fail")
-    template = next(iter(TEMPLATES))
-    monkeypatch.setattr(sys, "argv", ["sonair", template, "train"])
-    set_context(None)  # type: ignore[arg-type]
-
-    with pytest.raises(SystemExit) as ei:
-        cli.app.run()
-
-    assert ei.value.code == 1
-    out = capsys.readouterr().out
-    assert "Error:" in out
-    assert "not implemented yet" in out
+def test_argv_without_a_framework_is_untouched() -> None:
+    argv = ["sonair", "train", "cfg.yaml", "--max_epochs", "3"]
+    before = list(argv)
+    cli._normalize_framework_flag(argv)
+    assert argv == before
 
 
-def test_every_template_names_a_declared_pip_extra() -> None:
-    """The install hint must name a real extra, or it lies."""
-    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
-    extras = tomllib.loads(pyproject.read_text())["project"]["optional-dependencies"]
-    for backend in TEMPLATES:
-        assert backend in extras, f"{backend} hint says `sonair[{backend}]` but pyproject has no such extra"
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        ["--framework", "keras"],
+        ["--framework=keras"],
+        ["--scope", "framework=keras"],
+        ["--scope=framework=keras"],
+        ["-s", "framework=keras"],
+        ["-s=framework=keras"],
+    ],
+)
+def test_the_requested_framework_is_read_from_every_spelling(spelling: List[str]) -> None:
+    """Both pre-load steps read argv, so every spelling a user may type must be seen."""
+    assert cli._requested_framework(["sonair", "train", "cfg.yaml", *spelling]) == "keras"
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_no_framework_flag_reads_as_none() -> None:
+    assert cli._requested_framework(["sonair", "train", "cfg.yaml"]) is None
+    assert cli._requested_framework(["sonair", "--help"]) is None
 
 
 # ---------------------------------------------------------------------------
-# The backend verb activates the matching `framework=<name>` scope
+# The two pre-load steps
 # ---------------------------------------------------------------------------
-# One config carries every backend: shared keys at the top level (also the
-# default backend) and a `!scope:framework=<name>` block per alternative. The
-# verb picks the scope so the backend is never named twice.
 
 
-@pytest.mark.parametrize("backend", [*IMPLEMENTED, *TEMPLATES])
-def test_verb_injects_its_framework_scope(backend: str) -> None:
-    argv = ["sonair", backend, "train", "cfg.yaml"]
-    cli._inject_framework_scope(argv)
-    assert argv[-2:] == ["--scope", f"framework={backend}"]
-
-
-def test_no_backend_verb_injects_nothing() -> None:
-    """`sonair --help` and unknown tokens must not gain a scope."""
-    argv = ["sonair", "--help"]
-    cli._inject_framework_scope(argv)
-    assert argv == ["sonair", "--help"]
-
-
-@pytest.mark.parametrize("argv,expected", [(["sonair", "tensorflow", "train", "c.yaml"], "tensorflow")])
-def test_the_tensorflow_verb_pins_keras_backend_before_anything_imports_keras(
-    monkeypatch: pytest.MonkeyPatch, argv: list, expected: str
-) -> None:
+def test_tensorflow_pins_keras_backend_before_anything_imports_keras(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keras reads KERAS_BACKEND once, at import time, and `recordstream.keras` defaults it to
     the first backend INSTALLED — torch, on a machine that also has sonair[lightning]. The
     handler is too late to fix that: liquifai resolves the config first, and a
     `!class:sonair.TensorFlowClassifier` tag imports keras during that resolution."""
     monkeypatch.delenv("KERAS_BACKEND", raising=False)
-    cli._pin_keras_backend(cli._selected_backend(argv))
-    import os
+    cli._pin_keras_backend(cli._requested_framework(["sonair", "train", "c.yaml", "--framework", "tensorflow"]))
 
-    assert os.environ.get("KERAS_BACKEND") == expected
+    assert os.environ.get("KERAS_BACKEND") == "tensorflow"
 
 
 def test_an_explicit_keras_backend_is_never_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
     """`setdefault`, so a deliberate choice survives — `initialize()` then reports the mismatch."""
-    import os
-
     monkeypatch.setenv("KERAS_BACKEND", "jax")
     cli._pin_keras_backend("tensorflow")
 
     assert os.environ["KERAS_BACKEND"] == "jax"
 
 
-@pytest.mark.parametrize("backend", [b for b in ("lightning", "keras", "fastai", "jax") if b])
-def test_no_other_backend_touches_keras_backend(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
-    import os
-
+@pytest.mark.parametrize("framework", ["lightning", "torch", "keras", "fastai", "jax", "mlx", None])
+def test_no_other_framework_touches_keras_backend(monkeypatch: pytest.MonkeyPatch, framework: Any) -> None:
     monkeypatch.delenv("KERAS_BACKEND", raising=False)
-    cli._pin_keras_backend(backend)
+    cli._pin_keras_backend(framework)
 
     assert "KERAS_BACKEND" not in os.environ
 
 
-@pytest.mark.parametrize(
-    "explicit",
-    [
-        ["--scope", "framework=keras"],
-        ["--scope=framework=keras"],
-        ["-s", "framework=keras"],
-        ["--framework", "keras"],
-        ["--framework=keras"],
-    ],
-)
-def test_an_explicit_framework_choice_wins(explicit: list) -> None:
-    """Never override what the user typed, even if the verb says otherwise."""
-    argv = ["sonair", "lightning", "train", "cfg.yaml", *explicit]
-    before = list(argv)
-    cli._inject_framework_scope(argv)
-    assert argv == before
+def test_registration_imports_the_frameworks_own_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+
+    seen: List[str] = []
+    monkeypatch.setattr(importlib, "import_module", lambda name: seen.append(name))
+    cli._register_classification("keras")
+
+    assert seen == ["sonair.keras_classification"]
 
 
-def test_shipped_example_separates_shared_from_framework_specific_keys() -> None:
-    """The example is one config for every backend: shared top level + scoped overrides.
+@pytest.mark.parametrize("framework", [None, "huggingface", "not-a-framework"])
+def test_registration_imports_nothing_when_there_is_nothing_to_import(
+    monkeypatch: pytest.MonkeyPatch, framework: Any
+) -> None:
+    """Three real states, none an error: no flag (the engine is unnamed), a backend whose
+    model computes its own loss, and a name that is not a backend at all."""
+    import importlib
 
-    Every alternative backend is still commented out (their runnable classes do
-    not exist), so the file declares NO `framework` dimension yet. This pins the
-    half that is real today: the default backend is complete on its own, and the
-    engine-agnostic keys sit at the top level where a scope block never has to
-    repeat them.
+    seen: List[str] = []
+    monkeypatch.setattr(importlib, "import_module", lambda name: seen.append(name))
+    cli._register_classification(framework)
+
+    assert seen == []
+
+
+def test_a_missing_backend_is_skipped_rather_than_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A partial install is normal; its absent registrations are the correct outcome."""
+    import importlib
+
+    def _boom(name: str) -> None:
+        raise ImportError(f"No module named {name!r}")
+
+    monkeypatch.setattr(importlib, "import_module", _boom)
+    cli._register_classification("keras")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# The shipped example resolves under EVERY framework it declares
+# ---------------------------------------------------------------------------
+
+
+def _declared_frameworks() -> Set[str]:
+    return confluid.discover_dimension_values(confluid.load_config(EXAMPLE)).get("framework", set())
+
+
+def test_the_example_declares_its_frameworks_as_scope_values() -> None:
+    """Including the DEFAULT one. The top level is the lightning backend, but
+    `--framework lightning` must still be a declared, checkable value — confluid
+    rejects an activation that matches no block, so an undeclared default would
+    make naming it explicitly an error."""
+    declared = _declared_frameworks()
+    assert "lightning" in declared, "the default backend must be nameable, not only implicit"
+    assert declared <= set(FRAMEWORKS), f"the config declares a backend the CLI does not know: {declared}"
+
+
+def test_every_declared_framework_resolves_to_a_complete_runnable() -> None:
+    """The regression pin. A framework block swaps `runnable:`, and a key NESTED under
+    `runnable:` dies with it — which is exactly how `model:` used to vanish for the
+    torch and fastai backends while their comments claimed it was inherited.
+
+    Config-level on purpose: no framework has to be installed for this to run, so it
+    fails on the machine that introduces the mistake rather than only where the extra
+    happens to be present.
     """
-    import confluid
+    for framework in sorted(_declared_frameworks()):
+        document = confluid.load(confluid.load_config(EXAMPLE), flow=False, scopes=[f"framework={framework}"])
+        assert isinstance(document, dict)
+        runnable = document.get("runnable")
+        assert runnable is not None, f"--framework {framework}: no runnable"
+        model = runnable.kwargs.get("model") if hasattr(runnable, "kwargs") else None
+        assert model is not None or document.get("model") is not None, (
+            f"--framework {framework}: no model reachable — a block swapped `runnable:` and took "
+            f"a nested `model:` with it. Keep every framework-specific key a top-level sibling."
+        )
 
-    path = Path(__file__).resolve().parent.parent / "examples" / "train_efficientvit_b0_mnist.yaml"
-    raw = confluid.load_config(path)
 
-    default = confluid.load(raw, flow=False)
+def test_the_example_keeps_the_engine_agnostic_keys_shared() -> None:
+    """One config for every backend: shared top level + scoped overrides."""
+    default = confluid.load(confluid.load_config(EXAMPLE), flow=False)
+    assert isinstance(default, dict)
     assert "runnable" in default, "no scope -> the default backend must still be complete"
-    for shared in ("train_set", "val_set", "batch_size", "max_epochs", "experiment_name"):
+    for shared in ("train_set", "val_set", "batch_size", "max_epochs", "experiment_name", "preprocess"):
         assert shared in default, f"{shared} must be shared, not framework-specific"
 
 
-def test_injected_scope_is_inert_before_any_alternative_exists() -> None:
-    """`sonair lightning train` injects `framework=lightning` unconditionally.
+def test_an_undeclared_framework_is_rejected_with_the_real_values() -> None:
+    """The check the backend verb could never do — it named a backend nothing compared
+    against the config, so a mismatch trained the default and said nothing."""
+    with pytest.raises(confluid.ScopeError) as ei:
+        confluid.load(confluid.load_config(EXAMPLE), flow=False, scopes=["framework=kears"])
 
-    While the alternatives are comments the config references no such scope, so
-    the injected value must be an inert no-op rather than an error or a dropped key.
-    """
-    import confluid
+    assert "keras" in str(ei.value), "the error must list the backends the config DOES declare"
 
-    path = Path(__file__).resolve().parent.parent / "examples" / "train_efficientvit_b0_mnist.yaml"
-    raw = confluid.load_config(path)
-    assert (
-        confluid.load(raw, flow=False, scopes=["framework=lightning"]).keys() == confluid.load(raw, flow=False).keys()
-    )
+
+def test_framework_is_a_two_field_record_of_data() -> None:
+    """No per-backend BEHAVIOUR in the table: `_pin_keras_backend` would be a third
+    column that is None seven times out of eight, which is what keeps it in main()."""
+    assert Framework._fields == ("description", "registrations")
+    assert all(isinstance(spec, Framework) for spec in FRAMEWORKS.values())
+
+
+def test_the_frameworks_table_carries_no_duplicate_descriptions() -> None:
+    """`sonair frameworks` is the discovery surface — two backends reading alike is a
+    copy-paste that leaves one of them undescribed."""
+    seen: Dict[str, str] = {}
+    for name, spec in FRAMEWORKS.items():
+        assert spec.description not in seen, f"{name} repeats {seen[spec.description]}'s description"
+        seen[spec.description] = name
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -336,7 +336,7 @@ def test_it_registers_no_loss_module() -> None:
     """optax losses are functions, so a config NAMES them — there is nothing to register."""
     import importlib.util
 
-    from sonair.cli import IMPLEMENTED
+    from sonair.cli import FRAMEWORKS
 
-    assert IMPLEMENTED["jax"].registrations is None
+    assert FRAMEWORKS["jax"].registrations is None
     assert importlib.util.find_spec("sonair.jax_classification") is None

@@ -97,7 +97,7 @@ Typical wiring (YAML) — a single-label run::
           - !class:keras.metrics.Precision { thresholds: 0.0 }
           - !class:keras.metrics.AUC { from_logits: true, multi_label: true, num_labels: 10 }
 
-Verified end to end with ``sonair keras train`` (MNIST, the first block above): the loss
+Verified end to end with ``sonair train --framework keras`` (MNIST, the first block above): the loss
 descends and both metrics report.
 """
 

@@ -39,7 +39,7 @@ Minimal flat YAML — the Lightning block with one key changed::
     batch_size: 32
     max_epochs: 3
 
-Run it with ``sonair torch train cfg.yaml``.
+Run it with ``sonair train cfg.yaml --framework torch``.
 """
 
 import inspect

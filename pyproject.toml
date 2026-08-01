@@ -218,7 +218,7 @@ sonair-fastai-classification = "sonair.fastai_classification"
 # here would install three frameworks nothing can run yet.
 #
 # Declaring a name here only puts it on the MENU — what gets installed is the separate
-# selection in `frameworks.toml` (`aisland framework set …`), so listing a name costs
+# selection in the workspace `config.toml` (`aisland framework set …`), so listing a name costs
 # nothing until someone selects it.
 #
 # NO protobuf conflict, contrary to what this comment claimed until 2026-07-30. A clean

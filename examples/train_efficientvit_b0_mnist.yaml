@@ -115,6 +115,8 @@ runnable: !class:sonair.LightningClassifier
   #   input_shape: [224, 224, 3]     # (H, W, C) in every implementation — the KNOB is
   #                                  # channels-last even though torch's TENSOR is NCHW,
   #                                  # so this one line is identical in all five blocks.
+  convnet: !scope:model=convnet
+    model: !lazy:sonair.convnet.torch_convnet.TorchConvNet
 
 
 # Broadcasts into the classifier's ctor, which bakes it into its own

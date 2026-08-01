@@ -400,6 +400,10 @@ class MlxClassifier(ProgressReporting):
             train_seq.on_epoch_end()
             for callback in self.callbacks:
                 flow(callback)(epoch, logs)
+            # Trackers are the other per-epoch consumer. A `fit()` forwards its logs to every
+            # attached logger; a hand-written loop reaches them the same way it reaches callbacks.
+            for tracker in trackers:
+                tracker.log_metrics(logs, step=epoch)
             logger.info(f"epoch {epoch + 1}/{self.max_epochs}: " + ", ".join(f"{k}={v:.4f}" for k, v in logs.items()))
 
         self._computed_metrics = logs

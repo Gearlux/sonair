@@ -120,3 +120,23 @@ def test_the_backend_list_covers_every_runnable_module() -> None:
         if "class ClassifierTask" not in path.read_text()  # exclude non-runnable helpers
     }
     assert on_disk == set(BACKENDS), f"unlisted backend module(s): {on_disk ^ set(BACKENDS)}"
+
+
+@pytest.mark.parametrize("stem", BACKENDS)
+def test_every_backend_forwards_metrics_to_trackers(stem: str) -> None:
+    """Provenance without curves is half a record — a wired tracker must see the metrics.
+
+    Four of the eight recorded the config and never called `log_metrics`, so an MLflow run
+    showed the hyperparameters and an empty chart. The three routes are all legitimate: the
+    loop calls `log_metrics` itself, a marainer callback forwards `on_epoch_end`, or the
+    framework's own history is replayed after the fit.
+    """
+    source = module_source(stem)
+    names = called_names(source)
+    forwards = "log_metrics" in names
+    via_callback = bool(names & {"TrackingCallback", "keras_tracking_callback"})
+    replays = bool(names & {"_log_recorded_epochs", "_log_trainer_history"})
+    assert forwards or via_callback or replays, (
+        f"{stem} never forwards metrics to its trackers — a wired backend would record the "
+        "config and draw an empty curve."
+    )

@@ -426,6 +426,7 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         self._computed_metrics = {k: float(v) for k, v in result.metrics.items() if isinstance(v, (int, float))}
         if self.val_set is not None:
             self._computed_metrics.update({k: float(v) for k, v in trainer.evaluate().items() if _is_number(v)})
+        _log_trainer_history(trainer, trackers)
         logger.info(f"Training complete: {self._computed_metrics}")
         save_class_names(self._class_names, self._artifact_dir(), trackers)
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
@@ -526,6 +527,30 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _log_trainer_history(trainer: Any, trackers: Sequence[Tracker]) -> None:
+    """Replay ``Trainer``'s own log history onto the trackers.
+
+    ``transformers.Trainer`` owns the loop, so there is no epoch boundary here to hook — but
+    it records every log entry in ``state.log_history``, which is exactly what its own MLflow
+    and W&B integrations consume. Replaying it after the fit gives the same curves without
+    setting ``report_to``, which would silently start reporting to every tracker library that
+    happens to be importable (this workspace has several).
+
+    ``step`` is the ENTRY's global optimizer step, not the list index: HF logs training and
+    evaluation entries at different cadences, so indexing would interleave two series onto one
+    misleading axis.
+    """
+    if not trackers:
+        return
+    for entry in getattr(getattr(trainer, "state", None), "log_history", []) or []:
+        step = entry.get("step")
+        metrics = {key: float(value) for key, value in entry.items() if key != "step" and _is_number(value)}
+        if not metrics:
+            continue
+        for tracker in trackers:
+            tracker.log_metrics(metrics, step=int(step) if _is_number(step) else None)
 
 
 def _as_metric(value: HuggingFaceMetric) -> Callable[[np.ndarray, np.ndarray], float]:

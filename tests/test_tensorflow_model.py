@@ -1,11 +1,12 @@
 # mypy: disable-error-code="attr-defined"
-"""The TensorFlow-native models: the SavedModel zoo wrapper and the raw-TF conv spec.
+"""`TensorFlowModel` — the SavedModel zoo wrapper.
 
 The claim worth pinning here is narrow and specific. `docs/architecture.md` §5 said the
 TensorFlow backend contributes no model module because a `TensorFlowModel` would be
-`KerasModel` renamed — true of a zoo wrapper over `keras.applications`, and false of these two.
-So these tests assert what makes them NOT duplicates: a raw-`tf.nn` implementation of the
-shared spec, and a loader for a genuinely different artifact format.
+`KerasModel` renamed — true of a zoo wrapper over `keras.applications`, and false of this one:
+it loads a genuinely different artifact format. The other half of that amendment — the raw-
+`tf.nn` implementation of the shared conv spec — is `tests/test_tensorflow_convnet.py`, and
+this file borrows that class only to produce a SavedModel to load back.
 
 Needs a Keras bound to the TensorFlow engine. A full `pytest` run binds torch first
 (alphabetically), so most of this file skips there and CI runs it as its own invocation:
@@ -19,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from sonair.convnet_spec import trainable_parameter_count
+from sonair.convnet.spec import trainable_parameter_count
 
 INPUT = (16, 16, 3)
 NUM_CLASSES = 4
@@ -61,96 +62,10 @@ def test_the_module_imports_tf_through_the_pinning_shim() -> None:
     assert "\nimport tensorflow" not in source, "must not import tensorflow directly"
 
 
-def test_both_classes_are_exported() -> None:
+def test_the_class_is_exported() -> None:
     source = (Path(__file__).resolve().parents[1] / "sonair" / "tensorflow_model.py").read_text()
 
-    assert '__all__ = ["TensorFlowConvNet", "TensorFlowModel"]' in source
-
-
-def test_the_classifier_branches_on_the_export_capability() -> None:
-    """A `tf.Module` has no `keras.Model.export`, so the classifier must not call it blindly."""
-    source = (Path(__file__).resolve().parents[1] / "sonair" / "tensorflow_classifier.py").read_text()
-
-    assert 'hasattr(self.model, "export")' in source
-    assert "tf.saved_model.save" in source
-
-
-# --------------------------------------------------------------------------- #
-# TensorFlowConvNet — the shared spec in raw tf.nn
-# --------------------------------------------------------------------------- #
-
-
-@requires_tensorflow
-@requires_tf_engine
-def test_it_matches_the_shared_spec() -> None:
-    """The point of implementing the architecture a fourth time: the count is DERIVED from the
-    spec, so this is checked against the claim rather than against another framework."""
-    from sonair.tensorflow_model import TensorFlowConvNet
-
-    model = TensorFlowConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
-    model.solidify()
-
-    assert model.parameter_count == trainable_parameter_count(NUM_CLASSES)
-
-
-@requires_tensorflow
-@requires_tf_engine
-def test_batchnorm_statistics_are_state_not_parameters() -> None:
-    """Moving mean/variance are `trainable=False`, which is what lets the count line up: the
-    four frameworks disagree about whether to include them, so the spec counts neither."""
-    from sonair.tensorflow_model import TensorFlowConvNet
-
-    model = TensorFlowConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
-    model.solidify()
-    inner = model.model
-
-    assert len(inner.variables) > len(inner.trainable_variables), "the moving stats must exist"
-    assert len(inner.variables) - len(inner.trainable_variables) == 2 * 3, "two per conv block"
-
-
-@requires_tensorflow
-@requires_tf_engine
-def test_zero_arg_construction_allocates_nothing() -> None:
-    from sonair.tensorflow_model import TensorFlowConvNet
-
-    model = TensorFlowConvNet()
-
-    assert model._model is None
-    with pytest.raises(ValueError, match="num_classes"):
-        model.solidify()
-
-
-@requires_tensorflow
-@requires_tf_engine
-def test_the_head_emits_raw_logits() -> None:
-    """No activation, like every other head — so `from_logits` losses apply unchanged."""
-    import numpy as np
-
-    from sonair.tensorflow_model import TensorFlowConvNet
-
-    model = TensorFlowConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
-    out = np.asarray(model(np.zeros((2, *INPUT), "float32")))
-
-    assert not np.allclose(out.sum(axis=-1), 1.0)
-
-
-@requires_tensorflow
-@requires_tf_engine
-def test_training_updates_the_moving_statistics() -> None:
-    """Written by hand rather than borrowed from `keras.layers`, so the update is ours to get
-    right — and an un-updated moving mean makes eval silently disagree with training."""
-    import numpy as np
-
-    from sonair.tensorflow_model import TensorFlowConvNet
-
-    model = TensorFlowConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
-    block = model.model.blocks[0]
-    before = np.asarray(block.moving_mean).copy()
-
-    model(np.random.default_rng(0).random((4, *INPUT)).astype("float32"), training=True)
-    after = np.asarray(block.moving_mean)
-
-    assert not np.allclose(before, after), "training must fold batch statistics into the estimate"
+    assert '__all__ = ["TensorFlowModel"]' in source
 
 
 # --------------------------------------------------------------------------- #
@@ -175,7 +90,7 @@ def exported_convnet(tmp_path: Path) -> Any:
     import numpy as np
 
     from sonair._tensorflow import tf
-    from sonair.tensorflow_model import TensorFlowConvNet
+    from sonair.convnet.tensorflow_convnet import TensorFlowConvNet
 
     model = TensorFlowConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
     model.solidify()
@@ -247,14 +162,13 @@ def test_an_inference_only_export_refuses_to_be_fine_tuned(tmp_path: Path) -> No
 
 @requires_tensorflow
 @requires_tf_engine
-def test_discovery_tags_put_them_in_the_tensorflow_backends_picker() -> None:
+def test_discovery_tags_put_it_in_the_tensorflow_backends_picker() -> None:
     """`framework="keras"`, not `"tensorflow"`: the axis names the API a class is WIRED TO, and
-    `TensorFlowClassifier` — the only trainer that consumes these — declares `"keras"` itself.
-    Tagging them `"tensorflow"` would hide them from the one picker that should offer them."""
+    `TensorFlowClassifier` — the only trainer that consumes this — declares `"keras"` itself.
+    Tagging it `"tensorflow"` would hide it from the one picker that should offer it."""
     from sonair.tensorflow_classifier import TensorFlowClassifier
-    from sonair.tensorflow_model import TensorFlowConvNet, TensorFlowModel
+    from sonair.tensorflow_model import TensorFlowModel
 
-    for cls in (TensorFlowConvNet, TensorFlowModel):
-        assert cls.__confluid_task__ == "classification"
-        assert cls.__confluid_role__ == "model"
-        assert cls.__confluid_framework__ == TensorFlowClassifier.__confluid_framework__ == "keras"
+    assert TensorFlowModel.__confluid_task__ == "classification"
+    assert TensorFlowModel.__confluid_role__ == "model"
+    assert TensorFlowModel.__confluid_framework__ == TensorFlowClassifier.__confluid_framework__ == "keras"

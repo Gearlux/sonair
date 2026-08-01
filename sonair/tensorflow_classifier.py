@@ -3,8 +3,7 @@
 This backend exists to answer a question the project had left open in ``TASKS.md``: does
 ``sonair tensorflow train`` need a runnable of its own at all, when ``KERAS_BACKEND=tensorflow
 sonair keras train <cfg>`` already executes the identical config on TensorFlow? The answer is
-*only for what Keras 3 does not expose* — and that is exactly what this class contains and
-nothing else:
+*only for what Keras 3 does not expose*:
 
 * **``tf.data`` instead of a ``PyDataset``.** :meth:`_dataset` wraps recordstream's
   ``RecordSequence`` in ``tf.data.Dataset.from_generator`` and appends
@@ -17,17 +16,28 @@ nothing else:
 * **SavedModel export.** ``export_dir`` writes a ``tf.saved_model`` directory — the TensorFlow
   serving artifact, and the reason a run would pick this backend over the Keras one.
 
-Everything ELSE is inherited from :class:`~sonair.keras_classifier.KerasClassifier`, because in
-TensorFlow >= 2.16 ``tf.keras`` **is** Keras 3: the model wrapper (``KerasModel``), the losses
-and metrics (``sonair.keras_classification``), the label handling, the batch shape
-(``_to_arrays``), the prediction contract and the run artifacts are the same objects, not
-look-alikes. That is why this class declares ``framework="keras"`` — the framework axis names
-the API a class can be WIRED TO, not the tensor runtime underneath (``docs/architecture.md``
-§2) — and why there is no ``tensorflow_classification.py``: its loss set would have been the
-Keras one under a second name.
+**This class is a SIBLING of :class:`~sonair.keras_classifier.KerasClassifier`, not a subclass
+(2026-08-01).** It was one until this change, and the inheritance was measurably load-bearing —
+fourteen of the parent's twenty-one methods came through untouched. What retired it is that the
+seven it DID override never delegated: `fit`, `test`, `predict`, `_compile` and
+`_resolve_task_defaults` replaced the parent's bodies outright, so the base class was carrying
+code reuse rather than substitutability. It also NARROWED a precondition —
+:meth:`_require_tensorflow_backend` raises where a ``KerasClassifier`` runs fine — which is a
+Liskov violation a picker offering "any KerasClassifier" would walk straight into.
 
-What that leaves is roughly a hundred lines of loop. That ratio is the demo, exactly as it was
-for the Keras backend.
+The cost is honest and visible: the label pipeline, the batch shape, the prediction contract and
+the artifact writers are now DUPLICATED between this module and the Keras one, and they are
+duplicated in the Lightning, fastai, jax and mlx backends too. Extracting an engine-neutral base
+is deliberately deferred until the detection projects have been through the same treatment, so
+the base gets designed against classification AND detection rather than against classification
+twice — see ``TASKS.md``. Until then, a change to the label handling has to be made in each
+backend, and ``tests/test_tensorflow_classifier.py`` pins that this one still agrees with the
+Keras one.
+
+It still declares ``framework="keras"``, and that is unchanged by the un-subclassing: the
+framework axis names the API a class can be WIRED TO (``docs/architecture.md`` §2), and in
+TensorFlow >= 2.16 ``tf.keras`` IS Keras 3 — the losses, the metrics and ``KerasModel`` are the
+same objects here as there. Which is also why there is still no ``tensorflow_classification.py``.
 
 Minimal flat YAML — note it differs from the Keras block by ONE key, the runnable's class::
 
@@ -42,42 +52,95 @@ Run it with ``sonair tensorflow train cfg.yaml``, which sets ``KERAS_BACKEND=ten
 anything imports keras — see :mod:`sonair._tensorflow` for why that ordering is load-bearing.
 """
 
+from functools import partial
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union, cast
 
 import numpy as np
-from confluid import Lazy, Mandatory, configurable, flow
+from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
-from marainer.artifacts import save_class_names, write_metrics_sidecar
-from recordstream import LabelMap, PredictionsSink, RecordSource
-from recordstream.runnable import entrypoint
+from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from marainer.run_names import generate_run_name
+from marainer.tracking.base import Tracker
+from recordstream import (
+    ClassificationOutput,
+    LabelMap,
+    PredictionsSink,
+    RecordSource,
+    batch_metadata,
+    batch_values,
+    class_names,
+    ensure_record_dataset,
+    is_class_id,
+    iter_key,
+    multi_hot,
+)
+from recordstream.runnable import ProgressReporting, entrypoint, run_entrypoint
 
-# keras comes from `sonair._tensorflow`, NOT `sonair._keras`: that module pins
-# KERAS_BACKEND=tensorflow first, and isort would sort a `sonair._keras` line ABOVE it — loading
-# keras on whichever engine happened to be found first. Pinned by
-# `tests/test_tensorflow_classifier.py`. This import must also precede `sonair.keras_classifier`
-# (which reaches keras too); isort keeps that order, since `_tensorflow` < `keras_classifier`.
-from sonair._tensorflow import keras, keras_backend, tf
-from sonair.keras_classifier import ClassifierTask, KerasClassifier, KerasLoss, KerasMetric, KerasOptimizer
+# keras, TensorFlow AND the batching adapter all come from `sonair._tensorflow`, which pins
+# KERAS_BACKEND=tensorflow before any of them load. Importing `RecordSequence` from its own
+# module (`recordstream.keras`) would defeat that: isort sorts a `recordstream` line into the
+# third-party group, above every `sonair` line, and `recordstream.keras` is where the competing
+# default lives. Pinned by `tests/test_tensorflow_classifier.py`.
+from sonair._tensorflow import RecordSequence, keras, keras_backend, tf
 
 logger = get_logger(__name__)
 
-__all__ = ["TensorFlowClassifier"]
+#: Which entry point :meth:`TensorFlowClassifier.run` dispatches to — the same vocabulary every
+#: other backend uses, because the verb is a property of the TASK, not of the engine.
+ClassifierTask = Literal["fit", "evaluate", "test", "predict"]
+
+# What each slot accepts: the Keras class, or the string alias it resolves to. Spelled out
+# rather than left as `Any` because `Any` types nothing (workspace mandate) and gives
+# `to_pydantic` nothing to build a widget from — navigaitor's form-spec and StreamStudio read
+# these to know that `loss` takes a `keras.losses.Loss`, which is the other half of the set
+# registered in `sonair.keras_classification` being pickable at all.
+#
+# It does NOT change how a wired value materializes: a nested `!class:` in a CONSTRUCTOR slot
+# stays a deferred `Class` marker regardless of annotation (only the instance form
+# `!class:X()` builds eagerly), so `_compile` flows these at use.
+KerasLoss = Union[str, keras.losses.Loss]
+KerasMetric = Union[str, keras.metrics.Metric]
+KerasOptimizer = Union[str, keras.optimizers.Optimizer]
+
+#: What this backend's ``model`` slot admits — the ONE place in sonair where two frameworks meet
+#: in a single slot. ``keras.Model`` covers ``KerasModel`` and ``KerasConvNet``; ``tf.Module``
+#: covers ``TensorFlowModel`` (a restored SavedModel) and ``TensorFlowConvNet`` (raw ``tf.nn``
+#: ops), and NEITHER is a subclass of the other: under the TensorFlow backend a ``keras.Model``
+#: descends ``Layer -> TFLayer -> KerasAutoTrackable`` (``keras/src/backend/tensorflow/
+#: trackable.py``), so the nearest shared ancestor is ``tf.__internal__.tracking.AutoTrackable``
+#: — a private API this must not name. A union of the two public types is therefore the honest
+#: declaration, and it is spelled out rather than left as ``Any`` so a reader, mypy and
+#: ``to_pydantic`` (form specs / MCP schemas / editor widgets) all see the real contract.
+#: The two arms are told apart at the points where they differ — ``_export`` branches on
+#: ``hasattr(model, "export")``, ``_restored_trainable_variables`` on the declared variable list.
+TensorFlowNetwork = Union[keras.Model, tf.Module]
+
+__all__ = ["ClassifierTask", "TensorFlowClassifier", "TensorFlowNetwork"]
+
+
+def _first_target(source: Any, target_key: str) -> Any:
+    """The first non-``None`` target in ``source`` — one peek is enough to know the label kind."""
+    for target in iter_key(source, target_key):
+        if target is not None:
+            return target
+    return None
 
 
 @configurable(task="classification", role="trainer", framework="keras")
-class TensorFlowClassifier(KerasClassifier):
+class TensorFlowClassifier(ProgressReporting):
     """Train, evaluate or predict an image classifier with a native TensorFlow loop.
 
-    Every constructor knob of :class:`~sonair.keras_classifier.KerasClassifier` means the same
-    thing here and is restated rather than swallowed by ``**kwargs``, because static
-    introspection (``to_pydantic`` -> form specs / MCP schemas / editor widgets) reads the
-    signature. The three at the end are what this backend adds.
+    Every constructor knob means the same thing as its :class:`~sonair.keras_classifier.
+    KerasClassifier` namesake, deliberately: one config drives either backend and only the
+    runnable's class changes. The three at the end are what this backend adds.
 
     Args:
         model: The classification model — wire ``!lazy:sonair.KerasModel`` so ``initialize()``
             can inject the dataset-derived ``num_classes``. ``tf.keras`` IS Keras 3, so the
-            Keras backend's wrapper is the wrapper here too.
+            Keras backend's wrapper is the wrapper here too — and this backend ALSO takes a
+            plain ``tf.Module`` (``TensorFlowModel``, ``TensorFlowConvNet``), which is why the
+            slot is typed :data:`TensorFlowNetwork`.
         train_set: Training source (``task="fit"``).
         test_set: Evaluation / prediction source.
         num_classes: Class count. Omitted, it is derived from the data or the label map.
@@ -109,7 +172,7 @@ class TensorFlowClassifier(KerasClassifier):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[Any]],
+        model: Mandatory[Lazy[TensorFlowNetwork]],
         train_set: Optional[Lazy[RecordSource]] = None,
         test_set: Optional[Lazy[RecordSource]] = None,
         num_classes: Optional[int] = None,
@@ -129,36 +192,61 @@ class TensorFlowClassifier(KerasClassifier):
         jit_compile: bool = False,
         prefetch: bool = True,
     ) -> None:
-        super().__init__(
-            model=model,
-            train_set=train_set,
-            test_set=test_set,
-            num_classes=num_classes,
-            task=task,
-            max_epochs=max_epochs,
-            batch_size=batch_size,
-            logger=logger,
-            experiment_name=experiment_name,
-            run_name=run_name,
-            input_key=input_key,
-            target_key=target_key,
-            label_map=label_map,
-            optimizer=optimizer,
-            loss=loss,
-            metrics=metrics,
-        )
+        super().__init__()
+        # `TensorFlowNetwork`, not `Lazy[TensorFlowNetwork]`: the DEFERRED-ness is declared once,
+        # on the ctor param above, which is what `lazy_param_names` / `to_pydantic` read.
+        # Restating it here would only make the attribute a union no method could call through.
+        self.model: TensorFlowNetwork = model
+        self.train_set: Optional[Lazy[RecordSource]] = train_set
+        self.val_set: Optional[Lazy[RecordSource]] = None
+        self.test_set: Optional[Lazy[RecordSource]] = test_set
+        self.task: ClassifierTask = task
+        self.num_classes = int(num_classes) if num_classes is not None else None
+        self.max_epochs = max_epochs
+        self.batch_size = batch_size
+        self.callbacks: List[Any] = list(logger or [])
+        self.experiment_name = experiment_name
+        self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
+        self.input_key = str(input_key)
+        self.target_key = str(target_key)
+        self.label_map = label_map
+        self.optimizer: KerasOptimizer = optimizer
+        # Sentinels, for the same reason every other backend uses them: the right loss and
+        # metrics depend on whether the targets are single- or multi-label, which is only known
+        # once `initialize()` has peeked the data. A live default here could not be told apart
+        # from a user's explicit choice.
+        self.loss: Optional[KerasLoss] = loss
+        self.metrics: Optional[Sequence[KerasMetric]] = metrics
+        self.multilabel: bool = False
+        self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
+        self.metrics_sidecar_path: Optional[str] = None
+        self.trackers: Optional[List[Tracker]] = None
         self.export_dir = export_dir
         self.jit_compile = jit_compile
         self.prefetch = prefetch
+        self._class_names: Optional[List[str]] = None
+        self._history: Dict[str, Any] = {}
+        self._computed_metrics: Dict[str, float] = {}
+        # The loop's parts, built by `_compile()` — what `keras.Model.compile` would have owned.
         self._optimizer: Any = None
         self._loss_fn: Any = None
         self._metric_objects: List[Any] = []
 
+    # ---- run dispatch ------------------------------------------------------- #
+    def run(self) -> None:
+        self.initialize()
+        # The `@entrypoint` markers below ARE the dispatch table (recordstream docs/runnable.md).
+        run_entrypoint(self, self.task)
+
     # ---- setup -------------------------------------------------------------- #
     def initialize(self) -> None:
-        """Refuse to run on the wrong engine, then set up exactly as the Keras backend does."""
+        """Refuse to run on the wrong engine, then resolve labels, ``num_classes`` and the loop."""
         self._require_tensorflow_backend()
-        super().initialize()
+        if self.task == "fit":
+            self._initialize_fit()
+        else:
+            self._initialize_eval()
+        self._compile()
 
     @staticmethod
     def _require_tensorflow_backend() -> None:
@@ -170,6 +258,9 @@ class TensorFlowClassifier(KerasClassifier):
         -> jax, so any machine with both ``sonair[lightning]`` and ``sonair[tensorflow]`` lands on
         torch unless something set the variable first (:mod:`sonair._tensorflow` does; ``sonair
         tensorflow <verb>`` does it earlier still).
+
+        This check is also why the class is no longer a ``KerasClassifier``: it NARROWS a
+        precondition its former parent does not have.
         """
         backend = keras_backend()
         if backend != "tensorflow":
@@ -180,6 +271,74 @@ class TensorFlowClassifier(KerasClassifier):
                 f"or export KERAS_BACKEND=tensorflow yourself. To train on {backend!r} instead, use "
                 f"the `keras` backend — it runs the identical config on whichever engine is loaded."
             )
+
+    def _initialize_fit(self) -> None:
+        """Fit the label encoding and resolve ``num_classes`` from the training data.
+
+        Deliberately identical to the Keras backend's method of the same name (and to the
+        Lightning, fastai, jax and mlx ones): none of it is engine-specific, and it is duplicated
+        rather than shared until the base can be designed against detection too — see the module
+        docstring. `tests/test_tensorflow_classifier.py` asserts the two still agree.
+        """
+        self.train_set = ensure_record_dataset(self.train_set)
+        if self.val_set is not None:
+            self.val_set = ensure_record_dataset(self.val_set)
+        if self.test_set is not None:
+            self.test_set = ensure_record_dataset(self.test_set)
+
+        # `iter_key` unwraps a MultiLabel to its list of values, so a sequence here IS a
+        # multi-label target — the item type, not a guess about what a list might mean.
+        first = _first_target(self.train_set, self.target_key)
+        self.multilabel = isinstance(first, (list, tuple, set))
+        probe = next(iter(first), None) if self.multilabel else first
+        targets_are_names = probe is not None and not is_class_id(probe)
+
+        if targets_are_names and self.label_map is None:
+            self.label_map = LabelMap.fit(iter_key(self.train_set, self.target_key))
+            logger.info(f"Fitted LabelMap with {self.label_map.num_classes} classes from train targets.")
+        if targets_are_names and self.label_map is not None:
+            self.train_set = self.label_map.encode(self.train_set)
+            if self.val_set is not None:
+                self.val_set = self.label_map.encode(self.val_set)
+            if self.test_set is not None:
+                self.test_set = self.label_map.encode(self.test_set)
+
+        if self.num_classes is None:
+            if self.label_map is not None:
+                self.num_classes = self.label_map.num_classes
+            else:
+                # An empty map still maps ids through — that is the `to_ids` contract.
+                ids = [i for t in iter_key(self.train_set, self.target_key) for i in LabelMap().to_ids(t)]
+                self.num_classes = max(ids) + 1 if ids else None
+        if not self.num_classes:
+            raise RuntimeError("could not determine num_classes — set it, or wire a labelled dataset.")
+        self._class_names = class_names(self.train_set, self.val_set, self.test_set)
+
+    def _initialize_eval(self) -> None:
+        """Model-driven setup: the trained head's width is authoritative, not the eval split's.
+
+        An eval dataset may be a subset that never shows every class, so deriving the count from
+        it would mis-size the metrics against the head that produced the logits.
+        """
+        self.model = flow(self.model)
+        nc = getattr(self.model, "num_classes", None)
+        if not nc:
+            raise RuntimeError("could not determine num_classes from the model (it must expose `num_classes`).")
+        self.num_classes = int(nc)
+        if self.test_set is None:
+            return
+        dataset = ensure_record_dataset(self.test_set)
+        first = _first_target(dataset, self.target_key)
+        self.multilabel = isinstance(first, (list, tuple, set))
+        probe = next(iter(first), None) if self.multilabel else first
+        if probe is not None and not is_class_id(probe):
+            label_map = self.label_map or load_class_names(getattr(self.model, "checkpoint_path", None))
+            if label_map is None:
+                raise RuntimeError("eval dataset has string targets but no label_map and no class_names.json found.")
+            self.label_map = label_map
+            dataset = label_map.encode(dataset)
+        self.test_set = dataset
+        self._class_names = class_names(dataset)
 
     def _resolve_task_defaults(self) -> None:
         """Fill the unset (``None``) task-shaped slots with OBJECTS, not string aliases.
@@ -211,16 +370,56 @@ class TensorFlowClassifier(KerasClassifier):
     def _compile(self) -> None:
         """Build the network and the loop's PARTS — deliberately never ``keras.Model.compile``.
 
-        The name is the parent's (``initialize()`` calls it) but the body is the divergence: a
-        compiled model owns its own training step, which is precisely what this backend replaces.
-        The slots are flowed at USE for the same reason the parent does it — a nested
-        ``!class:`` in a CONSTRUCTOR slot arrives as a deferred marker.
+        A compiled model owns its own training step, which is precisely what this backend
+        replaces. The slots are flowed at USE for the same reason every other backend does it —
+        a nested ``!class:`` in a CONSTRUCTOR slot arrives as a deferred marker.
+
+        A bare ``flow()`` is the whole guard: it returns a live object, a string alias and a list
+        unchanged, so an ``isinstance(..., Fluid)`` around any of these calls only restates it.
+        The model included — it reaches here deferred (``!lazy:`` is skipped by confluid's
+        auto-flow walkers precisely so the dataset-derived width can be injected now), and one
+        that is ALREADY live comes back untouched.
         """
         self._resolve_task_defaults()
         self.model = flow(self.model, num_classes=self.num_classes)
         self._optimizer = _as_optimizer(self.optimizer)
         self._loss_fn = flow(self.loss)
         self._metric_objects = [_as_metric(m, multilabel=self.multilabel) for m in (self.metrics or [])]
+
+    # ---- batching ------------------------------------------------------------ #
+    def _sequence(self, source: Any, shuffle: bool = False, with_targets: bool = True) -> RecordSequence:
+        """recordstream's batching adapter, wearing THIS task's batch shape.
+
+        The split is the same one torch draws: ``RecordSequence`` is the engine's DataLoader half
+        (row order, slicing, per-epoch reshuffle, ``collate_records``) and knows nothing about
+        classification; ``_to_arrays`` is handed to it the way a ``collate_fn`` is handed to a
+        ``DataLoader``.
+        """
+        return RecordSequence(
+            source,
+            batch_size=self.batch_size,
+            shuffle=shuffle,
+            transform=partial(self._to_arrays, with_targets=with_targets),
+        )
+
+    def _to_arrays(self, batch: Any, with_targets: bool = True) -> Any:
+        """One collated record batch → the numpy ``(x, y)`` the traced step consumes.
+
+        recordstream hands over numpy already — ``batch_values`` unwraps a batched key past its
+        item type, ``multi_hot`` renders a multi-label column as an ``[N, C]`` matrix — so nothing
+        is converted twice and nothing is reimplemented for this backend.
+
+        TensorFlow is **channels-last**: images arrive ``[N, H, W, C]``. The preprocessing config
+        therefore ends after ``ConvertToImage`` rather than adding a CHW ``ToTensor``.
+        """
+        x = np.asarray(batch_values(batch, self.input_key), dtype="float32")
+        if not with_targets:
+            return (x,)
+        if self.multilabel:
+            if not self.num_classes:
+                raise RuntimeError("TensorFlowClassifier: a multi-label target needs num_classes.")
+            return x, multi_hot(batch, self.target_key, self.num_classes)
+        return x, np.asarray(batch_values(batch, self.target_key), dtype="int64")
 
     # ---- tf.data ------------------------------------------------------------- #
     def _dataset(self, source: Any, shuffle: bool = False, with_targets: bool = True) -> Tuple[Any, Any]:
@@ -231,8 +430,7 @@ class TensorFlowClassifier(KerasClassifier):
         itself; a hand-written loop that forgets it trains every epoch on the same row order.
 
         ``output_signature`` is derived from a real first batch rather than guessed — the batch
-        shape is the classifier's (``_to_arrays``), and hard-coding it here would put the same
-        fact in two places.
+        shape is :meth:`_to_arrays`'s, and hard-coding it here would put the same fact twice.
         """
         sequence = self._sequence(source, shuffle=shuffle, with_targets=with_targets)
         dataset = tf.data.Dataset.from_generator(
@@ -310,6 +508,34 @@ class TensorFlowClassifier(KerasClassifier):
                 callbacks.on_train_batch_end(index, {"loss": total / batches})
         return {"loss": total / batches if batches else float("nan"), **self._metric_results()}
 
+    # ---- callbacks + tracking ------------------------------------------------ #
+    def _callbacks(self) -> List[Any]:
+        """Wired Keras callbacks plus OPTIONAL marainer tracking (a few lines; removable)."""
+        callbacks = [flow(cb) for cb in self.callbacks]
+        for callback in callbacks:
+            # Keras's file-writing callbacks (`CSVLogger`, `ModelCheckpoint`) open their path
+            # without creating its parent, so a perfectly reasonable `./tf_logs/run.csv` dies
+            # with FileNotFoundError several minutes into a fit — after the data walk and the
+            # model build. Creating the directory here moves that failure to "never".
+            target = getattr(callback, "filename", None) or getattr(callback, "filepath", None)
+            if isinstance(target, (str, Path)):
+                Path(target).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        trackers = [flow(t) for t in (self.trackers or [])]
+        if trackers:
+            from marainer.keras import keras_tracking_callback
+
+            callbacks.append(keras_tracking_callback(trackers, params=self._tracked_params()))
+        return callbacks
+
+    def _tracked_params(self) -> Dict[str, Any]:
+        return {
+            "experiment_name": self.experiment_name,
+            "run_name": self.run_name,
+            "max_epochs": self.max_epochs,
+            "batch_size": self.batch_size,
+            "num_classes": self.num_classes,
+        }
+
     # ---- the four entry points ---------------------------------------------- #
     @entrypoint("fit", role="trainer", primary=True)
     def fit(self) -> None:
@@ -353,6 +579,10 @@ class TensorFlowClassifier(KerasClassifier):
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
         self._export()
 
+    @entrypoint("evaluate", role="evaluator")
+    def evaluate(self) -> None:
+        self.test()
+
     @entrypoint("test", role="evaluator", primary=True)
     def test(self) -> None:
         """Score the held-out split with the same traced step the training loop validates with."""
@@ -385,6 +615,25 @@ class TensorFlowClassifier(KerasClassifier):
             sink.close()
         logger.info("Prediction complete.")
 
+    # ---- predictions -------------------------------------------------------- #
+    def _write_predictions(self, logits: np.ndarray, batch: Any, sink: PredictionsSink) -> None:
+        """One :class:`~recordstream.ClassificationOutput` per record, paired with its metadata.
+
+        The contract is recordstream's and framework-neutral — ``ClassificationOutput`` is
+        generic in its array type, so the SAME sink that consumes the torch backends' output
+        consumes this numpy one with no adapter.
+        """
+        probs = _softmax(logits)
+        per_record_meta = batch_metadata(batch, exclude=(self.input_key, self.target_key))
+        for i in range(len(logits)):
+            out: ClassificationOutput[np.ndarray] = {
+                "logits": logits[i],
+                "probs": probs[i],
+                "class_idx": np.asarray(np.argmax(logits[i])),
+            }
+            meta = per_record_meta[i] if per_record_meta and i < len(per_record_meta) else {}
+            sink.write(out, meta)
+
     # ---- the TensorFlow artifact -------------------------------------------- #
     def _export(self) -> None:
         """Write the SavedModel — the one run artifact that is TensorFlow's and not Keras's.
@@ -395,7 +644,7 @@ class TensorFlowClassifier(KerasClassifier):
 
         Two writers, because the model slot takes two kinds of thing. A `keras.Model` has
         `export`, which builds the serving signature for you. A raw `tf.Module` — which is what
-        `sonair.tensorflow_model.TensorFlowConvNet` is — does NOT, so it goes through
+        `sonair.convnet.tensorflow_convnet.TensorFlowConvNet` is — does NOT, so it goes through
         `tf.saved_model.save` with an explicitly traced signature. Branching on the capability
         rather than on the class keeps anything else callable working too.
         """
@@ -427,13 +676,63 @@ class TensorFlowClassifier(KerasClassifier):
         sequence = self._sequence(source, with_targets=False)
         return tuple(np.asarray(sequence[0][0]).shape[1:])
 
+    # ---- artifacts + tracking ----------------------------------------------- #
+    def _artifact_dir(self) -> Optional[str]:
+        """Where run artifacts land. There is no checkpoint-callback convention to read here, so
+        this follows the sidecar's directory when one is configured."""
+        if self.metrics_sidecar_path:
+            return str(Path(self.metrics_sidecar_path).expanduser().parent)
+        return None
+
+    def _live_trackers(self) -> List[Tracker]:
+        return [flow(t) for t in (self.trackers or [])]
+
+    # ---- @outputs ------------------------------------------------------------ #
+    @property
+    @output
+    def trained_model(self) -> Any:
+        """The live trained model (post-run ``@output``). Raises while still deferred.
+
+        Whatever was wired, unwrapped by nobody — which is also what the torch backends return.
+        A ``KerasModel`` IS a ``keras.Model`` AND carries ``num_classes``, which an evaluation
+        run reads straight off its model slot, so this output docks into a downstream classifier.
+        """
+        if isinstance(self.model, Fluid):
+            raise RuntimeError("trained_model is only available after run() — the model is still deferred.")
+        return self.model
+
+    @property
+    @output
+    def computed_metrics(self) -> Dict[str, float]:
+        """Final scalar metrics from the last fit/evaluate."""
+        return dict(self._computed_metrics)
+
+    @property
+    @output
+    def class_names(self) -> List[str]:
+        """Resolved class names for the run (post-run ``@output``), or ``[]``."""
+        if self.label_map is not None:
+            return list(self.label_map.class_names)
+        return list(self._class_names or [])
+
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    """Row-wise softmax. The model emits raw logits (no head activation), like every other head."""
+    shifted = logits - logits.max(axis=-1, keepdims=True)
+    exp = np.exp(shifted)
+    return cast(np.ndarray, exp / exp.sum(axis=-1, keepdims=True))
+
+
+def _run_prefix(task: str) -> str:
+    return {"fit": "train", "predict": "predict"}.get(task, "evaluate")
+
 
 def _output_signature(batch: Any) -> Tuple[Any, ...]:
     """``tf.TensorSpec``s matching a real batch, with the row count left dynamic.
 
     ``from_generator`` needs the element spec up front. Deriving it from batch zero keeps the
-    batch SHAPE defined in exactly one place — ``KerasClassifier._to_arrays`` — instead of
-    restating "float32 [N, H, W, C] and int64 [N]" here where it could drift.
+    batch SHAPE defined in exactly one place — :meth:`TensorFlowClassifier._to_arrays` — instead
+    of restating "float32 [N, H, W, C] and int64 [N]" here where it could drift.
     """
     arrays = [np.asarray(item) for item in batch]
     return tuple(tf.TensorSpec(shape=(None, *a.shape[1:]), dtype=tf.as_dtype(a.dtype)) for a in arrays)

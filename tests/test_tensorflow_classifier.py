@@ -27,6 +27,7 @@ download, and nothing else needs it), so this group skips entirely on a default 
 runs on one that opted in with ``aisland framework set … tensorflow``.
 """
 
+import ast
 import importlib.util
 import re
 import sys
@@ -91,73 +92,110 @@ def test_the_tensorflow_boundary_is_imported_before_anything_that_loads_keras() 
 
 
 def test_the_boundary_module_sets_the_backend_before_importing_anything() -> None:
-    """The ``setdefault`` in ``sonair/_tensorflow.py`` must precede its own imports."""
-    source = (SOURCE.parent / "_tensorflow.py").read_text()
-    setdefault = source.index('os.environ.setdefault("KERAS_BACKEND"')
-    assert setdefault < source.index("import tensorflow")
-    assert setdefault < source.index("from recordstream.keras import")
+    """The ``setdefault`` in ``sonair/_tensorflow.py`` must precede its own imports.
+
+    Read as STATEMENTS via ``ast``, not as substrings: that module's docstring quotes the very
+    import lines it is warning about (``from recordstream.keras import RecordSequence``), and a
+    text search finds the prose first — which failed this test while the code was correct.
+    """
+    tree = ast.parse((SOURCE.parent / "_tensorflow.py").read_text())
+    setdefault = next(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and "os.environ.setdefault" in ast.unparse(node.func) and node.args
+    )
+    imports: dict = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            imports.update({alias.name: node.lineno for alias in node.names})
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports[node.module] = node.lineno
+
+    assert setdefault < imports["tensorflow"], "KERAS_BACKEND must be pinned before TensorFlow is imported"
+    assert setdefault < imports["recordstream.keras"], (
+        "KERAS_BACKEND must be pinned before recordstream.keras, which defaults it to the first "
+        "INSTALLED backend — torch on this workspace's venv"
+    )
 
 
 # ---------------------------------------------------------------------------
-# Static: what the subclass actually adds
+# Static: a SIBLING of the Keras backend, not a subclass
 # ---------------------------------------------------------------------------
 
 
 @requires_tensorflow
-def test_it_subclasses_the_keras_backend() -> None:
-    """In TF >= 2.16 ``tf.keras`` IS Keras 3 — the label handling and batch shape are the same
-    code, not a copy of it. If this ever stops being true the reuse claim in the docs is wrong."""
+def test_it_is_not_a_keras_classifier() -> None:
+    """It was one until 2026-08-01, and the inheritance was retired deliberately.
+
+    Two reasons, both visible from here. It NARROWS a precondition —
+    ``_require_tensorflow_backend`` raises where a ``KerasClassifier`` runs fine — so a picker
+    offering "any KerasClassifier" would hand out something that cannot run. And of the seven
+    methods it used to override, five (``fit`` / ``test`` / ``predict`` / ``_compile`` /
+    ``_resolve_task_defaults``) never called ``super()``: the base class was carrying code reuse,
+    not substitutability.
+    """
+    from recordstream.runnable import ProgressReporting
+
     from sonair.keras_classifier import KerasClassifier
     from sonair.tensorflow_classifier import TensorFlowClassifier
 
-    assert issubclass(TensorFlowClassifier, KerasClassifier)
+    assert not issubclass(TensorFlowClassifier, KerasClassifier)
+    assert issubclass(TensorFlowClassifier, ProgressReporting), "both are runnables; that much IS shared"
 
 
 @requires_tensorflow
-def test_it_overrides_only_the_tensorflow_specific_behaviour() -> None:
-    """Pins the SIZE of the divergence — the point of the backend, and easy to erode silently.
+def test_the_duplicated_classification_half_agrees_with_the_keras_backend(keras_module: Any) -> None:
+    """The cost of un-subclassing, held in check.
 
-    Anything added here should be about tf.data, the traced loop, or the SavedModel. A method
-    that is really about classification belongs on the parent, where every backend gets it.
+    Dropping the base class DUPLICATED the label pipeline and the batch shape between the two
+    modules, and an engine-neutral base is deliberately deferred until the detection projects
+    have been through the same treatment. Until then this is what stops the copies drifting:
+    both classes are driven over the SAME records and must agree on every classification-side
+    answer. It compares behaviour rather than source, because the two do legitimately differ in
+    their docstrings and error text.
     """
+    from recordstream import Stream
+    from recordstream.items import Label
+
+    from sonair.keras_classifier import KerasClassifier
     from sonair.tensorflow_classifier import TensorFlowClassifier
 
-    # Callables only: the class body's methods, minus the string attributes `@configurable`
-    # stamps on (`__confluid_task__` and friends) and the ones Python adds (`__module__`, …).
-    overrides = {name for name, value in vars(TensorFlowClassifier).items() if callable(value)}
-    assert overrides == {
-        "__init__",
-        "initialize",  # + the engine check
-        "_require_tensorflow_backend",
-        "_resolve_task_defaults",  # objects, not aliases — no compile() to interpret them
-        "_compile",  # builds the loop's parts instead of Model.compile
-        "_dataset",  # tf.data
-        "_train_step_fn",
-        "_eval_step_fn",
-        "_predict_step_fn",
-        "_reset_metrics",
-        "_metric_results",
-        "_run_epoch",
-        "fit",
-        "test",
-        "predict",
-        "_export",  # SavedModel
-        "_input_shape",  # the export signature's shape — SavedModel plumbing, TF-only
-    }
+    # STRING targets, so the comparison covers the LabelMap fit + encode branch — the part of
+    # `_initialize_fit` most likely to drift, and the part neither backend's loop touches.
+    records = [
+        {"image": r["image"], "class": Label(name), "row_id": r["row_id"]} for r, name in zip(_records(9), "abcabcabc")
+    ]
+
+    answers = []
+    for cls in (KerasClassifier, TensorFlowClassifier):
+        # A real `keras.Model` because both slots are `Mandatory[...]` and confluid validates the
+        # kwargs; `_initialize_fit` never touches it.
+        clf = cls(model=_dense_model(keras_module), train_set=Stream(source=list(records)), batch_size=3)
+        clf._initialize_fit()  # the half that is duplicated, run on identical input
+        batch = next(iter(clf._sequence(clf.train_set).batches()))
+        x, y = clf._to_arrays(batch)
+        answers.append((clf.num_classes, clf.multilabel, tuple(clf._class_names or ()), x.shape, y.dtype, tuple(y)))
+
+    assert answers[0] == answers[1], f"the copies have drifted: keras={answers[0]} tensorflow={answers[1]}"
 
 
 @requires_tensorflow
-def test_the_constructor_restates_every_knob_of_its_parent() -> None:
-    """``**kwargs`` would type-check but erase the config surface that `to_pydantic` reads."""
+def test_the_constructor_mirrors_the_keras_backends_knobs() -> None:
+    """One config drives either backend, so the knob NAMES have to line up.
+
+    This was an inheritance property until the classes became siblings; now it is a claim that
+    has to be checked. ``**kwargs`` would type-check either way but erase the config surface
+    ``to_pydantic`` reads for form specs and editor widgets.
+    """
     import inspect
 
     from sonair.keras_classifier import KerasClassifier
     from sonair.tensorflow_classifier import TensorFlowClassifier
 
-    parent = set(inspect.signature(KerasClassifier.__init__).parameters)
-    child = set(inspect.signature(TensorFlowClassifier.__init__).parameters)
-    assert parent <= child, f"dropped from the config surface: {sorted(parent - child)}"
-    assert child - parent == {"export_dir", "jit_compile", "prefetch"}
+    shared = set(inspect.signature(KerasClassifier.__init__).parameters)
+    mine = set(inspect.signature(TensorFlowClassifier.__init__).parameters)
+    assert shared <= mine, f"dropped from the config surface: {sorted(shared - mine)}"
+    assert mine - shared == {"export_dir", "jit_compile", "prefetch"}
 
 
 @requires_tensorflow
@@ -176,7 +214,7 @@ def test_zero_arg_construction_does_no_work() -> None:
     """The workspace lazy-init mandate: the constructor stores, it does not build."""
     from sonair.tensorflow_classifier import TensorFlowClassifier
 
-    clf = TensorFlowClassifier(model=None)
+    clf = TensorFlowClassifier(model=_no_model())
     assert clf.task == "fit"
     assert clf.num_classes is None
     assert clf._optimizer is None and clf._loss_fn is None
@@ -192,6 +230,20 @@ def keras_module() -> Any:
     from sonair._tensorflow import keras
 
     return keras
+
+
+def _no_model() -> Any:
+    """What a test wires when it never touches the model slot.
+
+    `model` is `Mandatory[Lazy[TensorFlowNetwork]]`, and `@configurable` validates constructor
+    kwargs at RUNTIME against `to_pydantic(cls)` (confluid's `validate_kwargs`, strict mode), so
+    `None` is now REJECTED — it only ever passed while the slot was `Lazy[Any]`. A bare
+    `tf.Module` is the cheapest value the union admits. A function rather than a module-level
+    constant because the source-only tests above must keep running where TensorFlow is absent.
+    """
+    import tensorflow as tf
+
+    return tf.Module()
 
 
 def _Shim(model: Any, num_classes: int) -> Any:
@@ -354,7 +406,7 @@ def test_the_default_loss_and_metrics_are_objects_not_aliases(keras_module: Any)
     """No ``compile()`` means no contextual alias resolution — see ``_resolve_task_defaults``."""
     from sonair.tensorflow_classifier import TensorFlowClassifier
 
-    clf = TensorFlowClassifier(model=None)
+    clf = TensorFlowClassifier(model=_no_model())
     clf._resolve_task_defaults()
 
     assert isinstance(clf.loss, keras_module.losses.SparseCategoricalCrossentropy)
@@ -366,7 +418,7 @@ def test_the_default_loss_and_metrics_are_objects_not_aliases(keras_module: Any)
 def test_multilabel_defaults_switch_both_slots(keras_module: Any) -> None:
     from sonair.tensorflow_classifier import TensorFlowClassifier
 
-    clf = TensorFlowClassifier(model=None)
+    clf = TensorFlowClassifier(model=_no_model())
     clf.multilabel = True
     clf._resolve_task_defaults()
 
@@ -379,7 +431,7 @@ def test_an_explicitly_wired_loss_is_never_replaced(keras_module: Any) -> None:
     from sonair.tensorflow_classifier import TensorFlowClassifier
 
     chosen = keras_module.losses.CategoricalCrossentropy(from_logits=True)
-    clf = TensorFlowClassifier(model=None, loss=chosen)
+    clf = TensorFlowClassifier(model=_no_model(), loss=chosen)
     clf._resolve_task_defaults()
     clf._resolve_task_defaults()  # idempotent
 

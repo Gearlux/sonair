@@ -69,13 +69,13 @@ preprocess:
 # Data: HuggingFace `mnist`. It exposes `train` and `test` splits (no
 # `validation`), so the held-out split is `test`.
 train_set: !class:recordstream.Stream
-  source: !class:recordstream.sources.HuggingFaceSource()
+  source: !class:recordstream.sources.huggingface.HuggingFaceSource()
     path: "mnist"
     split: train
   ops: !ref:preprocess
 
 val_set: !class:recordstream.Stream
-  source: !class:recordstream.sources.HuggingFaceSource()
+  source: !class:recordstream.sources.huggingface.HuggingFaceSource()
     path: "mnist"
     split: test
   ops: !ref:preprocess
@@ -95,11 +95,26 @@ max_epochs: 3
 # dead in both paths. Set `task:` only to change what a BARE `recordstream run`
 # does — e.g. `task: test` in an eval-only config that ships without a verb.
 
+# THE MODEL SLOT TAKES TWO THINGS HERE — one active, one alternative. They differ
+# in what they WRAP, not in how they are wired, which is the whole point:
+#
+#   TimmModel     any of timm's ~1000 pretrained backbones. Best accuracy, and what
+#                 you want for real work.
+#   TorchConvNet  the shared conv spec (sonair/convnet/spec.py) in torch.nn, wrapping
+#                 nothing. NO pretrained weights, so it scores far lower — it exists
+#                 so the SAME architecture can be run under torch, Keras, TensorFlow,
+#                 JAX and MLX and the comparison is between frameworks rather than
+#                 between five different networks.
+#
 # `!lazy:` so `initialize()` can inject the dataset-derived num_classes (10).
 runnable: !class:sonair.LightningClassifier
   model: !lazy:sonair.TimmModel
     model_name: efficientvit_b0
     pretrained: true
+  # model: !lazy:sonair.TorchConvNet
+  #   input_shape: [224, 224, 3]     # (H, W, C) in every implementation — the KNOB is
+  #                                  # channels-last even though torch's TENSOR is NCHW,
+  #                                  # so this one line is identical in all five blocks.
 
 
 # Broadcasts into the classifier's ctor, which bakes it into its own
@@ -124,6 +139,24 @@ logger:
 # little a live one has to say, because the data, the knobs and the run identity are
 # already shared.
 #
+# PyTorch with NO training framework at all — the control experiment. This is the
+# smallest block in the file and that is its entire point: `sonair torch train` swaps
+# `pytorch_lightning.Trainer` for a hand-written loop and NOTHING else changes. Same
+# `TimmModel`, same `preprocess` chain, same `torch.nn` loss set, same metrics, same
+# artifacts. The one key it must drop is `logger:` — those are `pytorch_lightning`
+# loggers and there is no Trainer to hand them to; tracking goes through `trackers:`,
+# which every backend has.
+#
+#   sonair torch train examples/train_efficientvit_b0_mnist.yaml
+#
+torch: !scope:framework=torch
+  runnable: !class:sonair.TorchClassifier
+  # Bare-torch-only knobs: where to run, where the state_dict lands, optional clipping.
+  #   device: auto            # auto | cpu | cuda | mps
+  #   checkpoint_dir: ./torch_runs/mnist
+  #   grad_clip: 1.0
+  logger: null
+
 keras: !scope:framework=keras
   # Everything above this line is shared verbatim — dataset, splits, batch size, epochs,
   # run identity. What a backend swap actually costs is THIS block.
@@ -189,7 +222,7 @@ keras: !scope:framework=keras
 #   #
 #   #   KerasModel         a keras.applications zoo backbone, pretrained. Best accuracy;
 #   #                      `tf.keras` IS Keras 3, so this is TF-native despite the name.
-#   #   TensorFlowConvNet  the shared conv spec in raw tf.nn ops (sonair/convnet_spec.py).
+#   #   TensorFlowConvNet  the shared conv spec in raw tf.nn ops (sonair/convnet/spec.py).
 #   #                      No pretrained weights — it exists so the same architecture can be
 #   #                      compared against its Flax, MLX and Keras twins.
 #   #   KerasConvNet       the same spec in keras.layers — runs on any Keras engine.
@@ -228,6 +261,10 @@ keras: !scope:framework=keras
 #     learning_rate: 0.001
 #     one_cycle: true
 #     metrics: [accuracy, top_k_accuracy]
+#     # No `model:` override — fastai IS torch, so it inherits the top-level slot
+#     # unchanged, whether that is `TimmModel` or `TorchConvNet`. There is no
+#     # `FastaiConvNet` for the same reason there is no `fastai_model.py`: a backend
+#     # that adds no new wiring surface adds no new module.
 #   logger:
 #     - !class:fastai.callback.progress.CSVLogger
 #       fname: fastai_logs/mnist.csv
@@ -251,8 +288,8 @@ keras: !scope:framework=keras
 
 # jax — a jitted optax loop over a Flax model. The `model:` block is the interesting part:
 # there is NO Flax zoo to wrap (transformers dropped Flax in v5, flaxmodels last released in
-# 2023), so `FlaxModel` implements sonair's own shared conv spec — the SAME architecture that
-# `KerasConvNet`, `TensorFlowConvNet` and `MlxModel` implement, so a cross-framework
+# 2023), so `FlaxConvNet` implements sonair's own shared conv spec — the SAME architecture that
+# `KerasConvNet`, `TensorFlowConvNet` and `MlxConvNet` implement, so a cross-framework
 # comparison compares frameworks rather than four different networks. It has no pretrained
 # weights, which is why the accuracy here is far below the zoo-backed backends above.
 #
@@ -266,7 +303,7 @@ keras: !scope:framework=keras
 #     learning_rate: 0.001
 #     optimizer: adam
 #     metrics: [accuracy]
-#   model: !lazy:sonair.FlaxModel
+#   model: !lazy:sonair.FlaxConvNet
 #     input_shape: [224, 224, 3]     # channels LAST, like the keras block
 #   preprocess:                      # ...and so the chain STOPS before a CHW ToTensor
 #     - !class:recordstream.ops.image.ConvertToImage
@@ -274,7 +311,7 @@ keras: !scope:framework=keras
 #       height: 224
 
 # mlx — Apple-silicon unified memory. The block is the jax one with two words changed, which
-# is the point: same architecture (`sonair/convnet_spec.py`, its fourth implementation), same
+# is the point: same architecture (`sonair/convnet/spec.py`, its fourth implementation), same
 # channels-last preprocessing, same knobs. What differs is underneath — no host/device copy,
 # and lazy arrays the loop has to `mx.eval`.
 #
@@ -289,7 +326,7 @@ keras: !scope:framework=keras
 #     learning_rate: 0.001
 #     optimizer: Adam                # a CLASS name here, unlike jax's optax factory
 #     metrics: [accuracy]
-#   model: !lazy:sonair.MlxModel
+#   model: !lazy:sonair.MlxConvNet
 #     input_shape: [224, 224, 3]
 #   preprocess:
 #     - !class:recordstream.ops.image.ConvertToImage

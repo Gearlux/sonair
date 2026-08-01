@@ -1,20 +1,20 @@
 """The shared conv spec — one architecture, implemented per framework.
 
-This file is the reason `sonair/convnet_spec.py` exists. Four hand-written implementations of
+This file is the reason `sonair/convnet/spec.py` exists. Five hand-written implementations of
 "the same" network agree only by accident unless something checks, and the thing worth checking
 is not that each runs but that they are the SAME network. The parameter count is derived from
 the spec rather than measured from one implementation, so no framework is the reference and a
 drift in any of them fails here.
 
 Each implementation is skipped when its framework is absent — they are selectable backends, not
-core dependencies — so this file reports on whatever is installed rather than requiring all four.
+core dependencies — so this file reports on whatever is installed rather than requiring all five.
 """
 
 from typing import Any, Callable, Dict, List, Tuple
 
 import pytest
 
-from sonair.convnet_spec import CONV_WIDTHS, INPUT_SHAPE, KERNEL_SIZE, POOL_SIZE, trainable_parameter_count
+from sonair.convnet.spec import CONV_WIDTHS, INPUT_SHAPE, KERNEL_SIZE, POOL_SIZE, trainable_parameter_count
 
 NUM_CLASSES = 10
 INPUT = (16, 16, 3)
@@ -44,10 +44,10 @@ def test_the_count_is_derived_from_the_architecture() -> None:
 
 def test_the_constants_are_the_single_source_of_truth() -> None:
     """Each implementation imports these for its defaults, so "same architecture" is true by
-    construction for the knobs rather than by four copies agreeing."""
+    construction for the knobs rather than by five copies agreeing."""
     assert CONV_WIDTHS == (32, 64, 128)
     assert KERNEL_SIZE == 3 and POOL_SIZE == 2
-    assert INPUT_SHAPE == (224, 224, 3), "channels LAST — flax, mlx and keras all default to NHWC"
+    assert INPUT_SHAPE == (224, 224, 3), "the KNOB is (H, W, C) in all five, whatever the tensor layout"
 
 
 # --------------------------------------------------------------------------- #
@@ -55,10 +55,18 @@ def test_the_constants_are_the_single_source_of_truth() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _torch_params() -> int:
+    from sonair.convnet.torch_convnet import TorchConvNet
+
+    model = TorchConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
+    model.solidify()
+    return int(model.parameter_count)
+
+
 def _keras_params() -> int:
     import math
 
-    from sonair.keras_model import KerasConvNet
+    from sonair.convnet.keras_convnet import KerasConvNet
 
     model = KerasConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
     # `.shape`, not `.size`: a Keras 3 `Variable` has no `.size` (measured) — it is a backend
@@ -70,23 +78,25 @@ def _flax_params() -> int:
     import jax
     from flax import nnx
 
-    from sonair.flax_model import FlaxModel
+    from sonair.convnet.flax_convnet import FlaxConvNet
 
-    model = FlaxModel(num_classes=NUM_CLASSES, input_shape=INPUT)
+    model = FlaxConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
     model.solidify()
     return int(sum(int(v.size) for v in jax.tree_util.tree_leaves(nnx.state(model, nnx.Param))))
 
 
 def _mlx_params() -> int:
-    from sonair.mlx_model import MlxModel  # type: ignore[import-not-found]  # lands with the mlx backend
+    from sonair.convnet.mlx_convnet import MlxConvNet  # type: ignore[import-not-found]  # lands with the mlx backend
 
-    model = MlxModel(num_classes=NUM_CLASSES, input_shape=INPUT)
+    model = MlxConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
     model.solidify()
     return int(model.parameter_count)
 
 
 def _tensorflow_params() -> int:
-    from sonair.tensorflow_model import TensorFlowConvNet  # type: ignore[import-not-found]  # lands with the TF models
+    from sonair.convnet.tensorflow_convnet import (
+        TensorFlowConvNet,  # type: ignore[import-not-found]  # lands with the TF models
+    )
 
     model = TensorFlowConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
     model.solidify()
@@ -95,6 +105,7 @@ def _tensorflow_params() -> int:
 
 #: implementation name -> (the module that must import, how to count its trainable parameters)
 IMPLEMENTATIONS: Dict[str, Tuple[str, Callable[[], int]]] = {
+    "torch": ("torch", _torch_params),
     "keras": ("keras", _keras_params),
     "flax": ("jax", _flax_params),
     "mlx": ("mlx", _mlx_params),
@@ -106,9 +117,9 @@ def _usable(name: str, module: str) -> bool:
     """Is this implementation both installed AND usable in THIS process?
 
     Installed is not sufficient for `tensorflow`: Keras binds ONE engine per process, and
-    `sonair.tensorflow_model` imports through the shim that pins `KERAS_BACKEND=tensorflow`.
+    `sonair.convnet.tensorflow_convnet` imports through the shim that pins `KERAS_BACKEND=tensorflow`.
     In a full `pytest` run another test has already bound torch, so building it there fails —
-    the same split `tests/test_tensorflow_model.py` documents. Alone it passes; that is why the
+    the same split `tests/test_tensorflow_convnet.py` documents. Alone it passes; that is why the
     condition is the ENGINE, not the install.
     """
     import importlib.util
@@ -155,20 +166,24 @@ def test_every_implementation_takes_the_same_constructor_knobs() -> None:
     import inspect
 
     classes: List[Any] = []
+    if _usable("torch", "torch"):
+        from sonair.convnet.torch_convnet import TorchConvNet
+
+        classes.append(TorchConvNet)
     if _usable("keras", "keras"):
-        from sonair.keras_model import KerasConvNet
+        from sonair.convnet.keras_convnet import KerasConvNet
 
         classes.append(KerasConvNet)
     if _usable("flax", "jax"):
-        from sonair.flax_model import FlaxModel
+        from sonair.convnet.flax_convnet import FlaxConvNet
 
-        classes.append(FlaxModel)
+        classes.append(FlaxConvNet)
     if _usable("mlx", "mlx"):
-        from sonair.mlx_model import MlxModel  # type: ignore[import-not-found]
+        from sonair.convnet.mlx_convnet import MlxConvNet  # type: ignore[import-not-found]
 
-        classes.append(MlxModel)
+        classes.append(MlxConvNet)
     if _usable("tensorflow", "tensorflow"):
-        from sonair.tensorflow_model import TensorFlowConvNet  # type: ignore[import-not-found]
+        from sonair.convnet.tensorflow_convnet import TensorFlowConvNet  # type: ignore[import-not-found]
 
         classes.append(TensorFlowConvNet)
 

@@ -71,6 +71,13 @@ class _TinyHF(torch.nn.Module):
         return ImageClassifierOutput(loss=cast(Any, loss), logits=logits)
 
 
+#: What a test wires when it never touches the model slot. `model` is
+#: `Mandatory[Lazy[HuggingFaceNetwork]]` — it must be wired, and it must be the wrapper or a live
+#: torch model — so these tests wire the cheapest legal thing rather than `None`, which only
+#: type-checked while the slot was `Lazy[Any]`.
+_NO_MODEL = torch.nn.Identity()
+
+
 def _records(n: int, num_classes: int = 3) -> List[dict]:
     """Channels-FIRST records — what a torch preprocessing chain (``ToTensor``) produces."""
     from recordstream.items import Image
@@ -116,7 +123,7 @@ def test_discovery_tags() -> None:
 
 def test_zero_arg_construction_does_no_work() -> None:
     """The workspace lazy-init mandate: constructing must not build, download or walk."""
-    clf = HuggingFaceClassifier(model=None)
+    clf = HuggingFaceClassifier(model=_NO_MODEL)
 
     assert clf.num_classes is None and clf.metrics is None
     assert clf._computed_metrics == {}
@@ -135,7 +142,7 @@ def test_the_deferred_slots_are_declared_lazy() -> None:
 def test_the_collate_produces_the_two_keys_transformers_takes() -> None:
     """`pixel_values` is what an image model's forward takes; `labels` is what makes it
     return a loss. Those key names are transformers' contract, not ours."""
-    clf = HuggingFaceClassifier(model=None, num_classes=3)
+    clf = HuggingFaceClassifier(model=_NO_MODEL, num_classes=3)
     batch = clf._to_hf_batch(_records(4))
 
     assert set(batch) == {"pixel_values", "labels"}
@@ -149,13 +156,13 @@ def test_int64_labels_are_named_explicitly() -> None:
     from recordstream.items import Image
 
     records = [{"image": Image(torch.zeros(3, 8, 8)), "class": np.int32(2)}]
-    assert HuggingFaceClassifier(model=None)._to_hf_batch(records)["labels"].dtype == torch.int64
+    assert HuggingFaceClassifier(model=_NO_MODEL)._to_hf_batch(records)["labels"].dtype == torch.int64
 
 
 def test_a_multilabel_target_becomes_a_FLOAT_multi_hot() -> None:
     """`problem_type="multi_label_classification"` routes to BCEWithLogitsLoss, which compares
     against float targets — an int64 multi-hot would raise inside the model."""
-    clf = HuggingFaceClassifier(model=None, num_classes=3)
+    clf = HuggingFaceClassifier(model=_NO_MODEL, num_classes=3)
     clf.multilabel = True
 
     labels = clf._to_hf_batch(_multilabel_records(2))["labels"]
@@ -165,7 +172,7 @@ def test_a_multilabel_target_becomes_a_FLOAT_multi_hot() -> None:
 
 
 def test_a_multilabel_batch_without_num_classes_says_so() -> None:
-    clf = HuggingFaceClassifier(model=None)
+    clf = HuggingFaceClassifier(model=_NO_MODEL)
     clf.multilabel = True
 
     with pytest.raises(RuntimeError, match="num_classes"):
@@ -177,7 +184,7 @@ def test_the_batch_shape_matches_the_lightning_backend() -> None:
     from recordstream import batch_tensor, collate_records
 
     records = _records(4)
-    batch = HuggingFaceClassifier(model=None, num_classes=3)._to_hf_batch(records)
+    batch = HuggingFaceClassifier(model=_NO_MODEL, num_classes=3)._to_hf_batch(records)
 
     assert torch.equal(batch["pixel_values"], batch_tensor(collate_records(records), "image"))
 
@@ -190,7 +197,7 @@ def test_the_batch_shape_matches_the_lightning_backend() -> None:
 def test_the_shared_knobs_become_training_arguments(tmp_path: Path) -> None:
     """One flat config drives this backend and every other — the translation is here."""
     clf = HuggingFaceClassifier(
-        model=None, max_epochs=7, batch_size=4, num_workers=2, learning_rate=1e-3, output_dir=str(tmp_path)
+        model=_NO_MODEL, max_epochs=7, batch_size=4, num_workers=2, learning_rate=1e-3, output_dir=str(tmp_path)
     )
     args = clf._training_arguments()
 
@@ -204,13 +211,13 @@ def test_unused_column_removal_is_off() -> None:
     """A recordstream source is not a `datasets.Dataset`, so Trainer must not try to drop
     "unused" columns by inspecting the model signature — the collate already produces exactly
     the two keys the model takes."""
-    assert HuggingFaceClassifier(model=None)._training_arguments().remove_unused_columns is False
+    assert HuggingFaceClassifier(model=_NO_MODEL)._training_arguments().remove_unused_columns is False
 
 
 def test_reporting_is_off_by_default() -> None:
     """Trainer auto-enables every tracker it can import. On a workspace with wandb and mlflow
     installed, an innocent run would silently start reporting to both."""
-    args = HuggingFaceClassifier(model=None)._training_arguments()
+    args = HuggingFaceClassifier(model=_NO_MODEL)._training_arguments()
 
     assert args.report_to in ([], ["none"], "none"), args.report_to
 

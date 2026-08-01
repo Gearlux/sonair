@@ -28,7 +28,7 @@ VERB_TASKS = {"train": "fit", "evaluate": "test", "predict": "predict"}
 #: The backends that actually train, restated here rather than imported blind — this list is
 #: the test's own claim about what sonair ships, so a backend silently disappearing from
 #: `cli.IMPLEMENTED` has to fail something.
-EXPECTED_IMPLEMENTED = ("lightning", "keras", "tensorflow", "fastai", "huggingface", "jax", "mlx")
+EXPECTED_IMPLEMENTED = ("lightning", "torch", "keras", "tensorflow", "fastai", "huggingface", "jax", "mlx")
 
 
 def test_the_implemented_set_is_the_one_we_expect() -> None:

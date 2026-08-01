@@ -41,12 +41,11 @@ def test_the_extra_carries_the_platform_marker() -> None:
     assert "sys_platform == 'darwin' and platform_machine == 'arm64'" in pyproject
 
 
-def test_mlx_is_an_implemented_backend_not_a_template() -> None:
-    from sonair.cli import IMPLEMENTED, TEMPLATES
+def test_mlx_is_a_real_backend() -> None:
+    from sonair.cli import FRAMEWORKS
 
-    assert "mlx" in IMPLEMENTED
-    assert "mlx" not in TEMPLATES
-    assert IMPLEMENTED["mlx"].registrations is None, "mlx.nn.losses are functions — nothing to register"
+    assert "mlx" in FRAMEWORKS
+    assert FRAMEWORKS["mlx"].registrations is None, "mlx.nn.losses are functions — nothing to register"
 
 
 def test_every_advertised_backend_is_implemented() -> None:
@@ -54,13 +53,17 @@ def test_every_advertised_backend_is_implemented() -> None:
 
     The COUNT is deliberately not asserted here — `sonair torch` landed as an eighth backend
     after this file was written, and a hard number turns every future backend into a failure in
-    the mlx suite. `tests/test_cli_frameworks.py::test_the_implemented_set_is_the_one_we_expect`
-    owns the exact roster; this one owns the invariant that `TEMPLATES` has been emptied.
-    """
-    from sonair.cli import IMPLEMENTED, TEMPLATES
+    the mlx suite. `tests/test_cli_frameworks.py::test_the_framework_set_is_the_one_we_expect`
+    owns the exact roster; this one owns the invariant that nothing is advertised as a stub.
 
-    assert TEMPLATES == {}
-    assert "mlx" in IMPLEMENTED
+    The old `TEMPLATES` dict is GONE rather than empty — when the backend stopped being a
+    subcommand there was no longer a sub-app to mount for an unbuilt one, so `sonair frameworks`
+    lists what is real and nothing else.
+    """
+    import sonair.cli as sonair_cli
+
+    assert not hasattr(sonair_cli, "TEMPLATES"), "an unbuilt backend has nowhere to be advertised now"
+    assert "mlx" in sonair_cli.FRAMEWORKS
 
 
 # --------------------------------------------------------------------------- #

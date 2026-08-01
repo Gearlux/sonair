@@ -47,7 +47,7 @@ class TensorFlowModel(tf.Module):
 
     This is the TF-native counterpart to ``KerasModel``'s ``keras.applications`` and
     ``HuggingFaceModel``'s Hub: point it at any exported SavedModel — one this project produced
-    with ``sonair tensorflow train``, or one downloaded from Kaggle Models, which is where TF
+    with ``sonair train --framework tensorflow``, or one downloaded from Kaggle Models, which is where TF
     Hub redirected. Core TensorFlow, no extra dependency.
 
     Args:

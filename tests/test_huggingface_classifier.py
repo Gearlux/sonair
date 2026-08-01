@@ -414,7 +414,7 @@ def test_it_registers_no_loss_module() -> None:
     nothing for a config to wire — and therefore no `huggingface_classification.py`."""
     import importlib.util
 
-    from sonair.cli import IMPLEMENTED
+    from sonair.cli import FRAMEWORKS
 
-    assert IMPLEMENTED["huggingface"].registrations is None
+    assert FRAMEWORKS["huggingface"].registrations is None
     assert importlib.util.find_spec("sonair.huggingface_classification") is None

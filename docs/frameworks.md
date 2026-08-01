@@ -8,24 +8,32 @@ Why it is shaped this way is recorded in
 [Architecture Decisions](architecture.md).
 
 ```bash
-sonair lightning  train    cfg.yaml    # implemented — PyTorch Lightning
-sonair lightning  evaluate cfg.yaml
-sonair lightning  predict  cfg.yaml
+sonair train    cfg.yaml                       # the config's default backend
+sonair evaluate cfg.yaml
+sonair predict  cfg.yaml
 
-sonair torch      train  cfg.yaml     # implemented — a hand-written loop, no framework
-sonair keras      train  cfg.yaml     # implemented — Keras 3
-sonair tensorflow train  cfg.yaml     # implemented — tf.data + tf.GradientTape
-sonair fastai     train  cfg.yaml     # implemented — Learner + one-cycle
-sonair huggingface train cfg.yaml     # implemented — transformers Trainer
-sonair jax        train  cfg.yaml     # implemented — jitted optax loop
-sonair mlx        train  cfg.yaml     # implemented — Apple-silicon unified memory
+sonair train cfg.yaml --framework torch        # a hand-written loop, no framework
+sonair train cfg.yaml --framework keras        # Keras 3
+sonair train cfg.yaml --framework tensorflow   # tf.data + tf.GradientTape
+sonair train cfg.yaml --framework fastai       # Learner + one-cycle
+sonair train cfg.yaml --framework huggingface  # transformers Trainer
+sonair train cfg.yaml --framework jax          # jitted optax loop
+sonair train cfg.yaml --framework mlx          # Apple-silicon unified memory
 ```
 
-`sonair --help` lists the backends; `sonair <backend> --help` lists its verbs.
-Every backend the CLI advertises is now implemented — the roadmap is finished.
-Templates were how it advertised the unbuilt ones (the verbs existed and raised
-an actionable error naming the file to create); `TEMPLATES` is empty today, and
-the machinery stays because it is how the NEXT backend will be advertised.
+`sonair frameworks` lists them with a line each. The same flag drives the generic
+runner — `recordstream run cfg.yaml --framework keras` — because it is not really
+a CLI feature at all: it activates a `!scope:framework=<name>` block in the config,
+and any runner that loads a confluid document can do that.
+
+The name must match a block the config declares. `--framework kears` is an error
+listing the backends that file *does* declare, rather than a silent fall-through to
+the default — so a mistyped or unsupported backend fails immediately instead of
+training the wrong thing.
+
+Every backend the CLI advertises is implemented — the roadmap is finished. An
+unbuilt one is simply absent from `FRAMEWORKS`; there is no stub to mount now that
+the backend is a flag rather than a subcommand.
 
 ## What each layer owns
 
@@ -144,24 +152,24 @@ Three steps, no plumbing.
 reference implementation; `recordstream/docs/runnable.md` documents the
 runnable protocol itself.
 
-**2. Move it from `TEMPLATES` to `IMPLEMENTED`** in
-[`sonair/cli.py`](../sonair/cli.py). Both are tables of the three values a
-backend's sub-app differs by, so promoting one is a two-line edit and no new
-code:
+**2. Add a row to `FRAMEWORKS`** in [`sonair/cli.py`](../sonair/cli.py). It is a
+table of the two values a backend differs by — what to say about it, and which
+module registers its losses/metrics — so this is a one-entry edit and no new code:
 
 ```python
-IMPLEMENTED: Dict[str, Backend] = {
+FRAMEWORKS: Dict[str, Framework] = {
     ...,
-    "jax": Backend(
+    "jax": Framework(
         "JAX + Flax/NNX — functional transforms, jit/pmap scaling.",
         "sonair.jax_classification",      # or an existing set, if it shares one
     ),
 }
 ```
 
-`_backend_app` builds the three `train` / `evaluate` / `predict` verbs from that
-entry — each `flow_mode="manual"`, each importing the named registration module
-and calling `_dispatch` with the verb's task. Declare the backend's dependencies
+The three verbs are built once, for every backend, so a new row adds no commands.
+What the row drives is `sonair frameworks` and — when `--framework jax` is passed
+— importing that registration module before the config is loaded, so a config may
+name the engine's losses by their bare names. Declare the backend's dependencies
 under the matching extra in `pyproject.toml` and install with
 `pip install "sonair[jax]"`.
 
@@ -175,7 +183,8 @@ registered `framework="torch"`. Three name **no** module at all
 `AutoModelFor*` computes its own loss from `config.problem_type` and there is
 nothing a config could wire; `jax` and `mlx`, because optax and `mlx.nn.losses`
 ship plain FUNCTIONS, which confluid's `register` — a class decorator — cannot
-tag. Those two resolve a loss by NAME instead. When the engine's
+tag. Those two resolve a loss by NAME instead. (`Framework.registrations` is what
+this refers to.) When the engine's
 loss API *is* new, create `sonair/<framework>_classification.py` — tuples of
 *upstream* classes, a `register(...)` loop each, and a literal `__all__` naming
 every one — then add it to
@@ -200,20 +209,19 @@ and the `PrecisionAtRecall` family (which sweeps thresholds across `[0, 1]`) are
 left out. Leaving a class unregistered removes it from the pickers only —
 `!class:keras.metrics.Accuracy` still resolves from YAML.
 
-There is still **no registry module or `Framework` dataclass** — the tables in
-`cli.py` are data, not machinery. See [Architecture Decisions
-§1](architecture.md) for what the fourth backend changed and what it did not.
+There is still **no registry module** — `FRAMEWORKS` is data, not machinery, and
+`Framework` is a two-field `NamedTuple`. See [Architecture Decisions
+§1](architecture.md) for what the fourth backend changed, and §1b for why the
+eighth one collapsed the sub-apps into a flag.
 
-## Adding a *new* framework
+## The backends today
 
-A new template is one line in `TEMPLATES`; a new working backend is a sub-app
-like the one above.
-
-Implemented: **PyTorch** (via Lightning — the reference), **Keras 3**,
-**TensorFlow** (a native `tf.data` + `tf.GradientTape` loop) and **fastai**.
-Registered as templates: **JAX** (Flax/NNX), **Hugging Face Transformers**
-`Trainer` + Accelerate, and **MLX** (Apple silicon; its extra carries a platform
-marker so `pip install "sonair[mlx]"` stays installable elsewhere).
+All eight are implemented: **PyTorch** (via Lightning — the reference), **bare
+PyTorch** (a hand-written loop, no training framework at all), **Keras 3**,
+**TensorFlow** (a native `tf.data` + `tf.GradientTape` loop), **fastai**,
+**Hugging Face Transformers** (`Trainer` + Accelerate), **JAX** (Flax/NNX) and
+**MLX** (Apple silicon; its extra carries a platform marker so
+`pip install "sonair[mlx]"` stays installable elsewhere).
 
 Still unregistered — for non-deep-learning baselines,
 **scikit-learn** and the gradient-boosting family (**XGBoost** / **LightGBM** /
@@ -242,6 +250,10 @@ runnable: !class:sonair.LightningClassifier
 model: !lazy:sonair.TimmModel
   model_name: efficientvit_b0
 
+# the default, named — so `--framework lightning` is a checkable value, not a no-op
+lightning: !scope:framework=lightning
+  runnable: !class:sonair.LightningClassifier
+
 # an alternative overrides only those keys
 keras: !scope:framework=keras
   runnable: !class:sonair.KerasClassifier
@@ -249,16 +261,36 @@ keras: !scope:framework=keras
     model_name: efficientvit_b0
 ```
 
-The `sonair <backend>` verb activates the matching scope for you, so the backend
-is never named twice:
+Note that **every framework-specific key is a top-level sibling** — `runnable`,
+`model`, `logger` — rather than `model:` living inside `runnable:`. That is not
+style. A scope block replaces a *key*, taking its whole subtree with it, so a
+nested `model:` disappears the instant a block swaps the runnable, and the
+backend that inherits it dies with `__init__() missing 1 required positional
+argument: 'model'`. Keep the slots siblings and a block can override one without
+erasing another.
+
+Activate a block with `--framework`, on either runner:
 
 ```bash
-sonair keras train cfg.yaml                         # implies --scope framework=keras
-recordstream run  cfg.yaml --scope framework=keras  # the explicit form
+sonair train      cfg.yaml --framework keras        # the shorthand
+recordstream run  cfg.yaml --framework keras        # same flag, generic runner
+recordstream run  cfg.yaml --scope framework=keras  # what both expand to
 recordstream run  cfg.yaml                          # no scope -> the default backend
 ```
 
-An explicit `--scope framework=…` or `--framework …` always wins over the verb.
+`--framework <name>` must match a block. Confluid raises on an activation that
+matches nothing, listing the values the document declares:
+
+```console
+$ sonair train cfg.yaml --framework kears
+Error: No scope block matches framework='kears'. This document declares framework
+with: keras, lightning. Either use one of those values, or add a
+`!scope:framework=kears` block.
+```
+
+This is why the default backend gets a block of its own. The top level already
+*is* lightning, so the block only restates the runnable — but without it,
+`--framework lightning` would name a value nothing declares and be rejected.
 
 [`examples/train_efficientvit_b0_mnist.yaml`](../examples/train_efficientvit_b0_mnist.yaml)
 is built this way. Its `torch` and `keras` blocks are **live**; the rest stay
@@ -270,29 +302,24 @@ extra (`pip install 'sonair[tensorflow]'`) and uncomment the block you want:
 uncommenting one both activates that backend and declares the `framework`
 dimension, which is what makes the implicit `--framework <name>` flag bind.
 
-## Why templates instead of hiding unimplemented backends
+## Adding a backend
 
-`TEMPLATES` is empty today — every advertised backend is implemented — so the
-transcript below is what the NEXT one will print, with `<name>` standing in for
-whatever it is called. A template fails with the file to create, the reference to
-copy, and the exact registry line that switches it on:
+Three steps, and only the first is real work:
 
-```console
-$ sonair <name> train
-Error: `sonair <name> train` is not implemented yet — <name> is a backend TEMPLATE.
-...
-  1. Create sonair/<name>_classifier.py with a runnable class: ...
-  2. Move `<name>` from TEMPLATES to IMPLEMENTED in sonair/cli.py, naming the
-     module that registers its losses/metrics.
-  3. Install the backend: pip install 'sonair[<name>]'
-```
+1. Write `sonair/<name>_classifier.py` — a runnable class with a `task` Literal,
+   `run()` → `initialize()` → `@entrypoint`-tagged methods, and
+   `@configurable(task="classification", role="trainer", framework=…)`. Copy
+   [`lightning_classifier.py`](../sonair/lightning_classifier.py).
+2. Add a row to `FRAMEWORKS` in [`cli.py`](../sonair/cli.py) — a description and
+   the module that registers its losses/metrics (or `None`) — plus the name in
+   `EXPECTED_FRAMEWORKS` in `tests/test_cli_frameworks.py`, a `[<name>]` extra in
+   `pyproject.toml`, and a `confluid.configurables` entry point for the new module.
+3. Add a `!scope:framework=<name>` block to a config.
 
-That is exactly how every backend after the first got built — `keras` (2026-07-29)
-through `mlx` (2026-07-31): the template named the file, the reference and the edit,
-and graduating it meant deleting its entry from `TEMPLATES`, adding a real sub-app,
-and moving it to `EXPECTED_IMPLEMENTED` in `tests/test_cli_frameworks.py` — which
-then holds it to the same verb surface as the rest.
-
-It exits 1 through liquifai's failure contract (one clean message, full
-traceback under `--debug`) rather than raising an unhandled `NotImplementedError`
-— an unbuilt backend is a documented state, not a crash.
+Until 2026-08-01 an unbuilt backend was *advertised*: a `TEMPLATES` dict mounted
+its verbs so `--help` showed the roadmap, and calling one raised an actionable
+error naming the file to create. That machinery went with the sub-apps, since a
+flag has nowhere to hang a stub — `--framework <name>` for a name that is not in
+`FRAMEWORKS` simply imports no registrations, and the config's own scope check
+reports what it does declare. `sonair frameworks` now lists exactly what is real,
+which is a smaller and more honest claim than a menu of half of them.

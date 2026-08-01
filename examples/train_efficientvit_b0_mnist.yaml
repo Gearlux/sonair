@@ -1,7 +1,7 @@
 # One classification config, every training backend — MNIST (10-class digits).
 #
-#   sonair lightning train examples/train_efficientvit_b0_mnist.yaml
-#   recordstream run       examples/train_efficientvit_b0_mnist.yaml   # generic runner, no verb
+#   sonair train     examples/train_efficientvit_b0_mnist.yaml
+#   recordstream run examples/train_efficientvit_b0_mnist.yaml   # generic runner, no verb
 #
 # ---------------------------------------------------------------------------
 # The shape of this file IS the demo
@@ -12,16 +12,22 @@
 # demonstrate, made checkable by putting both halves in one file.
 #
 # The top level is also the DEFAULT backend (lightning), so this config runs
-# as-is under `recordstream run` with no scope at all. An alternative backend
-# is a `!scope:framework=<name>` block that OVERRIDES only the framework
-# specific keys (document order, last write wins). The `sonair <backend>` verb
-# activates the matching scope for you; explicitly it is:
+# as-is with no scope at all. An alternative backend is a
+# `!scope:framework=<name>` block that OVERRIDES only the framework-specific
+# keys (document order, last write wins). `--framework <name>` activates it,
+# and it is the SAME flag on either runner:
+#
+#   sonair train     examples/train_efficientvit_b0_mnist.yaml --framework keras
+#   recordstream run examples/train_efficientvit_b0_mnist.yaml --framework keras
+#
+# which is shorthand for the scope it activates:
 #
 #   recordstream run examples/train_efficientvit_b0_mnist.yaml --scope framework=keras
 #
-# or simply, since the verb injects the scope for you:
-#
-#   sonair keras train examples/train_efficientvit_b0_mnist.yaml
+# The name must match a block below. `--framework kears` is an ERROR listing the
+# backends this file declares, not a silent fall-through to the default — which
+# is what the retired `sonair keras train` form did, since a backend subcommand
+# named an engine nothing ever compared against the config.
 #
 # How it stays this small:
 #  * `sonair.LightningClassifier` bakes loss (CrossEntropy), collate, optimizer
@@ -89,11 +95,22 @@ max_epochs: 3
 # ===========================================================================
 # Top level = the default backend (lightning).
 #
+# EVERY framework-specific key sits at THIS level — `runnable`, `model`, `logger`
+# — and an alternative backend overrides the ones it must. That flatness is not
+# cosmetic. A scope block replaces a KEY, taking its whole subtree with it, so a
+# `model:` nested INSIDE `runnable:` would vanish the moment a block swapped the
+# runnable: `--framework torch` used to die with `TorchClassifier.__init__()
+# missing 1 required positional argument: 'model'` for exactly that reason, while
+# the comment beside it claimed the model was inherited. Keep every slot a
+# sibling of the others and a block can override one without erasing another.
+#
 # No `task:` here on purpose. The classifier's constructor already defaults to
-# `fit`, and every `sonair <backend> <verb>` sets the task from the verb
-# (train->fit, evaluate->test, predict->predict), so a `task: fit` line would be
-# dead in both paths. Set `task:` only to change what a BARE `recordstream run`
-# does — e.g. `task: test` in an eval-only config that ships without a verb.
+# `fit`, and every `sonair <verb>` sets the task from the verb (train->fit,
+# evaluate->test, predict->predict), so a `task: fit` line would be dead in both
+# paths. Set `task:` only to change what a BARE `recordstream run` does — e.g.
+# `task: test` in an eval-only config that ships without a verb.
+
+runnable: !class:sonair.LightningClassifier
 
 # THE MODEL SLOT TAKES TWO THINGS HERE — one active, one alternative. They differ
 # in what they WRAP, not in how they are wired, which is the whole point:
@@ -106,17 +123,23 @@ max_epochs: 3
 #                 JAX and MLX and the comparison is between frameworks rather than
 #                 between five different networks.
 #
-# `!lazy:` so `initialize()` can inject the dataset-derived num_classes (10).
-runnable: !class:sonair.LightningClassifier
-  model: !lazy:sonair.TimmModel
-    model_name: efficientvit_b0
-    pretrained: true
-  # model: !lazy:sonair.TorchConvNet
-  #   input_shape: [224, 224, 3]     # (H, W, C) in every implementation — the KNOB is
-  #                                  # channels-last even though torch's TENSOR is NCHW,
-  #                                  # so this one line is identical in all five blocks.
-  convnet: !scope:model=convnet
-    model: !lazy:sonair.convnet.torch_convnet.TorchConvNet
+# It broadcasts into the runnable's `model` ctor param like every other top-level
+# key, and the three torch-backed backends (lightning / torch / fastai) all read
+# this one line. `!lazy:` so `initialize()` can inject the dataset-derived
+# num_classes (10).
+model: !lazy:sonair.TimmModel
+  model_name: efficientvit_b0
+  pretrained: true
+
+# `--model convnet` swaps the backbone for the shared conv spec, on any of the
+# three torch-backed backends. It sits at the top level for the same reason the
+# model does: a block nested in `runnable:` would die with the runnable it was
+# written under.
+convnet: !scope:model=convnet
+  model: !lazy:sonair.convnet.torch_convnet.TorchConvNet
+    input_shape: [224, 224, 3]     # (H, W, C) in every implementation — the KNOB is
+                                   # channels-last even though torch's TENSOR is NCHW,
+                                   # so this one line is identical in all five blocks.
 
 
 # Broadcasts into the classifier's ctor, which bakes it into its own
@@ -128,28 +151,41 @@ logger:
     name: mnist_efficientvit_b0
 
 # ---------------------------------------------------------------------------
-# Alternative backends
+# The framework blocks
 # ---------------------------------------------------------------------------
 # Each is a scope block overriding ONLY the keys above this divider. `keras` is
-# LIVE — it is implemented, and `sonair keras train <this file>` runs it. `tensorflow`
-# and `fastai` are implemented too but stay COMMENTED, for a different reason than
-# `jax`: their runnable classes exist, their extras are simply not part of the
-# workspace's selected frameworks, so a live block would break `tests/test_examples_load.py`
-# on a default checkout (loading the config imports every `!class:` it names). Select
-# them — `aisland framework set lightning keras tensorflow fastai`, or
-# `pip install 'sonair[tensorflow,fastai]'` — and uncomment the block you want. Note how
-# little a live one has to say, because the data, the knobs and the run identity are
-# already shared.
+# LIVE — it is implemented, and `sonair train <this file> --framework keras` runs it.
+# `tensorflow` and `fastai` are implemented too but stay COMMENTED, for a different
+# reason than `jax`: their runnable classes exist, their extras are simply not part of
+# the workspace's selected frameworks, so a live block would break
+# `tests/test_examples_load.py` on a default checkout (loading the config imports every
+# `!class:` it names). Select them — `aisland framework set lightning keras tensorflow
+# fastai`, or `pip install 'sonair[tensorflow,fastai]'` — and uncomment the block you
+# want. Note how little a live one has to say, because the data, the knobs and the run
+# identity are already shared.
 #
+# `--framework <name>` must name a block that EXISTS: confluid raises when an active
+# scope value matches nothing on a dimension the document declares, so a typo is an
+# error listing the real values instead of a silent fall-through to the default.
+
+# The default, named. Running with no `--framework` at all uses the keys above, which
+# ARE the lightning backend; this block exists so `--framework lightning` is a declared,
+# checkable value rather than a silent no-op. It restates the runnable instead of being
+# empty — re-splicing the same class is idempotent, and an empty block would declare a
+# value with nothing to read.
+lightning: !scope:framework=lightning
+  runnable: !class:sonair.LightningClassifier
+
 # PyTorch with NO training framework at all — the control experiment. This is the
-# smallest block in the file and that is its entire point: `sonair torch train` swaps
+# smallest block in the file and that is its entire point: it swaps
 # `pytorch_lightning.Trainer` for a hand-written loop and NOTHING else changes. Same
-# `TimmModel`, same `preprocess` chain, same `torch.nn` loss set, same metrics, same
-# artifacts. The one key it must drop is `logger:` — those are `pytorch_lightning`
-# loggers and there is no Trainer to hand them to; tracking goes through `trackers:`,
-# which every backend has.
+# `TimmModel` (inherited from the top-level `model:` — which is why that key lives
+# there and not inside `runnable:`), same `preprocess` chain, same `torch.nn` loss set,
+# same metrics, same artifacts. The one key it must drop is `logger:` — those are
+# `pytorch_lightning` loggers and there is no Trainer to hand them to; tracking goes
+# through `trackers:`, which every backend has.
 #
-#   sonair torch train examples/train_efficientvit_b0_mnist.yaml
+#   sonair train examples/train_efficientvit_b0_mnist.yaml --framework torch
 #
 torch: !scope:framework=torch
   runnable: !class:sonair.TorchClassifier
@@ -213,7 +249,7 @@ keras: !scope:framework=keras
 # (XLA on the traced train step). `preprocess` is the Keras chain, for the engine
 # reasons spelled out in that block: channels-last, and no explicit normalization.
 #
-#   sonair tensorflow train examples/train_efficientvit_b0_mnist.yaml
+#   sonair train examples/train_efficientvit_b0_mnist.yaml --framework tensorflow
 #
 # tensorflow: !scope:framework=tensorflow
 #   runnable: !class:sonair.TensorFlowClassifier
@@ -256,7 +292,7 @@ keras: !scope:framework=keras
 # not `!class:` tags — fastai's classification metrics are plain functions, so there
 # is no class for a tag to resolve (see sonair/fastai_classification.py).
 #
-#   sonair fastai train examples/train_efficientvit_b0_mnist.yaml
+#   sonair train examples/train_efficientvit_b0_mnist.yaml --framework fastai
 #
 # fastai: !scope:framework=fastai
 #   runnable: !class:sonair.FastaiClassifier
@@ -277,7 +313,7 @@ keras: !scope:framework=keras
 # need is a `loss` — an `AutoModelForImageClassification` computes its own from
 # `config.problem_type`, which is why this backend registers no loss set at all.
 #
-#   sonair huggingface train examples/train_efficientvit_b0_mnist.yaml
+#   sonair train examples/train_efficientvit_b0_mnist.yaml --framework huggingface
 #
 # huggingface: !scope:framework=huggingface
 #   runnable: !class:sonair.HuggingFaceClassifier
@@ -298,7 +334,7 @@ keras: !scope:framework=keras
 # Losses and optimizers are NAMES, not `!class:` tags — optax ships functions and factories,
 # so there is no class for a tag to resolve (see sonair/jax_classifier.py).
 #
-#   sonair jax train examples/train_efficientvit_b0_mnist.yaml
+#   sonair train examples/train_efficientvit_b0_mnist.yaml --framework jax
 #
 # jax: !scope:framework=jax
 #   runnable: !class:sonair.JaxClassifier
@@ -321,7 +357,7 @@ keras: !scope:framework=keras
 # block simply cannot run on a Linux CI box. Losses and optimizers are NAMES: `mlx.nn.losses`
 # ships functions and `mlx.optimizers` ships classes, so neither is a `!class:` tag.
 #
-#   sonair mlx train examples/train_efficientvit_b0_mnist.yaml
+#   sonair train examples/train_efficientvit_b0_mnist.yaml --framework mlx
 #
 # mlx: !scope:framework=mlx
 #   runnable: !class:sonair.MlxClassifier

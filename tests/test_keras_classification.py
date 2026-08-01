@@ -193,7 +193,7 @@ def test_the_counter_metrics_need_a_multi_hot_target_not_sparse_ids() -> None:
     ``Precision`` and friends compare element-wise against ``y_pred``, so they need a float
     ``[N, C]`` target — the multi-hot a ``recordstream.MultiLabel`` produces. Handed the int64
     ids ``[N]`` of a single-label run they raise on the broadcast, which is what
-    ``sonair keras train`` did with them wired next to ``SparseCategoricalAccuracy``.
+    ``sonair train --framework keras`` did with them wired next to ``SparseCategoricalAccuracy``.
     """
     assert _value(keras.metrics.Precision(thresholds=0.0), LOGITS, TARGETS) > 0  # multi-hot: fine
     with pytest.raises(Exception):
@@ -242,7 +242,7 @@ def test_metrics_that_cannot_consume_logits_are_not_registered() -> None:
 
 
 def _materialize(yaml_text: str, tmp_path: Path) -> KerasClassifier:
-    """Build a `runnable:` block the way `sonair keras train` does (against its document)."""
+    """Build a `runnable:` block the way `sonair train --framework keras` does (against its document)."""
     path = tmp_path / "cfg.yaml"
     path.write_text(yaml_text)
     document = confluid.load_config(str(path))

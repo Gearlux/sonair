@@ -104,6 +104,107 @@ dataclass with `implemented` / `target_module` / `install_hint` properties.
 `Backend` to carry per-backend *behaviour* — a field that only one backend uses
 is the signal that the behaviour belongs in the one place that needs it.
 
+*(Superseded by §1b: the sub-apps are gone and the tables are one table. What
+survives is the shape of the answer — data plus a factory, no registry module.)*
+
+### 1b. …and the eighth backend removed the sub-apps entirely
+
+*2026-08-01*
+
+**Context.** With eight backends the CLI mounted 24 commands, and a question
+worth asking late is what any of them actually *did*. The answer, for every one:
+
+```python
+def command(runnable: Any) -> None:
+    if spec.registrations is not None:
+        _register_backend_classification(spec.registrations)
+    _dispatch(runnable, VERB_TASKS[verb])
+```
+
+…plus one line in `main()`:
+
+```python
+argv += ["--scope", f"framework={backend}"]     # _inject_framework_scope
+```
+
+The backend verb never *selected* a backend. It activated a scope, and the
+config's `!scope:framework=<name>` block did the selecting. Two things followed,
+and both were measured rather than reasoned about:
+
+1. **Nothing compared the verb to the config.** `sonair keras train <a config
+   with no keras block>` resolved to `LightningClassifier`, imported the Keras
+   loss set, and trained — silently. So did any typo, since an unmatched scope
+   value fell through to the document's unscoped keys.
+2. **The sub-apps differed in two values.** A name and a registrations module.
+   §1a had already collapsed twelve handlers into a table for the same reason;
+   the sub-apps themselves were the part that had not been collapsed.
+
+Meanwhile liquifai binds `--KEY VAL` for any dimension a config declares
+(`flags.bind_dimension_flags` → `confluid.discover_dimensions`), so
+`recordstream run cfg.yaml --framework keras` already worked, with no sonair code
+involved at all. The subcommand layer existed to spare the user from typing a
+flag that the framework underneath had always provided.
+
+**Decision.** Three verbs, one flag, one table.
+
+```bash
+sonair train cfg.yaml --framework keras     # was: sonair keras train cfg.yaml
+sonair frameworks                           # was: what `sonair --help` listed
+```
+
+- `FRAMEWORKS: Dict[str, Framework]` — name → description + registrations module.
+  The verbs are built once, for all backends, so a new row adds no commands.
+- `--framework` is **rewritten** to `--scope framework=<name>` in `main()`, not
+  appended. liquifai binds the ergonomic flag only for *declared* dimensions, so
+  against a config with no `framework` blocks a bare `--framework keras` would be
+  read as a config override; rewriting makes it mean one thing either way.
+- The check the verb could never do now lives one layer down: confluid 0.3.0
+  raises when an active scope value matches no block, listing the values the
+  document declares. A backend named at the command line is verified against the
+  config that has to implement it.
+
+**Consequences.**
+
+- `TEMPLATES`, `_backend_app`, `_template_app`, `_template_message`,
+  `_template_command`, `BackendNotImplementedError` and
+  `_inject_framework_scope` are all **deleted**. An unbuilt backend is absent
+  from `FRAMEWORKS`; there is nowhere for a stub to hang on a flag, so the
+  roadmap-advertising machinery went with the sub-apps. `sonair frameworks`
+  lists what is real, which is a smaller and truer claim than a menu of half.
+- **A backend with no `--framework` registers no losses.** The flag is what names
+  the engine, and there is no safe guess: importing the default's set would drag
+  torch into a keras-only install. The failure mode is a loud `UnknownClassError`
+  on a bare registered name, not a wrong result.
+- **The default backend needs a block of its own.** The top level of a config
+  *is* the default, but `--framework lightning` must name something, so the
+  example ships `lightning: !scope:framework=lightning` restating the runnable.
+  This is the one cost of the confluid check, and it is the right one: a config
+  now states which backends it supports instead of leaving it to be inferred.
+- **A breaking CLI change**, paid once — 18 files and ~61 command spellings, in
+  the same style as the `FlaxModel` → `FlaxConvNet` rename.
+
+**Example.**
+
+```python
+FRAMEWORKS: Dict[str, Framework] = {
+    "keras": Framework("Keras 3 — one API over PyTorch / TensorFlow / JAX.",
+                       "sonair.keras_classification"),
+    "jax":   Framework("JAX — a jitted optax loop over a Flax model."),  # nothing to register
+}
+
+def main() -> None:
+    framework = _requested_framework(sys.argv)   # argv: both steps below precede config load
+    _pin_keras_backend(framework)
+    _register_classification(framework)
+    _normalize_framework_flag(sys.argv)          # --framework X -> --scope framework=X
+    app.run()
+```
+
+**What you may change.** Add rows to `FRAMEWORKS`. Do not reintroduce a backend
+subcommand, and do not grow `Framework` to carry per-backend *behaviour* —
+`_pin_keras_backend` would be a third column that is `None` seven times out of
+eight, which is why it stays visible in `main()`.
+
 ---
 
 ## 2. The framework axis: an explicit tag, with MRO inference as fallback

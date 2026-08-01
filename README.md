@@ -137,37 +137,46 @@ typical stages:
 Run:
 
 ```bash
-sonair lightning train examples/train_efficientvit_b0_mnist.yaml
-# or the generic runner (no framework verb):
+sonair train examples/train_efficientvit_b0_mnist.yaml
+# or the generic runner (no verb):
 recordstream run examples/train_efficientvit_b0_mnist.yaml
 ```
 
 That one config carries **every** backend: engine-agnostic keys (dataset, batch
 size, epochs) at the top level, and one `!scope:framework=<name>` block per
-alternative overriding only `runnable` / `model` / `logger`. The backend verb
-activates the matching scope, so you never name the framework twice.
+alternative overriding only `runnable` / `model` / `logger`. `--framework <name>`
+activates the matching block — the same flag on either runner, because it is a
+property of the config rather than of the CLI.
 
-The `sonair lightning evaluate <cfg>` and `sonair lightning predict <cfg>` verbs
-bind the same `LightningClassifier` with `task: test` / `predict` to measure
-quality on a held-out split or dump per-record classification JSON — the verb
-wins over any `task:` set in the config, so one config can serve all three.
+The `sonair evaluate <cfg>` and `sonair predict <cfg>` verbs bind the same
+`LightningClassifier` with `task: test` / `predict` to measure quality on a
+held-out split or dump per-record classification JSON — the verb wins over any
+`task:` set in the config, so one config can serve all three.
 
 ## Training backends
 
-Eight engines, one config — every backend the CLI advertises is implemented. `sonair <backend> <verb>` picks the engine; everything above the
+Eight engines, one config. `--framework <name>` picks the engine; everything above the
 config's framework divider — dataset, splits, batch size, epochs, run identity — is shared
 verbatim.
 
 ```bash
-sonair lightning  train examples/train_efficientvit_b0_mnist.yaml   # PyTorch Lightning
-sonair torch      train examples/train_efficientvit_b0_mnist.yaml   # a hand-written loop, no framework
-sonair keras      train examples/train_efficientvit_b0_mnist.yaml   # Keras 3
-sonair tensorflow train examples/train_efficientvit_b0_mnist.yaml   # tf.data + GradientTape
-sonair fastai     train examples/train_efficientvit_b0_mnist.yaml   # Learner + one-cycle
-sonair huggingface train examples/train_efficientvit_b0_mnist.yaml  # transformers Trainer
-sonair jax        train examples/train_efficientvit_b0_mnist.yaml   # jitted optax loop
-sonair mlx        train examples/train_efficientvit_b0_mnist.yaml   # Apple-silicon unified memory
+sonair train examples/train_efficientvit_b0_mnist.yaml                          # PyTorch Lightning (default)
+sonair train examples/train_efficientvit_b0_mnist.yaml --framework torch        # a hand-written loop, no framework
+sonair train examples/train_efficientvit_b0_mnist.yaml --framework keras        # Keras 3
+sonair train examples/train_efficientvit_b0_mnist.yaml --framework tensorflow   # tf.data + GradientTape
+sonair train examples/train_efficientvit_b0_mnist.yaml --framework fastai       # Learner + one-cycle
+sonair train examples/train_efficientvit_b0_mnist.yaml --framework huggingface  # transformers Trainer
+sonair train examples/train_efficientvit_b0_mnist.yaml --framework jax          # jitted optax loop
+sonair train examples/train_efficientvit_b0_mnist.yaml --framework mlx          # Apple-silicon unified memory
+
+sonair frameworks                                                               # the list, with a line each
 ```
+
+The name must match a block the config declares — `--framework kears` is an error
+listing the backends that file *does* declare, not a silent fall-through to the
+default. That check is the reason the backend is a flag: it used to be a
+subcommand (`sonair keras train cfg.yaml`), which named an engine nothing ever
+compared against the config.
 
 | Backend | Model wrapper | Owns the loop with | Adds |
 |---|---|---|---|
@@ -181,7 +190,7 @@ sonair mlx        train examples/train_efficientvit_b0_mnist.yaml   # Apple-sili
 | `mlx` | `MlxConvNet` (the shared spec) | `mlx.optimizers` + `nn.value_and_grad` | unified memory; Apple silicon only |
 
 On the shipped MNIST config (3 epochs), `lightning` reaches **99.52%** top-1 and `keras`
-**99.18%** best val from the same file, changing only the verb. Different backbones, so this
+**99.18%** best val from the same file, changing only the flag. Different backbones, so this
 is not a benchmark — it is evidence that one config drives several engines to a comparable
 result.
 
@@ -225,32 +234,40 @@ given — the injection is skipped rather than applied — so size it yourself w
 
 #### Swapping the model from the command line
 
-The model slot takes a scope block like any other key, so an alternative can sit next to the
-default *inside* the `runnable:` block and be selected by a flag. The example config ships
-exactly that — the zoo-backed `TimmModel` by default, the from-scratch `TorchConvNet` behind
-`model=convnet`:
+The model slot takes a scope block like any other key, so an alternative can sit beside the
+default and be selected by a flag. The example config ships exactly that — the zoo-backed
+`TimmModel` by default, the from-scratch `TorchConvNet` behind `model=convnet`:
 
 ```yaml
 runnable: !class:sonair.LightningClassifier
-  model: !lazy:sonair.TimmModel
-    model_name: efficientvit_b0
-    pretrained: true
-  convnet: !scope:model=convnet
-    model: !lazy:sonair.convnet.torch_convnet.TorchConvNet
+
+model: !lazy:sonair.TimmModel
+  model_name: efficientvit_b0
+  pretrained: true
+
+convnet: !scope:model=convnet
+  model: !lazy:sonair.convnet.torch_convnet.TorchConvNet
 ```
 
 ```bash
-sonair lightning train examples/train_efficientvit_b0_mnist.yaml                  # 2.1 M params, pretrained
-sonair lightning train examples/train_efficientvit_b0_mnist.yaml --model convnet  # 95 K params, from scratch
+sonair train examples/train_efficientvit_b0_mnist.yaml                  # 2.1 M params, pretrained
+sonair train examples/train_efficientvit_b0_mnist.yaml --model convnet  # 95 K params, from scratch
+sonair train examples/train_efficientvit_b0_mnist.yaml --framework torch --model convnet
 ```
 
 The block must come *after* the slot it overrides — an active block splices in at its own
 position and the later write wins. `--model convnet` is the implicit per-dimension flag for
 the `model=` scope; `--scope model=convnet` is the explicit spelling of the same thing.
 
+Both `model:` and its alternative sit at the **top level**, as siblings of `runnable:` rather
+than nested inside it. That is what lets all three torch-backed backends (`lightning`,
+`torch`, `fastai`) read the same line: a `!scope:framework=…` block that swaps `runnable:`
+replaces that key and everything under it, so a nested `model:` would vanish for exactly the
+backends whose whole point is that they inherit it.
+
 ### `tensorflow` — when to prefer it over `keras`
 
-`KERAS_BACKEND=tensorflow sonair keras train cfg.yaml` already runs the identical config on
+`KERAS_BACKEND=tensorflow sonair train cfg.yaml --framework keras` already runs the identical config on
 TensorFlow, so the separate backend earns its place only by doing what Keras 3 does not
 expose. It contains exactly that and nothing else:
 
@@ -273,7 +290,7 @@ prediction contract — is *inherited* from `KerasClassifier`, not re-implemente
 
 > **One engine per process.** Keras 3 binds its compute backend at first import, and
 > `recordstream.keras` defaults it to the first engine actually installed — `torch`, on a
-> machine that also has `sonair[lightning]`. `sonair tensorflow <verb>` sets
+> machine that also has `sonair[lightning]`. `--framework tensorflow` sets
 > `KERAS_BACKEND=tensorflow` before anything imports keras; if something else got there
 > first, `initialize()` refuses to start and names the fix rather than failing inside the
 > tape.
@@ -305,11 +322,11 @@ travelled beside the image.
 
 Keras 3 runs on PyTorch, TensorFlow or JAX, chosen by `KERAS_BACKEND` **at import time**.
 When you have not chosen, the first engine actually installed is used (`torch` for
-`sonair[keras]`), so `sonair keras train` works out of the box:
+`sonair[keras]`), so `--framework keras` works out of the box:
 
 ```bash
-sonair keras train cfg.yaml                          # torch (default)
-KERAS_BACKEND=tensorflow sonair keras train cfg.yaml # the same config on TensorFlow
+sonair train cfg.yaml --framework keras                          # torch (default)
+KERAS_BACKEND=tensorflow sonair train cfg.yaml --framework keras # the same config on TensorFlow
 ```
 
 Install with `pip install 'sonair[keras]'` — Keras alone, four small packages. `[tensorflow]`

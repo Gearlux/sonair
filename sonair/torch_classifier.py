@@ -56,6 +56,7 @@ from marainer.artifacts import load_class_names, save_class_names, write_metrics
 from marainer.run_names import generate_run_name
 from marainer.torch import build_metric_collection, scalar_metrics
 from marainer.tracking.base import Tracker
+from marainer.tracking.provenance import capture_log_file
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -507,7 +508,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         train_loader = cast(DataLoader[Any], loaders["train"])
         optimizer = cast(Optimizer, flow(self.optimizer, params=cast(nn.Module, self.model).parameters()))
         trackers = self._live_trackers()
-        self._log_run_context(trackers)
+        manifest = self._log_run_context(trackers)
         self._move_metrics()
 
         for epoch in range(self.max_epochs):
@@ -529,6 +530,10 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
         if loaders["test"] is not None:
             self._computed_metrics.update(self._score(cast(DataLoader[Any], loaders["test"])))
+        # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
+        # manifest exists: left unfinished it stays `running`, and marainer's atexit hook then
+        # calls a successful run `interrupted`.
+        capture_log_file(trackers, manifest=manifest, status="success")
 
     @entrypoint("evaluate", role="evaluator")
     def evaluate(self) -> None:
@@ -602,27 +607,23 @@ class TorchClassifier(TorchRunner, ProgressReporting):
     def _live_trackers(self) -> List[Tracker]:
         return [flow(t) for t in (self.trackers or [])]
 
-    def _log_run_context(self, trackers: List[Tracker]) -> None:
+    def _log_run_context(self, trackers: List[Tracker]) -> Any:
         """Provenance through marainer's plain FUNCTIONS — hookup style (1).
 
         There is no callback protocol to hang a ``TrackingCallback`` on, which is exactly the
         case marainer's function-level API exists for.
+
+        ``runnable=self`` rather than a hand-written params dict: marainer derives the
+        hyperparameters from the flowed object graph and dumps the resolved config, so this
+        backend and the Lightning one cannot answer "what were the hyperparameters?"
+        differently. The six keys this used to spell out are a subset of what it now records.
+        Returns the run manifest so ``fit()`` can finish it.
         """
         if not trackers:
-            return
+            return None
         from marainer.tracking.provenance import log_run_context
 
-        log_run_context(
-            trackers,
-            {
-                "experiment_name": self.experiment_name,
-                "run_name": self.run_name,
-                "max_epochs": self.max_epochs,
-                "batch_size": self.batch_size,
-                "num_classes": self.num_classes,
-                "device": str(self._device),
-            },
-        )
+        return log_run_context(trackers, {"device": str(self._device)}, runnable=self)
 
     def _move_metrics(self) -> None:
         """Metric state lives on the same device as the logits it consumes."""

@@ -223,6 +223,31 @@ flows them, with the dataset-derived `num_classes` injected, so the class count 
 be written in the config. A model that is already live keeps the width its own constructor was
 given — the injection is skipped rather than applied — so size it yourself when you wire one.
 
+#### Swapping the model from the command line
+
+The model slot takes a scope block like any other key, so an alternative can sit next to the
+default *inside* the `runnable:` block and be selected by a flag. The example config ships
+exactly that — the zoo-backed `TimmModel` by default, the from-scratch `TorchConvNet` behind
+`model=convnet`:
+
+```yaml
+runnable: !class:sonair.LightningClassifier
+  model: !lazy:sonair.TimmModel
+    model_name: efficientvit_b0
+    pretrained: true
+  convnet: !scope:model=convnet
+    model: !lazy:sonair.convnet.torch_convnet.TorchConvNet
+```
+
+```bash
+sonair lightning train examples/train_efficientvit_b0_mnist.yaml                  # 2.1 M params, pretrained
+sonair lightning train examples/train_efficientvit_b0_mnist.yaml --model convnet  # 95 K params, from scratch
+```
+
+The block must come *after* the slot it overrides — an active block splices in at its own
+position and the later write wins. `--model convnet` is the implicit per-dimension flag for
+the `model=` scope; `--scope model=convnet` is the explicit spelling of the same thing.
+
 ### `tensorflow` — when to prefer it over `keras`
 
 `KERAS_BACKEND=tensorflow sonair keras train cfg.yaml` already runs the identical config on

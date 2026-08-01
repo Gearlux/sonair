@@ -33,7 +33,7 @@ import numpy as np
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
-from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, get_hierarchy_from_instance, output
+from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from confluid.registry import resolve_class
 from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
@@ -366,25 +366,15 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         trainer = cast(L.Trainer, flow(self.lightning))
         if self.trackers:
             self._trackers = list(self.trackers)
-            cb = TrackingCallback(self._trackers, params=self._config_params())
+            # `runnable=self` rather than a params dict: marainer derives the hyperparameters
+            # from the flowed object graph AND dumps the resolved config, so this backend and
+            # the torch one cannot answer "what were the hyperparameters?" differently.
+            cb = TrackingCallback(self._trackers, runnable=self)
             trainer.callbacks.append(cb)  # type: ignore[attr-defined]
         attach_lightning_progress(trainer, self)
         if self.log_system_metrics:
             activate_for_lightning(trainer)
         return trainer
-
-    def _config_params(self) -> Dict[str, Any]:
-        """Flat ``{dotted-path: live value}`` of this runnable's configuration, for tracker params.
-
-        Walks the FLOWED object graph (not the static signature), so it sees defaults the user
-        never wrote into YAML plus post-construction keys. ``log_run_context`` keeps only the
-        JSON-scalar values, so nested objects here are harmless. Best-effort by design: a
-        tracking detail must never take down a training run.
-        """
-        try:
-            return {path: value for path, (_, value, _) in get_hierarchy_from_instance(self).items()}
-        except Exception:  # pragma: no cover - best effort
-            return {}
 
     # ---- classification specifics ------------------------------------------- #
     def initialize(self) -> None:

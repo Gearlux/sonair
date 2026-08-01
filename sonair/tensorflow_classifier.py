@@ -1,8 +1,8 @@
 """``TensorFlowClassifier`` — the same classification run as a NATIVE TensorFlow training loop.
 
 This backend exists to answer a question the project had left open in ``TASKS.md``: does
-``sonair tensorflow train`` need a runnable of its own at all, when ``KERAS_BACKEND=tensorflow
-sonair keras train <cfg>`` already executes the identical config on TensorFlow? The answer is
+``sonair train --framework tensorflow`` need a runnable of its own at all, when ``KERAS_BACKEND=tensorflow
+sonair train <cfg> --framework keras`` already executes the identical config on TensorFlow? The answer is
 *only for what Keras 3 does not expose*:
 
 * **``tf.data`` instead of a ``PyDataset``.** :meth:`_dataset` wraps recordstream's
@@ -48,7 +48,7 @@ Minimal flat YAML — note it differs from the Keras block by ONE key, the runna
     batch_size: 32
     max_epochs: 3
 
-Run it with ``sonair tensorflow train cfg.yaml``, which sets ``KERAS_BACKEND=tensorflow`` before
+Run it with ``sonair train cfg.yaml --framework tensorflow``, which sets ``KERAS_BACKEND=tensorflow`` before
 anything imports keras — see :mod:`sonair._tensorflow` for why that ordering is load-bearing.
 """
 
@@ -524,17 +524,11 @@ class TensorFlowClassifier(ProgressReporting):
         if trackers:
             from marainer.keras import keras_tracking_callback
 
-            callbacks.append(keras_tracking_callback(trackers, params=self._tracked_params()))
+            # `runnable=self` rather than a params dict: marainer derives the hyperparameters
+            # from the flowed object graph AND dumps the resolved config, so no backend
+            # transcribes its own configuration into a second, diverging answer.
+            callbacks.append(keras_tracking_callback(trackers, runnable=self))
         return callbacks
-
-    def _tracked_params(self) -> Dict[str, Any]:
-        return {
-            "experiment_name": self.experiment_name,
-            "run_name": self.run_name,
-            "max_epochs": self.max_epochs,
-            "batch_size": self.batch_size,
-            "num_classes": self.num_classes,
-        }
 
     # ---- the four entry points ---------------------------------------------- #
     @entrypoint("fit", role="trainer", primary=True)

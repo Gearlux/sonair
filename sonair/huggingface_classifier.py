@@ -46,6 +46,7 @@ from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
 from marainer.run_names import generate_run_name
 from marainer.tracking.base import Tracker
+from marainer.tracking.provenance import capture_log_file, log_run_context
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -415,14 +416,23 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         logger.info(f"sonair huggingface training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("HuggingFaceClassifier.fit() requires a 'train_set'.")
+        # Provenance through marainer's plain FUNCTIONS — `runnable=self` so the
+        # hyperparameters and the resolved config come from marainer's ONE derivation
+        # rather than a dict this backend transcribes for itself.
+        trackers = self._live_trackers()
+        manifest = log_run_context(trackers, runnable=self)
         trainer = self._build_trainer(train=self.train_set, evaluate=self.val_set)
         result = trainer.train()
         self._computed_metrics = {k: float(v) for k, v in result.metrics.items() if isinstance(v, (int, float))}
         if self.val_set is not None:
             self._computed_metrics.update({k: float(v) for k, v in trainer.evaluate().items() if _is_number(v)})
         logger.info(f"Training complete: {self._computed_metrics}")
-        save_class_names(self._class_names, self._artifact_dir(), self._live_trackers())
+        save_class_names(self._class_names, self._artifact_dir(), trackers)
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
+        # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
+        # manifest exists: left unfinished it stays `running`, and marainer's atexit hook then
+        # calls a successful run `interrupted`.
+        capture_log_file(trackers, manifest=manifest, status="success")
 
     @entrypoint("evaluate", role="evaluator")
     def evaluate(self) -> None:

@@ -868,3 +868,35 @@ def test_run_dispatches_to_the_entry_point_declaring_the_task(task: str) -> None
         setattr(trainer, name, lambda n=name: calls.append(n))
     trainer.run()
     assert calls == [task]
+
+
+# --------------------------------------------------------------------------- #
+# tracking: one derivation, shared with the torch backend
+# --------------------------------------------------------------------------- #
+
+
+def test_the_tracking_callback_gets_the_runnable_not_a_params_dict() -> None:
+    """Both backends hand marainer the OBJECT, so neither transcribes its own params.
+
+    This class used to walk `get_hierarchy_from_instance` in a private `_config_params` while
+    the bare-torch backend hand-wrote six keys — two answers to the same question. The
+    derivation now lives in marainer and both pass `runnable=self`.
+    """
+    from marainer import CsvTracker
+    from marainer.lightning import TrackingCallback
+
+    trainer = LightningClassifier(model=nn.Identity(), max_epochs=1)
+    trainer.trackers = [CsvTracker()]
+    built = trainer._build_trainer()
+
+    # `Trainer.callbacks` is untyped in pytorch_lightning's stubs; the production code
+    # appends through the same attribute with the same ignore.
+    callbacks = [cb for cb in built.callbacks if isinstance(cb, TrackingCallback)]  # type: ignore[attr-defined]
+    assert len(callbacks) == 1
+    assert callbacks[0].runnable is trainer
+    assert callbacks[0].params is None  # nothing transcribed by hand
+
+
+def test_no_local_hyperparameter_derivation_survives() -> None:
+    """A private re-derivation here would silently diverge from marainer's again."""
+    assert not hasattr(LightningClassifier, "_config_params")

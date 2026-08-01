@@ -25,7 +25,7 @@ So what is actually written here is: a batch-shaping function, ``compile()`` + `
 task dispatch. That ratio is the demo.
 
 Keras 3 picks its backend from ``KERAS_BACKEND`` (``torch`` / ``tensorflow`` / ``jax``); this
-module never sets it, so ``sonair keras train`` runs on whichever the operator chose.
+module never sets it, so ``sonair train --framework keras`` runs on whichever the operator chose.
 
 Minimal flat YAML::
 
@@ -353,17 +353,11 @@ class KerasClassifier(ProgressReporting):
         if trackers:
             from marainer.keras import keras_tracking_callback
 
-            callbacks.append(keras_tracking_callback(trackers, params=self._tracked_params()))
+            # `runnable=self` rather than a params dict: marainer derives the hyperparameters
+            # from the flowed object graph AND dumps the resolved config, so no backend
+            # transcribes its own configuration into a second, diverging answer.
+            callbacks.append(keras_tracking_callback(trackers, runnable=self))
         return callbacks
-
-    def _tracked_params(self) -> Dict[str, Any]:
-        return {
-            "experiment_name": self.experiment_name,
-            "run_name": self.run_name,
-            "max_epochs": self.max_epochs,
-            "batch_size": self.batch_size,
-            "num_classes": self.num_classes,
-        }
 
     # ---- the four entry points ---------------------------------------------- #
     @entrypoint("fit", role="trainer", primary=True)

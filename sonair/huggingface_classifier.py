@@ -65,6 +65,8 @@ from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint, ru
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset as TorchDataset
 
+from sonair.huggingface_model import HuggingFaceModel
+
 logger = get_logger(__name__)
 
 #: Which entry point :meth:`HuggingFaceClassifier.run` dispatches to — the same vocabulary
@@ -76,7 +78,16 @@ ClassifierTask = Literal["fit", "evaluate", "test", "predict"]
 #: ``to_pydantic`` (form specs / MCP schemas / editor widgets) has a real type to build from.
 HuggingFaceMetric = Union[str, Callable[[np.ndarray, np.ndarray], float]]
 
-__all__ = ["ClassifierTask", "HuggingFaceClassifier"]
+#: What the ``model`` slot admits: the :class:`~sonair.huggingface_model.HuggingFaceModel`
+#: wrapper (the usual wiring — it builds the checkpoint at ``flow()`` time with the
+#: dataset-derived width), or a live ``transformers`` model handed in directly, which
+#: :meth:`HuggingFaceClassifier._network` unwraps to either way. The second arm is
+#: ``torch.nn.Module`` rather than ``transformers.PreTrainedModel`` because every
+#: ``AutoModelFor*`` IS one, and naming the transformers class would force a module-level
+#: ``import transformers`` this module deliberately defers to the methods that need it.
+HuggingFaceNetwork = Union[HuggingFaceModel, torch.nn.Module]
+
+__all__ = ["ClassifierTask", "HuggingFaceClassifier", "HuggingFaceNetwork"]
 
 
 def _first_target(source: Any, target_key: str) -> Any:
@@ -152,7 +163,7 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[Any]],
+        model: Mandatory[Lazy[HuggingFaceNetwork]],
         train_set: Optional[Lazy[RecordSource]] = None,
         val_set: Optional[Lazy[RecordSource]] = None,
         test_set: Optional[Lazy[RecordSource]] = None,
@@ -174,10 +185,10 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         metrics: Optional[Sequence[HuggingFaceMetric]] = None,
     ) -> None:
         super().__init__()
-        # `torch.nn.Module`, not `Lazy[Any]`: the deferred-ness is declared once, on the ctor
-        # param, which is what `lazy_param_names` / `to_pydantic` read. A union here would only
-        # stop every method calling through the slot.
-        self.model: Any = model
+        # `HuggingFaceNetwork`, not `Lazy[HuggingFaceNetwork]`: the deferred-ness is declared
+        # once, on the ctor param, which is what `lazy_param_names` / `to_pydantic` read;
+        # restating it here would only make the attribute a union no method could read through.
+        self.model: HuggingFaceNetwork = cast(HuggingFaceNetwork, model)
         self.train_set: Optional[Lazy[RecordSource]] = train_set
         self.val_set: Optional[Lazy[RecordSource]] = val_set
         self.test_set: Optional[Lazy[RecordSource]] = test_set

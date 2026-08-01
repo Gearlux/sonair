@@ -168,6 +168,19 @@ the decision was first recorded; it is what the "wire-to" framing settles.)
   because the engine is, which is the honest answer rather than a set of names
   that cannot be built. Splitting also keeps the import cost paid only by whoever
   installed that backend.
+- **The entry-point list is DERIVED from the tree by a test** (2026-08-01). One
+  module per registration is a good decision with a bad failure mode: forgetting
+  a line costs nothing a developer would notice. A dotted path in YAML imports
+  the module itself and the CLI imports its own backend, so configs and runs keep
+  working — only the discovery surfaces go blind, and they fail by *offering
+  fewer options*, which looks like a short list rather than a bug. Five backends
+  duly forgot: the huggingface / jax / mlx / tensorflow-model work of 2026-07-31
+  shipped eight registering modules with no entry point. `tests/
+  test_entry_points.py` now finds the expectation by `ast`-scanning the package
+  for `@configurable` classes and `configurable(...)` / `register(...)` calls,
+  and asserts each such module is declared. Static on purpose — no venv has every
+  backend installed, so an import-based scan would reduce the check to whatever
+  the local extras happen to be.
 - **The registry is keyed by class NAME, which curates the set for you.** Keras
   publishes thirteen names under both `keras.losses` and `keras.metrics`
   (`BinaryCrossentropy`, `Hinge`, `KLDivergence`, …); registering both spellings
@@ -270,7 +283,11 @@ with the data.
 
 ## 4. The TensorFlow backend is a subclass, and only of the loop
 
-*2026-07-30*
+*2026-07-30 — **SUPERSEDED by §9** (2026-08-01): the subclass relationship was
+retired and `TensorFlowClassifier` now extends `ProgressReporting` directly. The
+record stands as written because its Context and its list of what the backend
+adds are still the reasons the backend exists; only the "subclasses
+`KerasClassifier`" mechanism is out of date. §9 records why.*
 
 **Context.** `TASKS.md` carried an open question for a year: does
 `sonair tensorflow train` need a runnable at all? `KERAS_BACKEND=tensorflow
@@ -368,11 +385,12 @@ a config can WIRE. Concretely:
 | Backend | Runnable | Model wrapper | Loss/metric set |
 |---|---|---|---|
 | `lightning` | `lightning_classifier.py` | `timm_model.py` | `torch_classification.py` |
-| `keras` | `keras_classifier.py` | `keras_model.py` | `keras_classification.py` |
-| `tensorflow` | `tensorflow_classifier.py` | `tensorflow_model.py` † | *reuses the Keras set* |
+| `keras` | `keras_classifier.py` | `keras_model.py` ‡ | `keras_classification.py` |
+| `tensorflow` | `tensorflow_classifier.py` | `tensorflow_model.py` † ‡ | *reuses the Keras set* |
 | `fastai` | `fastai_classifier.py` | *reuses `TimmModel`* | `fastai_classification.py` |
 | `huggingface` | `huggingface_classifier.py` | `huggingface_model.py` | *none — the model computes its own loss* |
-| `jax` | `jax_classifier.py` | `flax_model.py` | *none — optax ships functions, not classes* |
+| `jax` | `jax_classifier.py` | `convnet/flax_convnet.py` ‡ | *none — optax ships functions, not classes* |
+| `mlx` | `mlx_classifier.py` | `convnet/mlx_convnet.py` ‡ | *none — `mlx.nn` ships classes, but as names not tags* |
 
 fastai gets a loss module because its `*Flat` family is genuinely new wiring —
 but tagged `framework="torch"`, since a Lightning run consumes those losses just
@@ -418,6 +436,150 @@ anticipated:
 examined. When a new case arrives, check whether the *reasoning* covers it before
 citing the *conclusion* — "no `TensorFlowModel`" was a conclusion about zoo
 wrappers, and reading it as a ban on the module cost a plan revision.
+
+### ‡ The second amendment: the convnets are a package, apart from the zoo wrappers (2026-08-01)
+
+The amendment above landed `TensorFlowModel` and `TensorFlowConvNet` in one
+file, and `KerasConvNet` had landed in `keras_model.py` beside `KerasModel` for
+the same reason: both are "the Keras model module". That grouping is by
+*backend*, and the more useful axis is what the class **wraps**.
+
+A zoo wrapper exists to reach somebody else's weights. Its knobs are about the
+zoo — a Hub id, `pretrained`, a SavedModel path — and its value is that it is
+thin. A convnet implements [`convnet/spec.py`](../sonair/convnet/spec.py) and
+wraps nothing; its knobs are the architecture (`widths`, `dropout`, `seed`), and
+its reason to exist is a claim about the **other** convnets, not about its own
+backend: that every framework implements the same network. The two changed for
+different reasons and were read by different people.
+
+Splitting them into `<backend>_model.py` / `<backend>_convnet.py` fixed that and
+immediately exposed a second problem it could not fix. The implementations (four
+at the time, five once `TorchConvNet` landed) are peers in fact but were not peers
+in the file listing: `keras_convnet.py` and
+`tensorflow_convnet.py` sat next to their zoo wrappers, while the JAX and MLX
+ones — `flax_convnet.py`, `mlx_convnet.py` — looked like zoo wrappers themselves,
+because those backends have no zoo wrapper to be distinguished from. Nothing
+about a flat directory says these four are the same network.
+
+**Decision.** A directory does what a naming convention could not. Every
+implementation of the spec lives in the **`sonair.convnet` package** and the zoo
+wrappers stay at the top level, one `<backend>_model.py` each. Membership of the
+package is what says "this is a spec implementation". Each convnet keeps its own
+`confluid.configurables` entry point and its own test file.
+
+**The filename still names the class.** Package membership carries the
+*grouping*, so the modules were briefly renamed to their framework alone
+(`keras.py`, `tensorflow.py`, `flax.py`, `mlx.py`) on the reasoning that the
+filename need not repeat what the directory says. That was wrong, and the cost
+was concrete: every other module in this project is named for the class it
+exports — `timm_model.py` → `TimmModel`, `keras_model.py` → `KerasModel`,
+`lightning_classifier.py` → `LightningClassifier` — so the package became the one
+place where `ls` and `grep KerasConvNet` disagreed about where a class lives, in
+exchange for symmetry the directory was already providing. The modules are
+therefore `keras_convnet.py`, `tensorflow_convnet.py`, `flax_convnet.py` and
+`mlx_convnet.py`, each the snake_case of its exported class. `spec.py` keeps its
+name because it exports no class — only the constants and
+`trainable_parameter_count`.
+
+**The classes were renamed too, and that is the part the directory could not
+do.** The JAX and MLX implementations were called `FlaxModel` / `MlxModel` in
+`flax_model.py` / `mlx_model.py`, because when they landed there was no zoo
+wrapper beside them for the name to distinguish them from. Inside the package
+that reasoning is gone: the neighbours are `KerasConvNet` and
+`TensorFlowConvNet`, and "Model" now says the one thing that is false about
+them — that they wrap somebody's weights. So they are `FlaxConvNet` and
+`MlxConvNet` in `flax_convnet.py` / `mlx_convnet.py`, and the package is
+uniform: four `*ConvNet` classes in four `*_convnet.py` modules. Renaming a
+public class is a real cost (a YAML wires it: `!lazy:sonair.FlaxConvNet`), paid
+once, here, rather than left as a permanent footnote.
+
+**Each convnet IS its framework's model type.** `TorchConvNet` is a
+`torch.nn.Module`, `KerasConvNet` a `keras.Model`, `TensorFlowConvNet` a
+`tf.Module`, `FlaxConvNet` an `nnx.Module`, `MlxConvNet` an `mlx.nn.Module` —
+the same decision as `TimmModel` being a `torch.nn.Module` (§7). `MlxConvNet` was the last holdout, a plain class
+whose network the MLX loop reached as `self.model.model`; that made
+`MlxClassifier.model` typed as the concrete wrapper, the only backend whose slot
+could not hold a network the user brought. It is `Lazy[nn.Module]` now.
+
+Two MLX specifics that shape the subclass, both measured:
+
+- `nn.Module.valid_parameter_filter` ends in `and not key.startswith("_")`, so
+  the lazily-built network lives in the **public** attribute `net`. As `_model` —
+  the name its Keras and TensorFlow twins use — it is filtered straight out of
+  `parameters()`, the optimizer sees nothing, and the loop applies gradients to
+  an empty tree forever without erroring.
+- MLX carries train/eval as module **state**, not as a per-call argument, so
+  `__call__(x, training=None)` leaves the mode alone by default. A `training:
+  bool = False` default (what the Keras and Flax twins take) would flip the
+  network to eval on every forward — including the one `nn.value_and_grad` makes
+  inside the training step, which passes no flag. The classifier therefore sets
+  the mode once per phase (`self.model.train(False)` before an eval pass) rather
+  than per call, which is also what keeps the widened slot honest: a bare
+  `nn.Module` has no `training=` keyword to accept.
+
+**`sonair/convnet/__init__.py` imports nothing**, which is load-bearing rather
+than stylistic: `sonair/__init__.py` resolves every backend-owned name lazily so
+a Keras-only install never imports torch, and an `__init__` re-exporting the four
+classes would import keras *and* tensorflow *and* flax *and* mlx the moment
+anything under the package — including the dependency-free `spec.py` — is
+touched.
+
+**Consequences.** `keras_model.py` no longer imports the spec at all, and
+`tensorflow_model.py` shed the constants plus the private `_ConvBlock` /
+`_ConvNet` — roughly 150 lines of hand-written batch-norm that a reader looking
+for "how do I load a SavedModel?" used to walk past. `ls sonair/convnet/` is now
+the answer to "what implements the shared spec?", where the answer used to be a
+grep across the whole package. The cost is one more level in every import path.
+
+**Example.** The move itself needed no config change — the lazy names in
+`sonair/__init__.py` absorb it. The class renames did, and they are the only
+breaking part: a config saying `!lazy:sonair.FlaxModel` must now say
+`!lazy:sonair.FlaxConvNet`.
+
+```yaml
+model: !lazy:sonair.KerasModel      # keras_model.py            — a keras.applications backbone
+model: !lazy:sonair.KerasConvNet    # convnet/keras_convnet.py  — the shared spec, wrapping nothing
+model: !lazy:sonair.FlaxConvNet     # convnet/flax_convnet.py   — the same spec, in flax.nnx
+model: !lazy:sonair.MlxConvNet      # convnet/mlx_convnet.py    — …and in mlx.nn
+```
+
+### ‡ The torch entry, and the one backend that gets no convnet (2026-08-01)
+
+`TorchConvNet` completed the set, and it is worth recording *why it was last*
+rather than first: torch was the only backend whose zoo wrapper (`TimmModel`,
+~1000 pretrained backbones) is so complete that nothing forced the question. The
+spec exists because Flax and MLX have no zoo at all; torch has the best one. So
+the torch implementation buys nothing for torch *users* — it buys the
+**comparison**, by making the from-scratch baseline available on the framework
+everything else is measured against.
+
+It is the one **channels-FIRST** implementation. The other four consume NHWC
+because keras, tf, flax and mlx all default to it; torch is NCHW. The
+constructor knob deliberately does not follow the tensor — `input_shape` stays
+`(H, W, C)` in all five, so one config line drives any of them, and only `C`
+reaches the parameter count. Reading it as NCHW instead would build
+`Conv2d(224, …)` rather than `Conv2d(3, …)`: still runnable, silently a
+different network, which is why a test pins `in_channels == 3`.
+
+**Five convnets for eight backends, and neither shortfall is a gap.** Three
+backends run on torch — `lightning`, `torch` and `fastai` — and all three take
+`TorchConvNet` unchanged, the same reason they already share `TimmModel`; there
+is no `fastai_convnet.py` for the same reason there is no `fastai_model.py` (§5:
+a backend adds a module only where it adds wiring surface). `tensorflow` can take
+`KerasConvNet` too, since `tf.keras` IS Keras 3. The genuine absence is **`huggingface`**: `transformers.Trainer` calls
+the model with `labels=` and subscripts `outputs["loss"]`, so it drives models
+that compute their own loss from `config.problem_type`. A convnet returning bare
+logits does not satisfy that contract, and satisfying it would mean a
+`PreTrainedModel` subclass carrying a `transformers` config — wrapping the
+convnet in exactly the zoo machinery the spec exists to avoid. That is a
+deliberate non-goal, not a backlog item.
+
+**What you may change.** A backend that brings both kinds brings both: a
+`<backend>_model.py` at the top level and a `<backend>_convnet.py` in the
+`convnet/` package. A backend with no zoo to wrap brings only the second — that
+is `jax` and `mlx`. Do not flatten the package back to the top level, do not
+rename a module away from the class it exports, and do not add a convnet that is
+not an instance of its framework's own module type.
 
 **Consequences.**
 
@@ -576,9 +738,17 @@ Two members remain hand-written, each for a measured reason:
   `Union[Any, Fluid]`, and a method call through the `Fluid` arm is rejected. The
   answer is not an accessor — one was written and thrown away — but the
   annotation: the ATTRIBUTE carries the real type (`self.model: keras.Model`)
-  while the CONSTRUCTOR param keeps `Mandatory[Lazy[Any]]`, which is the only
-  place the marker is machine-read. Restating `Lazy` on the attribute bought
-  nothing and cost every direct call.
+  while the CONSTRUCTOR param keeps the `Lazy[...]` marker, which is the only
+  place it is machine-read. Restating `Lazy` on the attribute bought nothing and
+  cost every direct call.
+- **The param's `T` was narrowed on 2026-08-01** — it read `Mandatory[Lazy[Any]]`
+  here and in five sibling backends, which declared the deferral and nothing
+  else. Each now names what it takes (`Lazy[keras.Model]` here), and the two
+  slots that genuinely admit two types name a union alias rather than falling
+  back to `Any`: `TensorFlowNetwork = Union[keras.Model, tf.Module]` and
+  `HuggingFaceNetwork = Union[HuggingFaceModel, torch.nn.Module]`. `Lazy[T]`'s
+  own docstring blesses `Lazy[Any]` "when the target type is genuinely open" —
+  none of these was. See §8.
 
 **Example.**
 
@@ -600,3 +770,189 @@ self.model.compile(optimizer=..., loss=..., metrics=[...])
 supply it, and say which measured behaviour forced it — the two above name
 theirs. Do not reintroduce `getattr(self.model, "model", self.model)`: if a call
 site seems to need it, the wrapper is missing a base class, not a fallback.
+
+---
+
+## 8. A deferred slot names its type; `Lazy[Any]` is half a declaration
+
+*2026-08-01*
+
+**Context.** Every backend's `model` is a deferred slot: a config wires
+`model: !lazy:sonair.TimmModel` and the classifier flows it at run time with the
+dataset-derived width (`flow(self.model, num_classes=…)`). `Lazy[T]` —
+`Annotated[Union[T, Fluid], "__confluid_lazy__"]` — is what declares that: the
+marker is machine-read by `confluid.lazy_param_names`, so liquifai's auto
+deep-flow skips the slot instead of building a target that still needs a runtime
+kwarg, and the serializer emits `!lazy:` rather than `!class:`.
+
+Six of the seven backends that existed then spelled it `Mandatory[Lazy[Any]]`.
+That declares the deferral and nothing else, and three arguments had accumulated
+for leaving it there: the ATTRIBUTE already carries the real type (§7), a
+narrower `T` buys nothing in the generated schema for a torch model, and some
+slots really do admit two unrelated types. Only the first is a reason to keep
+`Any` on the attribute; none is a reason to keep it on the param.
+
+**Decision.** Each backend's `model` param names what that backend accepts:
+
+| backend | slot type | why |
+| --- | --- | --- |
+| lightning, torch, fastai | `Lazy[torch.nn.Module]` | all three run on torch; fastai's `initialize()` already raised `TypeError` for a non-module |
+| keras | `Lazy[keras.Model]` | the class calls `compile`/`fit`/`export` through the slot |
+| tensorflow | `Lazy[TensorFlowNetwork]` | `Union[keras.Model, tf.Module]` — see below |
+| jax | `Lazy[nnx.Module]` | `nnx.Optimizer(model, …)` and `nnx.value_and_grad` require one |
+| mlx | `Lazy[nn.Module]` (`mlx.nn`) | `nn.value_and_grad(model, …)` / `optimizer.update(model, …)` take the module itself |
+| huggingface | `Lazy[HuggingFaceNetwork]` | `Union[HuggingFaceModel, torch.nn.Module]` — `_network()` unwraps either |
+
+Six of the eight name their framework's own module BASE rather than a concrete
+sonair class, and that is possible because of a second decision made the same day:
+every implementation of the shared conv spec IS its framework's module type —
+`TorchConvNet(nn.Module)`, `KerasConvNet(keras.Model)`,
+`TensorFlowConvNet(tf.Module)`, `FlaxConvNet(nnx.Module)`,
+`MlxConvNet(mlx.nn.Module)` — the same rule §7 sets for the zoo wrappers. While
+`MlxConvNet` was still a builder holding its network in an attribute, the MLX slot
+could only be typed as that one class; once it became an `nn.Module`, the slot
+became `nn.Module` and a user's own module fits it.
+
+Where two types genuinely meet in one slot, the union is spelled out as a
+module-level alias with a `#:` comment, never widened back to `Any`.
+`TensorFlowNetwork` is the real case: under the TensorFlow backend a
+`keras.Model` descends `Layer -> TFLayer -> KerasAutoTrackable`
+(`keras/src/backend/tensorflow/trackable.py`), so it is NOT a `tf.Module` and the
+nearest shared ancestor is `tf.__internal__.tracking.AutoTrackable` — a private
+API this must not name. `HuggingFaceNetwork`'s second arm is `torch.nn.Module`
+rather than `transformers.PreTrainedModel` because every `AutoModelFor*` is one,
+and naming the transformers class would force a module-level `import
+transformers` that this backend defers to the methods that need it.
+
+**Consequences.**
+
+- What the narrowing buys differs by arm, and both halves were measured. For a
+  torch model it changes NOTHING downstream: `confluid.pydantic_export`
+  coerces `torch`/`numpy` types to `Any` (`_OPAQUE_TOP_MODULES`), so
+  `Lazy[nn.Module]` and `Lazy[Any]` generate the identical field. For the rest it
+  is real — `to_pydantic(HuggingFaceClassifier)` now offers the wrapper's own
+  `HuggingFaceModelConfig` in the `model` field where it used to offer an open
+  `{}`, because `HuggingFaceModel` is `@configurable` and the exporter recurses
+  into it.
+- The generated JSON schema for a narrowed slot loses the "anything goes" arm:
+  `KerasClassifier.model` reports `$ref: FluidConfig` where it used to report
+  `anyOf: [{}, FluidConfig]`. Pydantic still VALIDATES a live instance
+  (`arbitrary_types_allowed`, verified for both a `keras.Sequential` and a
+  `LazyClass` marker); it is the JSON projection that drops the un-schemable arm.
+  A form-spec consumer therefore sees "wire a config here", which is what the
+  slot is for.
+- `TensorFlowClassifier` is the only slot where two FRAMEWORKS meet (the
+  huggingface union is one framework's wrapper beside its own model), and it tells
+  the arms apart where they differ rather than at the boundary — `_export`
+  branches on `hasattr(model, "export")`, `_restored_trainable_variables` on the
+  declared variable list.
+- The narrowing has RUNTIME teeth, not just static ones: `@configurable` validates
+  constructor kwargs against `to_pydantic(cls)` in strict mode
+  (`confluid.decorators` → `validate_kwargs`), so a live object that is not an
+  instance of the declared type is now rejected AT CONSTRUCTION instead of
+  failing later inside the loop. The normal wiring path is unaffected — a
+  `!lazy:`/`!class:` marker is a `Fluid`, and `validate_kwargs` deliberately skips
+  deferred fields ("validate post-flow"). What it caught immediately was tests
+  passing `model=None`.
+- Tests that never touch the model now wire a cheap legal stand-in instead of
+  `model=None`: a `_NO_MODEL = torch.nn.Identity()` constant in the torch-side
+  suites, and a `_no_model()` FACTORY returning `tf.Module()` in the TensorFlow
+  one — a factory there because that file's source-only tests must keep running
+  where TensorFlow is absent. `model` is `Mandatory`; None was never legal, and
+  28 call sites had been passing it under cover of `Any`.
+- The root `mypy.ini` gained `[mypy-jax.*]` / `[mypy-flax.*]` / `[mypy-optax.*]`
+  ignore sections, matching the ones fastai and mlx already had: they back a
+  selectable extra, so they are absent from a default install and their imports
+  would otherwise read as real missing imports.
+
+**Example.**
+
+```python
+# tensorflow_classifier.py — the one slot where two frameworks meet
+TensorFlowNetwork = Union[keras.Model, tf.Module]
+
+class TensorFlowClassifier(ProgressReporting):
+    def __init__(self, model: Mandatory[Lazy[TensorFlowNetwork]], ...) -> None:
+        # PARAM declares the deferral (machine-read by `lazy_param_names`);
+        # ATTRIBUTE declares what it holds once flowed — see §7.
+        self.model: TensorFlowNetwork = model
+
+# ...and everywhere else the type is simply the framework's own base:
+class TorchClassifier(TorchRunner, ProgressReporting):
+    def __init__(self, model: Mandatory[Lazy[nn.Module]], ...) -> None:
+        self.model: nn.Module = cast(nn.Module, model)
+```
+
+**What you may change.** A new backend picks the type its loop actually requires
+and says so; if it needs two, add a `<Backend>Network` union alias beside the
+other `#:`-documented ones. `TorchClassifier` was the first backend written after
+this record and it landed at `Lazy[nn.Module]` with no prompting, which is the
+evidence the rule costs nothing to follow. `Lazy[Any]` stays legal in confluid for
+a genuinely open slot — no sonair `model` slot is one, and
+`tests/test_lazy_slots.py::test_no_classifier_declares_its_model_slot_as_lazy_any`
+reads the SOURCE (most backends need a framework a default install lacks, so an
+import-based check would skip exactly where a copy-pasted slot lands).
+
+---
+
+## 9. A backend is a sibling, not a subclass (2026-08-01)
+
+**Context.** `TensorFlowClassifier` subclassed `KerasClassifier` from the day it
+landed, and record 4 justified that: in TensorFlow >= 2.16 `tf.keras` **is** Keras 3,
+so the model wrapper, the losses, the metrics and the batch shape really are the same
+objects. The inheritance was not decorative — fourteen of the parent's twenty-one
+methods came through untouched, 163 of its 307 lines, and the TensorFlow `fit()` and
+`predict()` genuinely called them.
+
+Two facts about the code argued the other way, and neither is a matter of taste:
+
+- Of the seven methods the subclass overrode, **five never called `super()`**. `fit`,
+  `test`, `predict`, `_compile` and `_resolve_task_defaults` replaced the parent's
+  bodies outright. A base class whose behaviour is entirely replaced is carrying code
+  reuse, not substitutability.
+- It **narrowed a precondition**. `_require_tensorflow_backend()` raises where a
+  `KerasClassifier` runs fine, so a picker offering "any `KerasClassifier`" can hand
+  out one that cannot run — and the framework axis cannot catch it, because both
+  declare `framework="keras"`.
+
+**Decision.** The two are siblings. `TensorFlowClassifier` extends
+`ProgressReporting` directly and owns a full copy of the classification half.
+
+The obvious alternative — extract an engine-neutral base and have both inherit it —
+is **deferred, not rejected**. All eight backends carry that sequence now — every
+`<backend>_classifier.py` has its own `_initialize_fit` — and the detection projects
+have not been through it yet; a base extracted today would be fitted to classification
+eight times and then reshaped for a detector's targets, boxes and metrics. It waits
+for those consumers (`TASKS.md`).
+
+**Consequences.**
+
+- The label pipeline, the batch shape, the prediction contract and the artifact
+  writers are duplicated. That is the price, and it is paid knowingly.
+- The drift guard is **behavioural, not structural**: both classes are driven over
+  the same string-labelled records and must agree on `num_classes`, `multilabel`,
+  `class_names`, the batch shape and the target dtype. Comparing SOURCE would fail on
+  docstrings and error text, which legitimately differ.
+- Importing `sonair.tensorflow_classifier` no longer registers `KerasClassifier` as a
+  side effect. A discovery service was never relying on that (each module is its own
+  entry point), but `tests/test_categories.py` was.
+- `RecordSequence` had to be re-exported from `sonair/_tensorflow.py`. A standalone
+  module importing it from `recordstream.keras` would let isort sort that line into
+  the third-party group above every `sonair` line — and `recordstream.keras` is where
+  the competing `KERAS_BACKEND` default lives. Measured: with the variable unset,
+  `import recordstream.keras` leaves it at `torch`.
+
+**Example.**
+
+```python
+class TensorFlowClassifier(ProgressReporting):        # was: (KerasClassifier)
+    def initialize(self) -> None:
+        self._require_tensorflow_backend()            # the narrowed precondition
+        self._initialize_fit() if self.task == "fit" else self._initialize_eval()
+        self._compile()
+```
+
+**What you may change.** Extract the shared base once raidar and deltaid are done —
+and do not restore the subclass relationship on the way. A backend that genuinely
+specializes another (calling `super()`, widening nothing, narrowing nothing) may still
+subclass it; none currently does.

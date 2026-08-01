@@ -152,7 +152,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[Any]],
+        model: Mandatory[Lazy[torch.nn.Module]],
         train_set: Optional[Lazy[RecordSource]] = None,
         val_set: Optional[Lazy[RecordSource]] = None,
         test_set: Optional[Lazy[RecordSource]] = None,
@@ -175,12 +175,11 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         metrics: Optional[Sequence[FastaiMetric]] = None,
     ) -> None:
         super().__init__()
-        # `torch.nn.Module`, not `Lazy[Any]`: the deferred-ness is declared once, on the ctor
-        # param, which is what `lazy_param_names` / `to_pydantic` read. A union here would only
-        # stop every method calling through the slot (`.eval()`, `.parameters()`).
-        # The cast is the whole of it: the ctor accepts a deferred marker (that is what
-        # `Mandatory[Lazy[Any]]` above declares, and what `lazy_param_names` reads), while the
-        # ATTRIBUTE's useful type is what it holds once `initialize()` has flowed it.
+        # `torch.nn.Module`, not `Lazy[torch.nn.Module]`: the deferred-ness is declared once, on
+        # the ctor param, which is what `lazy_param_names` / `to_pydantic` read. A union here
+        # would only stop every method calling through the slot (`.eval()`, `.parameters()`).
+        # The cast is the whole of it: the ctor accepts a deferred marker, while the ATTRIBUTE's
+        # useful type is what it holds once `initialize()` has flowed it.
         self.model: torch.nn.Module = cast(torch.nn.Module, model)
         self.train_set: Optional[Lazy[RecordSource]] = train_set
         self.val_set: Optional[Lazy[RecordSource]] = val_set

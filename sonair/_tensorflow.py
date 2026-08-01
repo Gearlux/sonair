@@ -20,6 +20,14 @@ this one module, and ``tests/test_tensorflow_classifier.py`` pins that it stays 
 ``setdefault``, not an assignment: an explicit ``KERAS_BACKEND=jax`` still wins, and
 ``TensorFlowClassifier.initialize()`` then fails with a message naming the mismatch instead of
 running on an engine its training loop cannot drive.
+
+:class:`~recordstream.keras.RecordSequence` is re-exported for the SAME reason as ``keras``, and
+it is not decoration: the default above lives in ``recordstream.keras``, so importing the
+batching adapter from its own module is what pins the variable — and isort sorts a
+``recordstream`` line into the third-party group, ABOVE every ``sonair`` line. A consumer
+writing ``from recordstream.keras import RecordSequence`` would therefore bind keras to torch one
+line before this module could ask for TensorFlow. Measured: with ``KERAS_BACKEND`` unset,
+``import recordstream.keras`` leaves it at ``torch`` on this workspace's venv.
 """
 
 import os
@@ -32,6 +40,6 @@ import tensorflow as tf  # noqa: E402 - deliberately after the environment defau
 
 # Through recordstream, exactly as `sonair/_keras.py` does — same one spelling for the handle,
 # now that the variable it reads is already pinned.
-from recordstream.keras import keras, keras_backend  # noqa: E402
+from recordstream.keras import RecordSequence, keras, keras_backend  # noqa: E402
 
-__all__ = ["keras", "keras_backend", "tf"]
+__all__ = ["RecordSequence", "keras", "keras_backend", "tf"]

@@ -41,6 +41,7 @@ pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning
 |---|---|
 | `sonair` | nothing — CLI and config surface only |
 | `sonair[lightning]` | `torch`, `pytorch-lightning`, `timm`, `torchmetrics` |
+| `sonair[torch]` | the same MINUS `pytorch-lightning` — a hand-written loop and nothing under it |
 | `sonair[keras]` | `keras` (Keras 3 — picks torch / tensorflow / jax at run time) |
 | `sonair[tensorflow]` | `keras` + the TensorFlow engine |
 | `sonair[fastai]` | `fastai`, `torch`, `timm` (no Lightning — the two trainers are alternatives) |
@@ -127,7 +128,7 @@ typical stages:
    the image and `recordstream.ops.target.MetadataToTargetOp` → `EncodeTargetOp`
    turn the metadata label into a scalar int64 class id (the declarative
    scikit-`LabelEncoder` analogue — there is no sonair/waivefront target op).
-   The `recordstream.sources.HuggingFaceSource` path skips step 3 entirely: HF's
+   The `recordstream.sources.huggingface.HuggingFaceSource` path skips step 3 entirely: HF's
    `ClassLabel` feature already yields an integer label.
 4. `sonair.TimmModel` consumes the image and
    emits per-image class logits.
@@ -153,12 +154,13 @@ wins over any `task:` set in the config, so one config can serve all three.
 
 ## Training backends
 
-Seven engines, one config — every backend the CLI advertises is implemented. `sonair <backend> <verb>` picks the engine; everything above the
+Eight engines, one config — every backend the CLI advertises is implemented. `sonair <backend> <verb>` picks the engine; everything above the
 config's framework divider — dataset, splits, batch size, epochs, run identity — is shared
 verbatim.
 
 ```bash
 sonair lightning  train examples/train_efficientvit_b0_mnist.yaml   # PyTorch Lightning
+sonair torch      train examples/train_efficientvit_b0_mnist.yaml   # a hand-written loop, no framework
 sonair keras      train examples/train_efficientvit_b0_mnist.yaml   # Keras 3
 sonair tensorflow train examples/train_efficientvit_b0_mnist.yaml   # tf.data + GradientTape
 sonair fastai     train examples/train_efficientvit_b0_mnist.yaml   # Learner + one-cycle
@@ -169,13 +171,14 @@ sonair mlx        train examples/train_efficientvit_b0_mnist.yaml   # Apple-sili
 
 | Backend | Model wrapper | Owns the loop with | Adds |
 |---|---|---|---|
-| `lightning` | `TimmModel` (timm) | `pytorch_lightning.Trainer` | the reference implementation |
+| `lightning` | `TimmModel` (timm), or `TorchConvNet` (the shared spec) | `pytorch_lightning.Trainer` | the reference implementation |
+| `torch` | `TimmModel` / `TorchConvNet` — the same ones | a hand-written loop | the control experiment: no framework at all |
 | `keras` | `KerasModel` (`keras.applications`) | `keras.Model.fit` | one API over torch / TF / JAX |
 | `tensorflow` | `KerasModel` — the same one | a traced `tf.GradientTape` loop | `tf.data`, XLA, SavedModel export |
-| `fastai` | `TimmModel` — the same one | `Learner.fit_one_cycle` | fastai's schedule and callbacks |
+| `fastai` | `TimmModel` / `TorchConvNet` — the same ones | `Learner.fit_one_cycle` | fastai's schedule and callbacks |
 | `huggingface` | `HuggingFaceModel` (the Hub) | `transformers.Trainer` | fine-tuning a pretrained checkpoint |
-| `jax` | `FlaxModel` (the shared spec) | a jitted `optax` loop | functional transforms; no zoo to wrap |
-| `mlx` | `MlxModel` (the shared spec) | `mlx.optimizers` + `nn.value_and_grad` | unified memory; Apple silicon only |
+| `jax` | `FlaxConvNet` (the shared spec) | a jitted `optax` loop | functional transforms; no zoo to wrap |
+| `mlx` | `MlxConvNet` (the shared spec) | `mlx.optimizers` + `nn.value_and_grad` | unified memory; Apple silicon only |
 
 On the shipped MNIST config (3 epochs), `lightning` reaches **99.52%** top-1 and `keras`
 **99.18%** best val from the same file, changing only the verb. Different backbones, so this
@@ -321,7 +324,7 @@ declare `trainer`/`evaluator`/`predictor` roles — and `torch.nn.CrossEntropyLo
 is `register`-ed as `role="loss"`), so navigaitor's `list_classes(task=…, role=…)`
 scan + the visual-editor form-spec offer them — and any future classification
 model/loss — as task-scoped options. The dataset is the generic
-`recordstream.sources.HuggingFaceSource`.
+`recordstream.sources.huggingface.HuggingFaceSource`.
 
 ## Class count: how `num_classes` is resolved
 
@@ -343,7 +346,7 @@ dataset drive it:
 ```yaml
 model: !lazy:sonair.TimmModel        # !lazy: so the derived count is injected
   model_name: efficientvit_b0
-train_set: !class:recordstream.sources.HuggingFaceSource
+train_set: !class:recordstream.sources.huggingface.HuggingFaceSource
   path: kitofrank/RFUAV
   split: train
 ```
@@ -374,7 +377,7 @@ runnable: !class:sonair.LightningClassifier
   #   mapping: { cat: 0, dog: 1 }
 model: !lazy:sonair.TimmModel
   model_name: efficientvit_b0
-train_set: !class:recordstream.sources.HuggingFaceSource
+train_set: !class:recordstream.sources.huggingface.HuggingFaceSource
   path: ./my_imagefolder      # string labels — auto-encoded
   split: train
 ```
@@ -463,8 +466,8 @@ there is deliberately **no** `tensorflow_classification.py`: in TensorFlow ≥ 2
 same classes under a second tag and make every bare `!class:SparseCategoricalCrossentropy`
 ambiguous for no gain.
 
-Both backends leave `loss` / `metrics` unset by default and resolve them from the data at
-`initialize()` (`Sparse`/`CrossEntropy` for int64 ids, the binary/`BCE` family for a
+Every backend that owns a loss slot leaves `loss` / `metrics` unset by default and resolves
+them from the data at `initialize()` (`Sparse`/`CrossEntropy` for int64 ids, the binary/`BCE` family for a
 `MultiLabel` target). Everything below is for when you want to say it yourself.
 
 ### Wiring a Keras loss or metric

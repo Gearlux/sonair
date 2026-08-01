@@ -136,6 +136,10 @@ def test_the_tensorflow_trainer_joins_the_keras_picker() -> None:
     import pytest
 
     pytest.importorskip("tensorflow", reason="needs sonair[tensorflow]")
+    # BOTH imports are needed since 2026-08-01: `TensorFlowClassifier` stopped subclassing
+    # `KerasClassifier`, so importing it no longer registers the Keras one as a side effect.
+    # A discovery service imports both anyway — each module is its own entry point.
+    from sonair.keras_classifier import KerasClassifier  # noqa: F401
     from sonair.tensorflow_classifier import TensorFlowClassifier  # noqa: F401
 
     trainers = get_registry().list_classes(task="classification", role="trainer", framework="keras")

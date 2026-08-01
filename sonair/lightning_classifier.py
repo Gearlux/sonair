@@ -18,8 +18,8 @@ Minimal flat YAML (top-level keys wired by Confluid broadcasting)::
       task: fit
       run_name: efficientvit_b0
     model: !lazy:sonair.TimmModel { model_name: efficientvit_b0, pretrained: true }
-    train_set: !class:recordstream.sources.HuggingFaceSource { path: kitofrank/RFUAV, split: train }
-    val_set: !class:recordstream.sources.HuggingFaceSource { path: kitofrank/RFUAV, split: validation }
+    train_set: !class:recordstream.sources.huggingface.HuggingFaceSource { path: kitofrank/RFUAV, split: train }
+    val_set: !class:recordstream.sources.huggingface.HuggingFaceSource { path: kitofrank/RFUAV, split: validation }
     batch_size: 32
     max_epochs: 20
 

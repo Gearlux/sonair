@@ -1,5 +1,5 @@
 # mypy: disable-error-code="attr-defined"
-"""``MlxClassifier`` — training on Apple-silicon unified memory, and ``MlxModel``.
+"""``MlxClassifier`` — training on Apple-silicon unified memory, and ``MlxConvNet``.
 
 Two things are worth pinning beyond the usual reuse claims. MLX arrays are **lazy**, so the
 loop's `mx.eval` calls are load-bearing rather than defensive — omitting one does not raise, it
@@ -49,25 +49,31 @@ def test_mlx_is_an_implemented_backend_not_a_template() -> None:
     assert IMPLEMENTED["mlx"].registrations is None, "mlx.nn.losses are functions — nothing to register"
 
 
-def test_every_backend_is_implemented_now() -> None:
-    """The end of the roadmap this project shipped with: seven advertised, seven real."""
+def test_every_advertised_backend_is_implemented() -> None:
+    """The end of the roadmap this project shipped with: nothing advertised is a stub.
+
+    The COUNT is deliberately not asserted here — `sonair torch` landed as an eighth backend
+    after this file was written, and a hard number turns every future backend into a failure in
+    the mlx suite. `tests/test_cli_frameworks.py::test_the_implemented_set_is_the_one_we_expect`
+    owns the exact roster; this one owns the invariant that `TEMPLATES` has been emptied.
+    """
     from sonair.cli import IMPLEMENTED, TEMPLATES
 
     assert TEMPLATES == {}
-    assert len(IMPLEMENTED) == 7
+    assert "mlx" in IMPLEMENTED
 
 
 # --------------------------------------------------------------------------- #
-# MlxModel — the fourth implementation of the shared spec
+# MlxConvNet — the fourth implementation of the shared spec
 # --------------------------------------------------------------------------- #
 
 
 @requires_mlx
 def test_it_matches_the_shared_spec() -> None:
-    from sonair.convnet_spec import trainable_parameter_count
-    from sonair.mlx_model import MlxModel
+    from sonair.convnet.mlx_convnet import MlxConvNet
+    from sonair.convnet.spec import trainable_parameter_count
 
-    model = MlxModel(num_classes=10, input_shape=INPUT)
+    model = MlxConvNet(num_classes=10, input_shape=INPUT)
     model.solidify()
 
     assert model.parameter_count == trainable_parameter_count(10)
@@ -79,9 +85,9 @@ def test_batchnorm_running_stats_are_excluded_from_the_count() -> None:
     hold them as separate non-trainable state. Counting them would break the four-way match."""
     from mlx.utils import tree_flatten
 
-    from sonair.mlx_model import MlxModel
+    from sonair.convnet.mlx_convnet import MlxConvNet
 
-    model = MlxModel(num_classes=10, input_shape=INPUT)
+    model = MlxConvNet(num_classes=10, input_shape=INPUT)
     model.solidify()
     leaves: Any = tree_flatten(model.model.parameters())
     paths = [p for p, _ in leaves]
@@ -92,22 +98,83 @@ def test_batchnorm_running_stats_are_excluded_from_the_count() -> None:
 
 @requires_mlx
 def test_zero_arg_construction_allocates_nothing() -> None:
-    from sonair.mlx_model import MlxModel
+    from sonair.convnet.mlx_convnet import MlxConvNet
 
-    model = MlxModel()
+    model = MlxConvNet()
 
-    assert model._model is None
+    # Asserted through `parameters()` rather than the backing attribute: this class IS an
+    # `nn.Module`, so "allocates nothing" is a statement about the parameter tree the optimizer
+    # would see, and that survives a rename of where the network is stashed.
+    assert model.net is None
+    assert not model.parameters()
     with pytest.raises(ValueError, match="num_classes"):
         model.solidify()
+
+
+@requires_mlx
+def test_it_is_an_mlx_module() -> None:
+    """The twin of `FlaxConvNet` being an `nnx.Module` and `TimmModel` an `nn.Module`.
+
+    It is what lets `MlxClassifier` hand the slot value straight to `nn.value_and_grad` /
+    `optimizer.update` instead of reaching through to `self.model.model`.
+    """
+    import mlx.nn as nn
+
+    from sonair.convnet.mlx_convnet import MlxConvNet
+
+    assert issubclass(MlxConvNet, nn.Module)
+
+
+@requires_mlx
+def test_the_built_network_is_visible_to_parameters() -> None:
+    """The underscore trap, pinned.
+
+    `nn.Module.valid_parameter_filter` ends in `and not key.startswith("_")`, so holding the
+    network in `self._model` — the name the Keras / TensorFlow / Flax twins use — hides it from
+    `parameters()` entirely. The optimizer would then see an empty tree and the loop would apply
+    gradients to nothing forever, silently. Nothing else in the suite would catch that: the
+    forward pass still works, the loss is still finite, it just never moves.
+    """
+    from sonair.convnet.mlx_convnet import MlxConvNet
+
+    model = MlxConvNet(num_classes=10, input_shape=INPUT)
+    model.solidify()
+
+    assert model.parameters(), "the network must be reachable through the module's own tree"
+    assert all(not key.startswith("_") for key in model.parameters())
+    assert model.trainable_parameters()
+
+
+@requires_mlx
+def test_calling_it_does_not_reset_the_training_mode() -> None:
+    """`training` defaults to None — *leave the mode alone* — and that is not cosmetic.
+
+    MLX carries train/eval as module STATE. `nn.value_and_grad` calls `model(x)` with no flag,
+    so a `training: bool = False` default (what the Keras and Flax twins take) would flip the
+    network to eval on every step of the training loop and dropout / batch-norm would never
+    train. The failure is silent: the loss stays finite and merely wrong.
+    """
+    import mlx.core as mx
+
+    from sonair.convnet.mlx_convnet import MlxConvNet
+
+    model = MlxConvNet(num_classes=4, input_shape=INPUT)
+    model.train(True)
+    model(mx.ones((2, *INPUT)))
+
+    assert model.training is True
+    # ...and an explicit flag still sets it, which is what the eval paths rely on.
+    model(mx.ones((2, *INPUT)), training=False)
+    assert model.training is False
 
 
 @requires_mlx
 def test_the_head_emits_raw_logits() -> None:
     import mlx.core as mx
 
-    from sonair.mlx_model import MlxModel
+    from sonair.convnet.mlx_convnet import MlxConvNet
 
-    out = np.asarray(MlxModel(num_classes=4, input_shape=INPUT)(mx.ones((2, *INPUT))))
+    out = np.asarray(MlxConvNet(num_classes=4, input_shape=INPUT)(mx.ones((2, *INPUT))))
 
     assert not np.allclose(out.sum(axis=-1), 1.0)
 
@@ -135,11 +202,11 @@ def _records(n: int = 12, labels: str = "ids") -> list:
 def _classifier(**kw: Any) -> Any:
     from confluid import LazyClass
 
+    from sonair.convnet.mlx_convnet import MlxConvNet
     from sonair.mlx_classifier import MlxClassifier
-    from sonair.mlx_model import MlxModel
 
     defaults: dict = dict(
-        model=LazyClass(MlxModel, input_shape=INPUT),
+        model=LazyClass(MlxConvNet, input_shape=INPUT),
         max_epochs=1,
         batch_size=4,
         experiment_name="test",
@@ -323,11 +390,11 @@ def test_predict_writes_one_entry_per_record_with_its_metadata() -> None:
     from confluid import LazyClass
     from recordstream import Stream
 
-    from sonair.mlx_model import MlxModel
+    from sonair.convnet.mlx_convnet import MlxConvNet
 
     sink = _CaptureSink()
     clf = _classifier(
-        model=LazyClass(MlxModel, input_shape=INPUT, num_classes=3),
+        model=LazyClass(MlxConvNet, input_shape=INPUT, num_classes=3),
         test_set=Stream(source=_records(7)),
         task="predict",
         batch_size=3,
@@ -358,8 +425,8 @@ def test_discovery_tags_and_outputs() -> None:
 @requires_mlx
 @pytest.mark.parametrize("method", ["test", "predict"])
 def test_eval_verbs_without_a_test_set_are_clear_errors(method: str) -> None:
-    from sonair.mlx_model import MlxModel
+    from sonair.convnet.mlx_convnet import MlxConvNet
 
-    clf = _classifier(model=MlxModel(num_classes=3, input_shape=INPUT), task=method)
+    clf = _classifier(model=MlxConvNet(num_classes=3, input_shape=INPUT), task=method)
     with pytest.raises(ValueError, match="test_set"):
         getattr(clf, method)()

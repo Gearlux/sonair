@@ -49,6 +49,12 @@ class _Tiny(torch.nn.Module):
         return cast(torch.Tensor, self.fc(x.flatten(1)))
 
 
+#: What a test wires when it never touches the model slot. `model` is `Mandatory[Lazy[nn.Module]]`
+#: — it must be wired, and it must be a module — so these tests wire the cheapest legal thing
+#: rather than `None`, which only type-checked while the slot was `Lazy[Any]`.
+_NO_MODEL = torch.nn.Identity()
+
+
 def _records(n: int, num_classes: int = 3) -> List[dict]:
     """Channels-FIRST records — what a torch preprocessing chain (``ToTensor``) produces."""
     from recordstream.items import Image
@@ -100,7 +106,7 @@ def test_discovery_tags() -> None:
 
 def test_zero_arg_construction_does_no_work() -> None:
     """The workspace lazy-init mandate: the constructor stores, it does not build."""
-    clf = FastaiClassifier(model=None)
+    clf = FastaiClassifier(model=_NO_MODEL)
     assert clf.task == "fit"
     assert clf.num_classes is None
     assert clf.loss is None and clf.metrics is None, "task-shaped slots are sentinels, not live defaults"
@@ -109,8 +115,8 @@ def test_zero_arg_construction_does_no_work() -> None:
 
 def test_only_fit_needs_autograd() -> None:
     """A GUI executor evaluates nodes under ``torch.inference_mode()`` and reads this flag."""
-    assert FastaiClassifier(model=None, task="fit").__needs_autograd__ is True
-    assert FastaiClassifier(model=None, task="predict").__needs_autograd__ is False
+    assert FastaiClassifier(model=_NO_MODEL, task="fit").__needs_autograd__ is True
+    assert FastaiClassifier(model=_NO_MODEL, task="predict").__needs_autograd__ is False
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +127,7 @@ def test_only_fit_needs_autograd() -> None:
 def test_to_tuple_produces_the_pair_fastai_unpacks() -> None:
     """fastai unpacks a batch positionally, so the batch has to BE a tuple — not the record
     dict a ``LightningModule`` reads by key. That is the whole adaptation."""
-    clf = FastaiClassifier(model=None, num_classes=3)
+    clf = FastaiClassifier(model=_NO_MODEL, num_classes=3)
     x, y = clf._to_tuple(_records(4))
 
     assert x.shape == (4, 3, 8, 8)
@@ -130,12 +136,12 @@ def test_to_tuple_produces_the_pair_fastai_unpacks() -> None:
 
 
 def test_to_tuple_without_targets_is_a_one_tuple() -> None:
-    clf = FastaiClassifier(model=None, num_classes=3)
+    clf = FastaiClassifier(model=_NO_MODEL, num_classes=3)
     assert len(clf._to_tuple(_records(4), with_targets=False)) == 1
 
 
 def test_a_multilabel_target_becomes_a_float_multi_hot() -> None:
-    clf = FastaiClassifier(model=None, num_classes=3)
+    clf = FastaiClassifier(model=_NO_MODEL, num_classes=3)
     clf.multilabel = True
     _, y = clf._to_tuple(_multilabel_records(4))
 
@@ -145,7 +151,7 @@ def test_a_multilabel_target_becomes_a_float_multi_hot() -> None:
 
 
 def test_a_multilabel_target_without_num_classes_is_a_clear_error() -> None:
-    clf = FastaiClassifier(model=None)
+    clf = FastaiClassifier(model=_NO_MODEL)
     clf.multilabel = True
     with pytest.raises(RuntimeError, match="num_classes"):
         clf._to_tuple(_multilabel_records(2))
@@ -156,7 +162,7 @@ def test_the_batch_shape_matches_the_lightning_backend() -> None:
     from recordstream import batch_tensor, collate_records
 
     records = _records(4)
-    clf = FastaiClassifier(model=None, num_classes=3)
+    clf = FastaiClassifier(model=_NO_MODEL, num_classes=3)
     x, y = clf._to_tuple(records)
 
     batch = collate_records(records)
@@ -182,7 +188,7 @@ def test_the_loader_slots_match_the_lightning_backends() -> None:
     assert slots <= lazy_param_names(FastaiClassifier)
     assert slots <= lazy_param_names(LightningClassifier)
 
-    clf = FastaiClassifier(model=None, batch_size=8, num_workers=2)
+    clf = FastaiClassifier(model=_NO_MODEL, batch_size=8, num_workers=2)
     for name in slots:
         stub = getattr(clf, name)
         assert isinstance(stub, Fluid), f"{name} must stay deferred until run() supplies dataset="
@@ -192,7 +198,7 @@ def test_the_loader_slots_match_the_lightning_backends() -> None:
 
 def test_the_only_divergence_from_lightning_is_the_collate() -> None:
     """fastai unpacks a batch POSITIONALLY, so `_to_tuple` sits where `collate_records` sits."""
-    clf = FastaiClassifier(model=None, num_classes=3)
+    clf = FastaiClassifier(model=_NO_MODEL, num_classes=3)
     train, val = cast(Fluid, clf.train_loader), cast(Fluid, clf.val_loader)
 
     assert train.kwargs["collate_fn"] == clf._to_tuple
@@ -202,7 +208,7 @@ def test_the_only_divergence_from_lightning_is_the_collate() -> None:
 
 def test_a_wired_loader_replaces_the_baked_stub() -> None:
     """What the alignment buys: the loader is a post-construction slot, as in Lightning."""
-    clf = FastaiClassifier(model=None, num_classes=3)
+    clf = FastaiClassifier(model=_NO_MODEL, num_classes=3)
     clf.train_loader = LazyClass(DataLoader, batch_size=1, drop_last=True, collate_fn=clf._to_tuple)
 
     loader = flow(clf.train_loader, dataset=_records(4))
@@ -218,7 +224,7 @@ def test_predict_gets_record_batches_from_the_SAME_slot() -> None:
     """
     from recordstream import collate_records
 
-    clf = FastaiClassifier(model=None, num_classes=3, batch_size=2)
+    clf = FastaiClassifier(model=_NO_MODEL, num_classes=3, batch_size=2)
     records = _records(4)
 
     tuples = flow(clf.test_loader, dataset=records)
@@ -238,12 +244,12 @@ def test_predict_gets_record_batches_from_the_SAME_slot() -> None:
 def test_defaults_are_resolved_from_the_data_not_the_signature() -> None:
     from fastai.losses import BCEWithLogitsLossFlat, CrossEntropyLossFlat
 
-    single = FastaiClassifier(model=None)
+    single = FastaiClassifier(model=_NO_MODEL)
     single._resolve_task_defaults()
     assert isinstance(single.loss, CrossEntropyLossFlat)
     assert single.metrics == ["accuracy"]
 
-    multi = FastaiClassifier(model=None)
+    multi = FastaiClassifier(model=_NO_MODEL)
     multi.multilabel = True
     multi._resolve_task_defaults()
     assert isinstance(multi.loss, BCEWithLogitsLossFlat)
@@ -256,7 +262,7 @@ def test_an_explicitly_wired_loss_is_never_replaced() -> None:
     from fastai.losses import LabelSmoothingCrossEntropyFlat
 
     chosen = LabelSmoothingCrossEntropyFlat()
-    clf = FastaiClassifier(model=None, loss=chosen)
+    clf = FastaiClassifier(model=_NO_MODEL, loss=chosen)
     clf._resolve_task_defaults()
     clf._resolve_task_defaults()  # idempotent
 
@@ -474,7 +480,7 @@ def test_a_non_module_model_is_a_clear_error() -> None:
     eval task resolves `num_classes` OFF the model first (`_initialize_eval`) and so rejects a
     non-model earlier, with its own equally clear message.
     """
-    clf = FastaiClassifier(model="not a model", train_set=_stream(_records(4)), num_classes=3)
+    clf = FastaiClassifier(model=cast(Any, "not a model"), train_set=_stream(_records(4)), num_classes=3)
     with pytest.raises(TypeError, match="nn.Module"):
         clf.initialize()
 

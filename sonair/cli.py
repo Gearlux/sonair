@@ -120,6 +120,13 @@ IMPLEMENTED: Dict[str, Backend] = {
         "PyTorch Lightning — the reference backend (timm models, Lightning loggers).",
         "sonair.torch_classification",
     ),
+    # Shares `lightning`'s loss/metric set, and that is the point rather than an economy: a
+    # `torch.nn` loss does not care whether a Trainer or a hand-written loop calls it, so the
+    # two backends differ ONLY in the loop.
+    "torch": Backend(
+        "PyTorch — a hand-written loop, no training framework at all (the control experiment).",
+        "sonair.torch_classification",
+    ),
     "keras": Backend(
         "Keras 3 — one API over PyTorch / TensorFlow / JAX (set KERAS_BACKEND to pick).",
         "sonair.keras_classification",

@@ -128,7 +128,7 @@ class KerasClassifier(ProgressReporting):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[Any]],
+        model: Mandatory[Lazy[keras.Model]],
         train_set: Optional[Lazy[RecordSource]] = None,
         test_set: Optional[Lazy[RecordSource]] = None,
         num_classes: Optional[int] = None,
@@ -146,9 +146,12 @@ class KerasClassifier(ProgressReporting):
         metrics: Optional[Sequence[KerasMetric]] = None,
     ) -> None:
         super().__init__()
-        # `keras.Model`, not `Lazy[Any]`: the DEFERRED-ness is declared once, on the ctor
+        # `keras.Model`, not `Lazy[keras.Model]`: the DEFERRED-ness is declared once, on the ctor
         # param above, which is what `lazy_param_names` / `to_pydantic` read. Restating it
         # here would only make the attribute a union no method could call through.
+        # `keras.Model` and not something looser because this class calls `compile` / `fit` /
+        # `export` straight through the slot. The TensorFlow backend, which drives a hand-written
+        # loop instead, admits a `tf.Module` too and says so in its own `TensorFlowNetwork`.
         self.model: keras.Model = model
         self.train_set: Optional[Lazy[RecordSource]] = train_set
         self.val_set: Optional[Lazy[RecordSource]] = None

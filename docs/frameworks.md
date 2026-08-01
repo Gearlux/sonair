@@ -12,6 +12,7 @@ sonair lightning  train    cfg.yaml    # implemented — PyTorch Lightning
 sonair lightning  evaluate cfg.yaml
 sonair lightning  predict  cfg.yaml
 
+sonair torch      train  cfg.yaml     # implemented — a hand-written loop, no framework
 sonair keras      train  cfg.yaml     # implemented — Keras 3
 sonair tensorflow train  cfg.yaml     # implemented — tf.data + tf.GradientTape
 sonair fastai     train  cfg.yaml     # implemented — Learner + one-cycle
@@ -36,21 +37,70 @@ the machinery stays because it is how the NEXT backend will be advertised.
 | Dataset / ops / collate | no | `recordstream` |
 | **The runnable class** | **yes** | `sonair/<backend>_classifier.py` |
 | **The model wrapper** | *sometimes* | `sonair/<backend>_model.py` |
+| **A shared-spec convnet** | *sometimes* | `sonair/convnet/<backend>_convnet.py` |
 | **Losses / metrics** | *sometimes* | `sonair/<framework>_classification.py` |
 
-Only the last three rows are backend work — and the last of them is a list of
+Only the last four rows are backend work — and the last of them is a list of
 upstream class names, not code. That is the claim this project exists to
 demonstrate, and it is why a template's error message can honestly say "the
 CLI, the config shape and the logging backends are already wired".
 
-Two of those rows say *sometimes* because backends differ in what they add.
-`TensorFlowClassifier` reuses `KerasModel` and the Keras loss set (in TensorFlow
->= 2.16, `tf.keras` **is** Keras 3); `FastaiClassifier` reuses `TimmModel` and
-the torch loss set (fastai runs on torch). `HuggingFaceClassifier` brings a model
-wrapper but **no loss set at all**, because an `AutoModelForImageClassification`
-computes its own loss from `config.problem_type` — there is nothing for a config
-to wire. A backend adds a module only when it adds a genuinely new wiring
-surface — see [Architecture Decisions §5](architecture.md).
+Three of those rows say *sometimes* because backends differ in what they add.
+`TensorFlowClassifier` reuses the Keras loss set — and can take `KerasModel`
+itself — because in TensorFlow >= 2.16, `tf.keras` **is** Keras 3;
+`FastaiClassifier` and `TorchClassifier` reuse `TimmModel` and the torch loss
+set (both run on torch, and `TorchClassifier` runs on nothing else). `HuggingFaceClassifier` brings a model wrapper
+but **no loss set at all**, because an `AutoModelForImageClassification` computes
+its own loss from `config.problem_type` — there is nothing for a config to wire.
+A backend adds a module only when it adds a genuinely new wiring surface — see
+[Architecture Decisions §5](architecture.md).
+
+The convnet row is separate from the model-wrapper row because the two wrap
+different things: a model wrapper reaches somebody else's weights, while a
+convnet implements the [shared conv spec](../sonair/convnet/spec.py) and wraps
+nothing at all. That is why the convnets live together in
+[`sonair/convnet/`](../sonair/convnet/) rather than beside their backend's zoo
+wrapper — the four are the same network in four idioms, so the directory listing
+*is* the comparison:
+
+```
+sonair/convnet/
+  spec.py                 the architecture, written once
+  torch_convnet.py        TorchConvNet        torch.nn      (lightning AND fastai)
+  keras_convnet.py        KerasConvNet        keras.layers
+  tensorflow_convnet.py   TensorFlowConvNet   raw tf.nn ops on a tf.Module
+  flax_convnet.py         FlaxConvNet         flax.nnx
+  mlx_convnet.py          MlxConvNet          mlx.nn
+```
+
+Each module is named for the class it exports, exactly as at the top level;
+`spec.py` is the exception because it exports no class.
+
+Each convnet **is** its framework's own model type — a `torch.nn.Module`, a
+`keras.Model`, a `tf.Module`, an `nnx.Module`, an `mlx.nn.Module` — just as
+`TimmModel` is a `torch.nn.Module`. So a classifier drives whatever is wired
+into its `model` slot without reaching through a wrapper to find the network,
+and the `model` slot of each backend is typed as that framework's module rather
+than as the concrete sonair class.
+
+**Eight backends, five convnets, and the arithmetic is not a gap.** Three
+backends run on torch — `lightning`, `torch` and `fastai` — and all three take
+`TorchConvNet` unchanged, the same reason they already share `TimmModel`, and why
+there is no `fastai_convnet.py`. `tensorflow` can take `KerasConvNet` too, since
+`tf.keras` IS Keras 3. The one backend with no convnet is **`huggingface`**, and that is structural rather than
+unfinished: `transformers.Trainer` calls the model with `labels=` and reads
+`outputs["loss"]` back, so it drives models that compute their own loss from
+`config.problem_type`. A bare convnet returning logits does not satisfy that
+contract, and making it do so would mean writing a `PreTrainedModel` subclass
+with a `transformers` config — i.e. wrapping the convnet in the very zoo
+machinery the spec exists to avoid. Wire `HuggingFaceModel` there instead.
+
+A backend that brings both kinds brings both files — `lightning` has
+`timm_model.py` and `convnet/torch_convnet.py`, `keras` has `keras_model.py` and
+`convnet/keras_convnet.py`, `tensorflow` has `tensorflow_model.py` and
+`convnet/tensorflow_convnet.py`. The `jax` and `mlx` backends have no zoo to
+wrap, so they bring only a convnet; `huggingface` has no convnet, so it brings
+only a zoo wrapper.
 
 ## The verb → task mapping
 
@@ -115,10 +165,17 @@ and calling `_dispatch` with the verb's task. Declare the backend's dependencies
 under the matching extra in `pyproject.toml` and install with
 `pip install "sonair[jax]"`.
 
-**3. Register its losses and metrics — if it needs a set of its own.** Two of the
-four implemented backends do not: `tensorflow` names
-`sonair.keras_classification` (TF >= 2.16's `tf.keras` IS Keras 3) and `fastai`'s
-losses are torch callables, registered `framework="torch"`. When the engine's
+**3. Register its losses and metrics — if it needs a set of its own.** Three
+modules serve eight backends, so five of them add nothing here. `torch` shares
+`sonair.torch_classification` with `lightning` (a `torch.nn` loss does not care
+which loop calls it), `tensorflow` names `sonair.keras_classification`
+(TF >= 2.16's `tf.keras` IS Keras 3), and `fastai`'s losses are torch callables
+registered `framework="torch"`. Three name **no** module at all
+(`Backend.registrations is None`): `huggingface`, because an
+`AutoModelFor*` computes its own loss from `config.problem_type` and there is
+nothing a config could wire; `jax` and `mlx`, because optax and `mlx.nn.losses`
+ship plain FUNCTIONS, which confluid's `register` — a class decorator — cannot
+tag. Those two resolve a loss by NAME instead. When the engine's
 loss API *is* new, create `sonair/<framework>_classification.py` — tuples of
 *upstream* classes, a `register(...)` loop each, and a literal `__all__` naming
 every one — then add it to
@@ -174,7 +231,7 @@ set.
 
 ```yaml
 # shared — identical for every backend
-train_set: !class:recordstream.sources.HuggingFaceSource
+train_set: !class:recordstream.sources.huggingface.HuggingFaceSource
   path: mnist
   split: train
 batch_size: 32
@@ -204,30 +261,37 @@ recordstream run  cfg.yaml                          # no scope -> the default ba
 An explicit `--scope framework=…` or `--framework …` always wins over the verb.
 
 [`examples/train_efficientvit_b0_mnist.yaml`](../examples/train_efficientvit_b0_mnist.yaml)
-is built this way. Its alternative blocks are **commented out** while their
-runnable classes do not exist — uncommenting one both activates that backend and
-declares the `framework` dimension, which is what makes the implicit
-`--framework <name>` flag bind.
+is built this way. Its `torch` and `keras` blocks are **live**; the rest stay
+**commented out** — not because their runnable classes are missing (every backend
+is implemented) but because their extras are not in the workspace's selected
+frameworks, and loading the config imports every `!class:` it names, so a live
+block would break `tests/test_examples_load.py` on a default checkout. Select the
+extra (`pip install 'sonair[tensorflow]'`) and uncomment the block you want:
+uncommenting one both activates that backend and declares the `framework`
+dimension, which is what makes the implicit `--framework <name>` flag bind.
 
 ## Why templates instead of hiding unimplemented backends
 
-A template fails with the file to create, the reference to copy, and the exact
-registry line that switches it on:
+`TEMPLATES` is empty today — every advertised backend is implemented — so the
+transcript below is what the NEXT one will print, with `<name>` standing in for
+whatever it is called. A template fails with the file to create, the reference to
+copy, and the exact registry line that switches it on:
 
 ```console
-$ sonair jax train
-Error: `sonair jax train` is not implemented yet — jax is a backend TEMPLATE.
+$ sonair <name> train
+Error: `sonair <name> train` is not implemented yet — <name> is a backend TEMPLATE.
 ...
-  1. Create sonair/jax_classifier.py with a runnable class: ...
-  2. Move `jax` from TEMPLATES to IMPLEMENTED in sonair/cli.py, naming the
+  1. Create sonair/<name>_classifier.py with a runnable class: ...
+  2. Move `<name>` from TEMPLATES to IMPLEMENTED in sonair/cli.py, naming the
      module that registers its losses/metrics.
-  3. Install the backend: pip install 'sonair[jax]'
+  3. Install the backend: pip install 'sonair[<name>]'
 ```
 
-That is exactly how the `keras` backend got built (2026-07-29): the template named the
-file, the reference and the edit, and graduating it meant deleting its entry from
-`TEMPLATES`, adding a real sub-app, and moving it to `IMPLEMENTED` in
-`tests/test_cli_frameworks.py` — which then holds it to the same verb surface as the rest.
+That is exactly how every backend after the first got built — `keras` (2026-07-29)
+through `mlx` (2026-07-31): the template named the file, the reference and the edit,
+and graduating it meant deleting its entry from `TEMPLATES`, adding a real sub-app,
+and moving it to `EXPECTED_IMPLEMENTED` in `tests/test_cli_frameworks.py` — which
+then holds it to the same verb surface as the rest.
 
 It exits 1 through liquifai's failure contract (one clean message, full
 traceback under `--debug`) rather than raising an unhandled `NotImplementedError`

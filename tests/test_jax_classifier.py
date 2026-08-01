@@ -1,5 +1,5 @@
 # mypy: disable-error-code="attr-defined"
-"""``JaxClassifier`` — the jitted optax loop, and ``FlaxModel``.
+"""``JaxClassifier`` — the jitted optax loop, and ``FlaxConvNet``.
 
 Two claims worth pinning. The first is the usual one: everything shared (labels, class names,
 the batch shape, the prediction contract, the artifacts) comes from recordstream and marainer
@@ -26,8 +26,8 @@ from flax import nnx  # noqa: E402
 from recordstream import Stream  # noqa: E402
 from recordstream.items import Image, Label, MultiLabel  # noqa: E402
 
-from sonair.convnet_spec import trainable_parameter_count  # noqa: E402
-from sonair.flax_model import FlaxModel  # noqa: E402
+from sonair.convnet.flax_convnet import FlaxConvNet  # noqa: E402
+from sonair.convnet.spec import trainable_parameter_count  # noqa: E402
 from sonair.jax_classifier import JaxClassifier, _as_loss, _as_metric, _as_optimizer  # noqa: E402
 
 INPUT = (16, 16, 3)
@@ -61,7 +61,7 @@ def _records(n: int = 12, labels: str = "ids") -> list:
 
 def _classifier(**kw: Any) -> JaxClassifier:
     defaults: dict = dict(
-        model=LazyClass(FlaxModel, input_shape=INPUT),
+        model=LazyClass(FlaxConvNet, input_shape=INPUT),
         max_epochs=1,
         batch_size=4,
         experiment_name="test",
@@ -72,29 +72,29 @@ def _classifier(**kw: Any) -> JaxClassifier:
 
 
 # --------------------------------------------------------------------------- #
-# FlaxModel — the shared spec, in nnx
+# FlaxConvNet — the shared spec, in nnx
 # --------------------------------------------------------------------------- #
 
 
-def test_flax_model_matches_the_shared_spec() -> None:
+def test_flax_convnet_matches_the_shared_spec() -> None:
     """The comparison this whole architecture exists for: the count is DERIVED from the spec,
     not measured from one framework, so each implementation is checked against the claim."""
-    model = FlaxModel(num_classes=10, input_shape=INPUT)
+    model = FlaxConvNet(num_classes=10, input_shape=INPUT)
     model.solidify()  # lazy by mandate: no parameters exist until the build
     params = sum(int(v.size) for v in jax.tree_util.tree_leaves(nnx.state(model, nnx.Param)))
 
     assert params == trainable_parameter_count(10)
 
 
-def test_flax_model_is_an_nnx_module() -> None:
+def test_flax_convnet_is_an_nnx_module() -> None:
     """Same decision as `KerasModel` being a `keras.Model`: the classifier drives the slot
     without unwrapping, and `nnx.state` / `nnx.Optimizer` reach through the wrapper."""
-    assert issubclass(FlaxModel, nnx.Module)
+    assert issubclass(FlaxConvNet, nnx.Module)
 
 
 def test_zero_arg_construction_builds_nothing() -> None:
     """The workspace lazy-init mandate — and the reason `nnx.data` is needed at build time."""
-    model = FlaxModel()
+    model = FlaxConvNet()
 
     assert model._model is None
     with pytest.raises(ValueError, match="num_classes"):
@@ -102,7 +102,7 @@ def test_zero_arg_construction_builds_nothing() -> None:
 
 
 def test_a_never_flowed_model_builds_on_first_use() -> None:
-    model = FlaxModel(num_classes=3, input_shape=INPUT)
+    model = FlaxConvNet(num_classes=3, input_shape=INPUT)
 
     assert model(jnp.ones((2, *INPUT))).shape == (2, 3)
 
@@ -112,16 +112,16 @@ def test_the_head_emits_raw_logits() -> None:
 
     A softmax added later would make the rows sum to 1; this would catch that.
     """
-    out = np.asarray(FlaxModel(num_classes=4, input_shape=INPUT)(jnp.ones((2, *INPUT))))
+    out = np.asarray(FlaxConvNet(num_classes=4, input_shape=INPUT)(jnp.ones((2, *INPUT))))
 
     assert not np.allclose(out.sum(axis=-1), 1.0)
 
 
 def test_the_seed_makes_init_reproducible() -> None:
     """JAX makes randomness explicit, so the same config gives the same weights."""
-    a = np.asarray(FlaxModel(num_classes=3, input_shape=INPUT, seed=7)(jnp.ones((1, *INPUT))))
-    b = np.asarray(FlaxModel(num_classes=3, input_shape=INPUT, seed=7)(jnp.ones((1, *INPUT))))
-    c = np.asarray(FlaxModel(num_classes=3, input_shape=INPUT, seed=8)(jnp.ones((1, *INPUT))))
+    a = np.asarray(FlaxConvNet(num_classes=3, input_shape=INPUT, seed=7)(jnp.ones((1, *INPUT))))
+    b = np.asarray(FlaxConvNet(num_classes=3, input_shape=INPUT, seed=7)(jnp.ones((1, *INPUT))))
+    c = np.asarray(FlaxConvNet(num_classes=3, input_shape=INPUT, seed=8)(jnp.ones((1, *INPUT))))
 
     assert np.allclose(a, b)
     assert not np.allclose(a, c)
@@ -293,7 +293,7 @@ def test_string_targets_are_encoded_through_a_fitted_label_map() -> None:
 def test_predict_writes_one_entry_per_record_with_its_metadata() -> None:
     sink = _CaptureSink()
     clf = _classifier(
-        model=LazyClass(FlaxModel, input_shape=INPUT, num_classes=3),
+        model=LazyClass(FlaxConvNet, input_shape=INPUT, num_classes=3),
         test_set=Stream(source=_records(7)),
         task="predict",
         batch_size=3,
@@ -327,7 +327,7 @@ def test_discovery_tags_and_lazy_slots() -> None:
 
 @pytest.mark.parametrize("method", ["test", "predict"])
 def test_eval_verbs_without_a_test_set_are_clear_errors(method: str) -> None:
-    clf = _classifier(model=FlaxModel(num_classes=3, input_shape=INPUT), task=method)
+    clf = _classifier(model=FlaxConvNet(num_classes=3, input_shape=INPUT), task=method)
     with pytest.raises(ValueError, match="test_set"):
         getattr(clf, method)()
 

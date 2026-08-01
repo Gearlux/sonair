@@ -31,7 +31,7 @@ the situation the fastai backend's ``fastai.metrics`` names are in. Hence no
 Minimal flat YAML::
 
     runnable: !class:sonair.JaxClassifier
-      model: !lazy:sonair.FlaxModel
+      model: !lazy:sonair.FlaxConvNet
     train_set: !class:recordstream.Stream { source: ..., ops: !ref:preprocess }
     batch_size: 32
     max_epochs: 3
@@ -118,7 +118,7 @@ class JaxClassifier(ProgressReporting):
     """Train, evaluate or predict an image classifier with a jitted optax loop.
 
     Args:
-        model: The classification model — wire ``!lazy:sonair.FlaxModel`` so ``initialize()``
+        model: The classification model — wire ``!lazy:sonair.FlaxConvNet`` so ``initialize()``
             can inject the dataset-derived ``num_classes``.
         train_set: Training source (``task="fit"``).
         val_set: Validation source, scored at the end of each epoch when wired.
@@ -148,7 +148,7 @@ class JaxClassifier(ProgressReporting):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[Any]],
+        model: Mandatory[Lazy[nnx.Module]],
         train_set: Optional[Lazy[RecordSource]] = None,
         val_set: Optional[Lazy[RecordSource]] = None,
         test_set: Optional[Lazy[RecordSource]] = None,
@@ -169,7 +169,11 @@ class JaxClassifier(ProgressReporting):
         jit: bool = True,
     ) -> None:
         super().__init__()
-        self.model: Any = model
+        # `nnx.Module`, not `Lazy[nnx.Module]`: the deferred-ness is declared once, on the ctor
+        # param, which is what `lazy_param_names` / `to_pydantic` read; the ATTRIBUTE's useful
+        # type is what it holds once `initialize()` has flowed it. `nnx.Optimizer(model, …)` and
+        # `nnx.value_and_grad` both require a real `nnx.Module`, so that IS the slot's contract.
+        self.model: nnx.Module = cast(nnx.Module, model)
         self.train_set: Optional[Lazy[RecordSource]] = train_set
         self.val_set: Optional[Lazy[RecordSource]] = val_set
         self.test_set: Optional[Lazy[RecordSource]] = test_set

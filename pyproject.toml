@@ -49,6 +49,18 @@ lightning = [
     # marainer's pl-side tracking helpers + the tracker backends this backend's configs wire.
     "marainer[lightning,mlflow,tensorboard]>=0.1.0",
 ]
+# The `lightning` extra MINUS pytorch-lightning — a hand-written training loop and nothing
+# under it. `marainer[torch]` rather than `[lightning]` is the whole point: the metric helpers
+# (`build_metric_collection` / `scalar_metrics`) moved to `marainer.torch` on 2026-08-01 for
+# exactly this backend, because importing them from `marainer.lightning` ran that package's
+# `require("pytorch_lightning")` and made a deliberately Lightning-free backend need Lightning.
+torch = [
+    "torch",
+    "torchmetrics",
+    "timm>=1.0.0",          # the model zoo `TimmModel` wraps — shared with the lightning backend
+    "recordstream[torch]>=0.1.0",
+    "marainer[torch,mlflow,tensorboard]>=0.1.0",
+]
 # Keras 3 is an API, not an engine — it needs ONE compute backend underneath (torch/TF/jax), and
 # `recordstream.keras` (which `sonair/_keras.py` imports through) selects whichever is installed.
 # So each Keras extra names its OWN engine; a `tensorflow = ["sonair[keras]", ...]` chain would
@@ -139,16 +151,53 @@ sonair = "sonair.cli:app"
 # install: a scanner imports each, and one whose backend is absent simply fails and is skipped
 # (navigaitor's bootstrap catches BaseException per module and warns). So a keras-only install
 # advertises exactly the Keras classes — which is the correct answer, not a degraded one.
+#
+# THE RULE, pinned by tests/test_entry_points.py (2026-08-01): every module that registers a
+# configurable — an `@configurable` class or a `configurable(...)` / `register(...)` call — is
+# named here. The test derives that set from the source tree, so a new backend cannot forget.
+# It was added because five backends HAD forgotten: the huggingface / jax / mlx / tensorflow-model
+# work (2026-07-31) shipped eight registering modules with no entry point, which cost them
+# nothing at run time (a dotted path in YAML imports the module itself, and the CLI imports its
+# own backend) and made them invisible to every discovery surface — navigaitor's slot pickers,
+# the form-specs, the StreamStudio palette.
 sonair-lightning = "sonair.lightning_classifier"
+# The bare-torch runnable. It shares `sonair.torch_classification` (declared below) with
+# the lightning backend rather than bringing a set of its own — a `torch.nn` loss does not
+# care which loop calls it.
+sonair-torch = "sonair.torch_classifier"
 sonair-timm = "sonair.timm_model"
+# The shared conv spec in torch.nn — serves EVERY torch backend (lightning, torch, fastai),
+# which is also why it has no per-backend twins: they differ in the training loop, not in what
+# a model is, exactly as they already share `TimmModel`.
+sonair-torch-convnet = "sonair.convnet.torch_convnet"
 sonair-keras = "sonair.keras_classifier"
 sonair-keras-model = "sonair.keras_model"
-# The TensorFlow and fastai runnables. Neither brings a model wrapper of its own: TF >= 2.16's
-# `tf.keras` IS Keras 3, so `TensorFlowClassifier` takes the same `KerasModel`, and fastai is
-# torch, so `FastaiClassifier` takes the same `TimmModel`. A backend that adds no new wiring
-# surface adds no new module — see docs/architecture.md §5.
+# The shared conv spec in keras.layers — in the `sonair.convnet` package because it wraps
+# NOTHING, unlike the zoo wrapper above; its own entry point for the same reason the others have
+# one. The package `__init__` imports nothing, so this reaches the module directly.
+sonair-keras-convnet = "sonair.convnet.keras_convnet"
+# The TensorFlow runnable plus BOTH kinds of TF-native model: a SavedModel loader (a genuinely
+# different zoo from `keras.applications`) and the shared conv spec in raw `tf.nn` ops. fastai
+# brings no model module of its own — it IS torch, so `FastaiClassifier` takes `TimmModel`; a
+# backend that adds no new wiring surface adds no new module (docs/architecture.md §5).
 sonair-tensorflow = "sonair.tensorflow_classifier"
+sonair-tensorflow-model = "sonair.tensorflow_model"
+sonair-tensorflow-convnet = "sonair.convnet.tensorflow_convnet"
 sonair-fastai = "sonair.fastai_classifier"
+# The huggingface runnable + its Hub wrapper. No loss module by design: an
+# `AutoModelForImageClassification` computes its own loss from `config.problem_type`, so there is
+# nothing a config could wire.
+sonair-huggingface = "sonair.huggingface_classifier"
+sonair-huggingface-model = "sonair.huggingface_model"
+# The jax and mlx runnables plus their conv-spec models. Neither has a zoo to wrap (transformers
+# v5 dropped Flax; `mlx-image` hard-pins a huggingface_hub this workspace cannot take), so their
+# only model IS the shared spec — hence a `*-convnet` entry and no `*-model` one. Neither
+# registers losses either: optax ships functions and factories, `mlx.optimizers` ships classes,
+# so those are resolved by NAME and there is nothing for the registry to tag.
+sonair-jax = "sonair.jax_classifier"
+sonair-flax-convnet = "sonair.convnet.flax_convnet"
+sonair-mlx = "sonair.mlx_classifier"
+sonair-mlx-convnet = "sonair.convnet.mlx_convnet"
 # The loss/metric registrations, ONE MODULE PER ENGINE — a loss is engine-bound, so each set is
 # tagged `framework="torch"` / `framework="keras"` and lives where a missing backend can drop it
 # whole. Scanned directly because the registered classes' __module__ is torch / torchmetrics /
@@ -181,7 +230,7 @@ sonair-fastai-classification = "sonair.fastai_classification"
 # `<5`) stayed put. All three relaxed to `<8` in releases that are already out. Let them move
 # too — or recreate the venv — and TensorFlow resolves like any other extra.
 [tool.aisland]
-frameworks = ["lightning", "keras", "tensorflow", "fastai", "huggingface", "jax", "mlx"]
+frameworks = ["lightning", "torch", "keras", "tensorflow", "fastai", "huggingface", "jax", "mlx"]
 
 [tool.setuptools.packages.find]
 where = ["."]

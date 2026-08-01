@@ -1,9 +1,9 @@
-"""``FlaxModel`` — the shared conv spec in ``flax.nnx``, the JAX backend's model.
+"""``FlaxConvNet`` — the shared conv spec in ``flax.nnx``, the JAX backend's model.
 
 Unlike every other model wrapper in sonair this wraps no zoo, because there is no Flax one to
 wrap: ``transformers`` dropped Flax entirely in v5 (no ``FlaxAutoModelForImageClassification``)
 and ``flaxmodels`` last released in 2023. So the JAX backend implements
-:mod:`sonair.convnet_spec` natively — see that module for why one architecture written four
+:mod:`sonair.convnet.spec` natively — see that module for why one architecture written four
 times is worth more here than four different zoo models.
 
 It IS an ``nnx.Module``, the same decision as ``KerasModel`` being a ``keras.Model`` and
@@ -25,11 +25,11 @@ from confluid import configurable
 from flax import nnx
 from loggair import get_logger
 
-from sonair.convnet_spec import CONV_WIDTHS, INPUT_SHAPE, KERNEL_SIZE, POOL_SIZE
+from sonair.convnet.spec import CONV_WIDTHS, INPUT_SHAPE, KERNEL_SIZE, POOL_SIZE
 
 logger = get_logger(__name__)
 
-__all__ = ["FlaxModel"]
+__all__ = ["FlaxConvNet"]
 
 
 class _ConvNet(nnx.Module):
@@ -68,7 +68,7 @@ class _ConvNet(nnx.Module):
 
 
 @configurable(task="classification", role="model", lazy=True, framework="jax")
-class FlaxModel(nnx.Module):
+class FlaxConvNet(nnx.Module):
     """The shared conv classifier, implemented in ``flax.nnx``.
 
     Args:
@@ -79,7 +79,7 @@ class FlaxModel(nnx.Module):
             Only ``C`` affects the parameter count; ``H``/``W`` are documentation here, since
             the network is fully convolutional up to the global pool.
         widths: Channels per conv block. Changing this changes the architecture and therefore
-            breaks comparability with the other implementations — see :mod:`sonair.convnet_spec`.
+            breaks comparability with the other implementations — see :mod:`sonair.convnet.spec`.
         dropout: Dropout before the head; ``0.0`` disables it.
         seed: PRNG seed for parameter init. JAX makes randomness explicit, so this is a real
             knob rather than a global ``set_seed`` — the same config gives the same weights.
@@ -113,7 +113,7 @@ class FlaxModel(nnx.Module):
             return self._model
         if not self.num_classes:
             raise ValueError(
-                "FlaxModel.num_classes is not set — a classifier flows the dataset-derived "
+                "FlaxConvNet.num_classes is not set — a classifier flows the dataset-derived "
                 "count in at run time, or set it explicitly."
             )
         # `nnx.data` is required, not decorative — see the module docstring.

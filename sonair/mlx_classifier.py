@@ -31,7 +31,7 @@ never run this. Its tests skip there.
 Minimal flat YAML::
 
     runnable: !class:sonair.MlxClassifier
-      model: !lazy:sonair.MlxModel
+      model: !lazy:sonair.MlxConvNet
     train_set: !class:recordstream.Stream { source: ..., ops: !ref:preprocess }
     batch_size: 32
     max_epochs: 3
@@ -65,6 +65,10 @@ from recordstream import (
 )
 from recordstream.keras import RecordSequence
 from recordstream.runnable import ProgressReporting, entrypoint, run_entrypoint
+
+# NOTE: no `MlxConvNet` import. This module used to need it because the `model` slot was typed
+# as that concrete class; the slot is `mlx.nn.Module` now, so the default convnet is reached the
+# way any other model is — through the config (`!lazy:sonair.MlxConvNet`).
 
 logger = get_logger(__name__)
 
@@ -117,7 +121,7 @@ class MlxClassifier(ProgressReporting):
     """Train, evaluate or predict an image classifier with MLX on Apple silicon.
 
     Args:
-        model: The classification model — wire ``!lazy:sonair.MlxModel`` so ``initialize()``
+        model: The classification model — wire ``!lazy:sonair.MlxConvNet`` so ``initialize()``
             can inject the dataset-derived ``num_classes``.
         train_set: Training source (``task="fit"``).
         val_set: Validation source, scored at the end of each epoch when wired.
@@ -144,7 +148,7 @@ class MlxClassifier(ProgressReporting):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[Any]],
+        model: Mandatory[Lazy[nn.Module]],
         train_set: Optional[Lazy[RecordSource]] = None,
         val_set: Optional[Lazy[RecordSource]] = None,
         test_set: Optional[Lazy[RecordSource]] = None,
@@ -164,7 +168,13 @@ class MlxClassifier(ProgressReporting):
         metrics: Optional[Sequence[MlxMetric]] = None,
     ) -> None:
         super().__init__()
-        self.model: Any = model
+        # `nn.Module`, not `Lazy[nn.Module]`: the deferred-ness is declared once, on the ctor
+        # param above. The slot takes ANY `mlx.nn.Module` — `MlxConvNet` is one, and so is a
+        # network a user brings. That is new as of 2026-08-01: this used to be typed as the
+        # concrete `MlxConvNet` because the loop reached the trainable network through
+        # `self.model.model`, so only the wrapper worked. `MlxConvNet` is now an `nn.Module`
+        # itself, so `nn.value_and_grad` / `optimizer.update` take the slot value directly.
+        self.model: nn.Module = cast(nn.Module, model)
         self.train_set: Optional[Lazy[RecordSource]] = train_set
         self.val_set: Optional[Lazy[RecordSource]] = val_set
         self.test_set: Optional[Lazy[RecordSource]] = test_set
@@ -317,7 +327,7 @@ class MlxClassifier(ProgressReporting):
         def compute(model: Any, x: Any, y: Any) -> Any:
             return mx.mean(loss_fn(model(x), y))
 
-        return nn.value_and_grad(self.model.model, compute)
+        return nn.value_and_grad(self.model, compute)
 
     def _metric_values(self, logits: Any, labels: Any) -> Dict[str, float]:
         out: Dict[str, float] = {}
@@ -331,10 +341,15 @@ class MlxClassifier(ProgressReporting):
         loss_fn = _as_loss(self.loss, multilabel=self.multilabel)
         total, batches = 0.0, 0
         sums: Dict[str, float] = {}
+        # MLX carries train/eval as module STATE, so the mode is set ONCE here rather than
+        # passed per call — which is what lets this slot hold any `nn.Module`, not just one
+        # whose `__call__` happens to accept a `training=` keyword. `fit()` sets it back to
+        # True at the top of each epoch, so a mid-fit validation pass cannot leak eval mode.
+        self.model.train(False)
         for index in range(len(sequence)):
             x, y = sequence[index]
             xa, ya = mx.array(x), mx.array(y)
-            logits = self.model(xa, training=False)
+            logits = self.model(xa)
             loss = mx.mean(loss_fn(logits, ya))
             mx.eval(loss, logits)  # lazy arrays: nothing has been computed until here
             total += float(loss)
@@ -351,7 +366,7 @@ class MlxClassifier(ProgressReporting):
         logger.info(f"sonair mlx training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("MlxClassifier.fit() requires a 'train_set'.")
-        network = self.model.model
+        network = self.model
         optimizer = _as_optimizer(self.optimizer, self.learning_rate)
         step = self._loss_and_grad()
         train_seq = self._sequence(self.train_set, shuffle=True)
@@ -410,8 +425,9 @@ class MlxClassifier(ProgressReporting):
             raise ValueError("MlxClassifier.predict() requires a 'test_set'.")
         sink = flow(self.predictions_sink)
         sequence = self._sequence(self.test_set, with_targets=False)
+        self.model.train(False)  # module STATE, not a per-call flag — see `_evaluate`
         for index, batch in enumerate(sequence.batches()):
-            logits = self.model(mx.array(sequence[index][0]), training=False)
+            logits = self.model(mx.array(sequence[index][0]))
             mx.eval(logits)
             if sink is not None:
                 self._write_predictions(np.asarray(logits), batch, cast(PredictionsSink, sink))

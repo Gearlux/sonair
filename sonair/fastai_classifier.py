@@ -422,6 +422,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         else:
             learner.fit(self.max_epochs, lr=self.learning_rate)
         self._computed_metrics = _recorded_metrics(learner)
+        _log_recorded_epochs(learner, trackers)
         logger.info(f"Training complete: {self._computed_metrics}")
         save_class_names(self._class_names, self._artifact_dir(), trackers)
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
@@ -596,3 +597,20 @@ def _recorded_metrics(learner: Learner) -> Dict[str, float]:
     """The last epoch's metrics as ``{name: value}``, or ``{}`` if nothing was recorded."""
     values = list(getattr(learner.recorder, "values", []) or [])
     return _named_values(learner, values[-1]) if values else {}
+
+
+def _log_recorded_epochs(learner: Learner, trackers: Sequence[Tracker]) -> None:
+    """Forward EVERY recorded epoch to the trackers, not just the final one.
+
+    fastai's ``Recorder`` already holds the whole history (``recorder.values`` is one row per
+    epoch), so replaying it after the fit gives the same curve a per-epoch callback would,
+    without inserting a marainer callback into fastai's callback chain — one fewer thing that
+    can reorder or swallow. ``_recorded_metrics`` reads the last row of this same list, so the
+    two cannot disagree about what the run scored.
+    """
+    if not trackers:
+        return
+    for epoch, row in enumerate(getattr(learner.recorder, "values", []) or []):
+        metrics = _named_values(learner, row)
+        for tracker in trackers:
+            tracker.log_metrics(metrics, step=epoch)

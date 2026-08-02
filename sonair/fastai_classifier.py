@@ -65,6 +65,7 @@ from fastai.learner import Learner
 from fastai.losses import BCEWithLogitsLossFlat, CrossEntropyLossFlat
 from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from marainer.metric_slots import merge_metric_specs
 from marainer.run_names import generate_run_name, run_prefix
 from marainer.tracking.base import Tracker, as_tracker_list
 from marainer.tracking.provenance import capture_log_file, log_run_context
@@ -86,8 +87,6 @@ from recordstream import (
 )
 from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint, run_entrypoint
 from torch.utils.data import DataLoader
-
-from sonair.metric_slots import merge_metric_specs
 
 logger = get_logger(__name__)
 

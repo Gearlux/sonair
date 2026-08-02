@@ -1,9 +1,9 @@
-"""The per-split metric slots: the shared combination rule, and the fleet declaring them.
+"""The per-split metric slots: which backend serves which, and that all of them share ONE rule.
 
 ``metrics:`` is what every split measures; ``<split>_metrics:`` is what that split measures on
-top. The rule lives in ONE module because what a "metric" is differs per engine — a torchmetrics
-template mapping, a list of ``keras.metrics`` objects, a list of fastai function names — while
-how a split's slot combines with the shared one must not.
+top. The RULE itself lives in ``marainer.metric_slots`` and is pinned by marainer's own suite —
+what belongs here is the fleet: which slots each engine can actually serve, and that no backend
+re-derives the combination inline.
 
 The fleet-wide checks read the SOURCE with ``ast`` rather than importing, for the reason
 ``test_tracking_parity.py`` gives: no venv carries every backend's framework, so an import-based
@@ -18,8 +18,6 @@ from pathlib import Path
 from typing import Set
 
 import pytest
-
-from sonair.metric_slots import merge_metric_specs, union_metric_specs
 
 SOURCE_DIR = Path(__file__).resolve().parent.parent / "sonair"
 
@@ -52,65 +50,6 @@ def constructor_params(stem: str) -> Set[str]:
             args = node.args
             return {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
     raise AssertionError(f"{stem}: no __init__ found")
-
-
-# ---------------------------------------------------------------------------
-# The rule
-# ---------------------------------------------------------------------------
-def test_a_split_slot_merges_over_the_shared_mapping() -> None:
-    """Merging is what makes the slots usable — a replace-only slot forces restatement."""
-    assert merge_metric_specs({"acc": 1}, {"confusion": 2}) == {"acc": 1, "confusion": 2}
-
-
-def test_a_same_named_entry_shadows_the_shared_one() -> None:
-    """So a split can OVERRIDE a template rather than only add to it."""
-    assert merge_metric_specs({"acc": 1}, {"acc": 2}) == {"acc": 2}
-
-
-def test_two_sequences_concatenate() -> None:
-    """An engine-native metric LIST has no keys to merge on, so the split's entries append."""
-    assert merge_metric_specs(["accuracy"], ["top_k_accuracy"]) == ["accuracy", "top_k_accuracy"]
-
-
-def test_a_string_is_one_metric_not_a_sequence_of_characters() -> None:
-    """`Sequence` would happily concatenate "abc" — a named metric must survive intact."""
-    assert merge_metric_specs("accuracy", "top_k") == "top_k"
-
-
-@pytest.mark.parametrize(
-    "shared,split,expected",
-    [
-        ({"acc": 1}, None, {"acc": 1}),  # nothing chosen for this split -> the shared set
-        (None, {"acc": 1}, {"acc": 1}),  # nothing shared -> the split's own
-        (None, None, None),  # nothing at all stays "not chosen", never an empty set
-    ],
-)
-def test_none_means_not_chosen_on_either_side(shared: object, split: object, expected: object) -> None:
-    assert merge_metric_specs(shared, split) == expected
-
-
-def test_incompatible_shapes_mean_the_split_replaces() -> None:
-    """There is no key-wise way to combine a list with a mapping.
-
-    Replacing is the lesser evil: ignoring the split's spec would be a wired metric set that
-    silently does nothing, which is the failure this whole surface exists to avoid.
-    """
-    assert merge_metric_specs({"acc": 1}, ["accuracy"]) == ["accuracy"]
-    assert merge_metric_specs(["accuracy"], {"acc": 1}) == {"acc": 1}
-
-
-def test_the_union_is_what_a_single_set_engine_computes() -> None:
-    """`keras.Model.compile` takes ONE list; the honest answer is every split's metrics at once."""
-    assert union_metric_specs(["accuracy"], None, ["auc"], ["precision"]) == ["accuracy", "auc", "precision"]
-
-
-def test_the_union_does_not_report_a_metric_twice() -> None:
-    """Overlapping slots would otherwise compile two entries with the same metric name."""
-    assert union_metric_specs(["accuracy"], ["accuracy"], ["auc"]) == ["accuracy", "auc"]
-
-
-def test_the_union_of_mappings_merges_by_key() -> None:
-    assert union_metric_specs({"a": 1}, {"b": 2}, {"a": 3}) == {"a": 3, "b": 2}
 
 
 # ---------------------------------------------------------------------------

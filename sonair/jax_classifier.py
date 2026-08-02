@@ -48,6 +48,7 @@ from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from flax import nnx
 from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from marainer.metric_slots import merge_metric_specs
 from marainer.run_names import generate_run_name, run_prefix
 from marainer.tracking.base import Tracker, as_tracker_list
 from marainer.tracking.provenance import capture_log_file, log_run_context
@@ -67,8 +68,6 @@ from recordstream import (
 )
 from recordstream.keras import RecordSequence
 from recordstream.runnable import ProgressReporting, entrypoint, run_entrypoint
-
-from sonair.metric_slots import merge_metric_specs
 
 logger = get_logger(__name__)
 
@@ -381,7 +380,7 @@ class JaxClassifier(ProgressReporting):
         """The metric list for one eval split — its own slot merged over the shared ``metrics``.
 
         The combination rule is the workspace-wide one
-        (:func:`~sonair.metric_slots.merge_metric_specs`), so a config moving between backends
+        (:func:`~marainer.metric_slots.merge_metric_specs`), so a config moving between backends
         keeps its shape. Only ``val`` and ``test`` have a slot: this loop computes metrics on the
         eval pass only, so a train-only metric would have nowhere to go.
         """

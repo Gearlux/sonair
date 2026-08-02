@@ -115,6 +115,33 @@ plain torch loaders), so this block drives either backend unchanged. Its only
 difference is the default `collate_fn`, which is `_to_tuple` rather than
 `collate_records`, because fastai unpacks a batch positionally.
 
+The rule is general: **anything a backend constructs is a slot you can replace**, so
+a knob it does not restate is still reachable. Each backend therefore also exposes
+its engine's own objects:
+
+| Backend | Slots beyond the loaders | What they reach |
+|---|---|---|
+| `lightning` | `lightning` | every `pytorch_lightning.Trainer` knob (`accelerator`, `precision`, `gradient_clip_val`, a strategy) |
+| `fastai` | `dataloaders`, `learner` | the `DataLoaders` `path`; a `Learner`'s `moms` / `splitter` / `model_dir` / `wd_bn_bias` / `train_bn` |
+| `huggingface` | `training_arguments`, `trainer` | every `TrainingArguments` knob (gradient accumulation, warmup, fp16, a scheduler); a `Trainer` **subclass** |
+| every torch backend | `optimizer` | the optimizer class and its hyperparameters |
+
+```yaml
+# Reach a knob the backend never restates — no sonair parameter needed.
+learner: !lazy:fastai.learner.Learner
+  model_dir: weights
+  moms: [0.95, 0.85, 0.95]
+
+training_arguments: !lazy:transformers.TrainingArguments
+  gradient_accumulation_steps: 4
+  warmup_steps: 100
+  fp16: true
+```
+
+The run still supplies what only it knows — the data, the model, this split's
+metrics — as runtime arguments, so those cannot be pinned from config and a slot
+never has to enumerate them.
+
 ### Full end-to-end example
 
 `examples/train_efficientvit_b0_mnist.yaml` trains an efficientvit classifier on

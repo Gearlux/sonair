@@ -47,6 +47,7 @@ the backend is a flag rather than a subcommand.
 | **The model wrapper** | *sometimes* | `sonair/<backend>_model.py` |
 | **A shared-spec convnet** | *sometimes* | `sonair/convnet/<backend>_convnet.py` |
 | **Losses / metrics** | *sometimes* | `sonair/<framework>_classification.py` |
+| **The engine's own objects** (`Trainer`, `Learner`, `TrainingArguments`, `DataLoaders`) | **yes — but as deferred SLOTS, not code** | the runnable's `__init__` |
 
 Only the last four rows are backend work — and the last of them is a list of
 upstream class names, not code. That is the claim this project exists to
@@ -62,6 +63,27 @@ but **no loss set at all**, because an `AutoModelForImageClassification` compute
 its own loss from `config.problem_type` — there is nothing for a config to wire.
 A backend adds a module only when it adds a genuinely new wiring surface — see
 [Architecture Decisions §5](architecture.md).
+
+The last row is the one that keeps a backend small. Whatever a runnable
+*constructs* — a `pytorch_lightning.Trainer`, a fastai `DataLoaders` and
+`Learner`, a `transformers.TrainingArguments` and `Trainer`, every `DataLoader` —
+is held as a deferred `LazyClass(...)` slot rather than built inline, so the
+ergonomic knobs (`batch_size`, `max_epochs`, `learning_rate`) stay flat config
+keys *and* every knob the runnable does not restate is still reachable by
+replacing the slot. Nothing has to be enumerated twice, and a backend never
+grows a parameter just to pass one through:
+
+```yaml
+training_arguments: !lazy:transformers.TrainingArguments
+  gradient_accumulation_steps: 4      # sonair has no such parameter, and needs none
+  warmup_steps: 100
+```
+
+What the *run* supplies — the data, the model, this split's metrics — arrives as
+runtime arguments at flow time, so a config cannot pin those and the slot needs
+no placeholder for them. One consequence is worth knowing: fastai's
+`DataLoaders(*loaders, …)` takes its loaders **positionally**, which is why
+`flow()` accepts positional runtime arguments at all.
 
 The convnet row is separate from the model-wrapper row because the two wrap
 different things: a model wrapper reaches somebody else's weights, while a

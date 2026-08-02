@@ -60,6 +60,7 @@ import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from marainer.metric_slots import merge_metric_specs
 from marainer.run_names import generate_run_name, run_prefix
 from marainer.tracking.base import Tracker, as_tracker_list
 from recordstream import (
@@ -84,7 +85,6 @@ from recordstream.runnable import ProgressReporting, entrypoint, run_entrypoint
 # third-party group, above every `sonair` line, and `recordstream.keras` is where the competing
 # default lives. Pinned by `tests/test_tensorflow_classifier.py`.
 from sonair._tensorflow import RecordSequence, keras, keras_backend, tf
-from sonair.metric_slots import merge_metric_specs
 
 logger = get_logger(__name__)
 
@@ -580,6 +580,14 @@ class TensorFlowClassifier(ProgressReporting):
         callbacks.set_params({"epochs": self.max_epochs, "steps": len(sequence), "verbose": 0})
         callbacks.on_train_begin()
 
+        # BEFORE the loop, because `callbacks.on_train_end` below closes the run out (this backend
+        # hands its lifecycle to `keras_tracking_callback`, exactly as the Keras one does) — a
+        # tracker write sequenced after it arrives at an ENDED run. MLflow tolerates that;
+        # `WandbTracker.finish()` drops the run handle, so the artifact would land in a NEW run.
+        # It is also the more honest place: the vocabulary comes from the DATA, known since
+        # `initialize()`, so a run that dies mid-loop still records what it was training on.
+        save_class_names(self._class_names, self._artifact_dir(), self._live_trackers())
+
         history: Dict[str, List[float]] = {}
         logs: Dict[str, float] = {}
         for epoch in range(self.max_epochs):
@@ -598,7 +606,7 @@ class TensorFlowClassifier(ProgressReporting):
         self._history = {k: list(v) for k, v in history.items()}
         self._computed_metrics = {k: v[-1] for k, v in history.items()}
         logger.info("Training complete.")
-        save_class_names(self._class_names, self._artifact_dir(), self._live_trackers())
+        # Both write LOCAL files and touch no tracker, so they are safe after the run has ended.
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
         self._export()
 

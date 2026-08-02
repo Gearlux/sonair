@@ -46,6 +46,7 @@ from marainer.lightning import (
     checkpoint_dir,
     scalar_metrics,
 )
+from marainer.metric_slots import merge_metric_specs
 from marainer.run_names import generate_run_name, run_prefix
 from marainer.tracking.base import Tracker, as_tracker_list
 from marainer.tracking.render import render_matrix_as_figure, render_matrix_as_table
@@ -73,8 +74,6 @@ from torch.utils.data import DataLoader
 from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MultilabelAccuracy, MultilabelF1Score
 from tqdm import tqdm
-
-from sonair.metric_slots import merge_metric_specs
 
 logger = get_logger(__name__)
 
@@ -636,7 +635,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
     def _build_split_metrics(self, spec: Any, prefix: str) -> MetricCollection:
         """One split's live, prefixed collection — its own spec merged over the shared one.
 
-        The combination rule is :func:`~sonair.metric_slots.merge_metric_specs`, shared with
+        The combination rule is :func:`~marainer.metric_slots.merge_metric_specs`, shared with
         every other backend so a config moving between them cannot change shape; what is torch's
         alone is the rest of this line — sizing the templates and prefixing the collection.
         """

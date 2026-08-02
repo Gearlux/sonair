@@ -53,6 +53,7 @@ from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, outp
 from confluid.registry import resolve_class
 from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from marainer.metric_slots import merge_metric_specs
 from marainer.run_names import generate_run_name, run_prefix
 from marainer.torch import Device, build_metric_collection, resolve_device, scalar_metrics
 from marainer.tracking.base import Tracker, as_tracker_list
@@ -81,8 +82,6 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MultilabelAccuracy, MultilabelF1Score
-
-from sonair.metric_slots import merge_metric_specs
 
 logger = get_logger(__name__)
 
@@ -386,7 +385,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
     def _build_split_metrics(self, spec: Any, prefix: str) -> MetricCollection:
         """One split's live, prefixed collection — its own spec merged over the shared one.
 
-        The combination rule is :func:`~sonair.metric_slots.merge_metric_specs`, shared with
+        The combination rule is :func:`~marainer.metric_slots.merge_metric_specs`, shared with
         every other backend so a config moving between them cannot change shape; what is torch's
         alone is the rest of this line — sizing the templates and prefixing the collection.
         """

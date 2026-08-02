@@ -44,6 +44,7 @@ import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from marainer.metric_slots import union_metric_specs
 from marainer.run_names import generate_run_name, run_prefix
 from marainer.tracking.base import Tracker, as_tracker_list
 from recordstream import (
@@ -64,7 +65,6 @@ from recordstream.keras import RecordSequence
 from recordstream.runnable import ProgressReporting, entrypoint, run_entrypoint
 
 from sonair._keras import keras, keras_backend
-from sonair.metric_slots import union_metric_specs
 
 logger = get_logger(__name__)
 
@@ -329,7 +329,7 @@ class KerasClassifier(ProgressReporting):
         Widening is the honest failure here: a metric that appears where it was not asked for is
         noise a reader can ignore, where DROPPING it would be a wired metric that silently
         reports nothing. The backends whose loop this project owns (bare torch, Lightning,
-        TensorFlow) narrow properly — see :func:`~sonair.metric_slots.merge_metric_specs`.
+        TensorFlow) narrow properly — see :func:`~marainer.metric_slots.merge_metric_specs`.
         """
         return union_metric_specs(self.metrics, self.train_metrics, self.val_metrics, self.test_metrics) or []
 
@@ -400,13 +400,23 @@ class KerasClassifier(ProgressReporting):
             raise ValueError("KerasClassifier.fit() requires a 'train_set'.")
         train_seq = self._sequence(self.train_set, shuffle=True)
         val_seq = self._sequence(self.val_set) if self.val_set is not None else None
+        # BEFORE the fit, not after it, and that ordering is load-bearing: this backend hands the
+        # run's lifecycle to `keras_tracking_callback`, whose `on_train_end` closes the run out —
+        # so a tracker write sequenced after `fit()` returns arrives at an ENDED run. MLflow
+        # tolerates that, but `WandbTracker.finish()` drops the run handle and the next access
+        # starts a NEW run, which is where the artifact would land.
+        #
+        # It is also the more honest place independently of that: the vocabulary is a property of
+        # the DATA, known since `initialize()`, so a run that crashes mid-fit still records what it
+        # was training on.
+        save_class_names(self._class_names, self._artifact_dir(), self._live_trackers())
         history = self.model.fit(
             train_seq, validation_data=val_seq, epochs=self.max_epochs, callbacks=self._callbacks()
         )
         self._history = {k: [float(x) for x in v] for k, v in history.history.items()}
         self._computed_metrics = {k: v[-1] for k, v in self._history.items()}
         logger.info("Training complete.")
-        save_class_names(self._class_names, self._artifact_dir(), self._live_trackers())
+        # Local file only — no tracker touch, so it is safe after the run has ended.
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 
     @entrypoint("evaluate", role="evaluator")

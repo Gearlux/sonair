@@ -87,6 +87,11 @@ def test_every_backend_finishes_its_manifest(stem: str) -> None:
 
     A backend that drives the plain functions must call ``capture_log_file`` itself; the two
     that hand tracking to a callback get it from the callback's end hook instead.
+
+    Since 2026-08-02 the same call also ENDS the run on each tracker, so this one reachability
+    check covers both halves of "the run is over" — see
+    ``test_the_terminal_call_is_the_one_that_ends_the_run`` below for why they were folded
+    together rather than given a call each.
     """
     source = module_source(stem)
     names = called_names(source)
@@ -95,6 +100,28 @@ def test_every_backend_finishes_its_manifest(stem: str) -> None:
     assert "capture_log_file" in names, (
         f"{stem} starts a manifest via log_run_context but never finishes it; call "
         "capture_log_file(trackers, manifest=..., status='success') at the end of fit()."
+    )
+
+
+def test_the_terminal_call_is_the_one_that_ends_the_run() -> None:
+    """No backend calls ``Tracker.finalize`` itself, and none should — marainer does it.
+
+    The gap this pins was found by a real MLflow sweep on 2026-08-02: eleven of thirteen
+    FINISHED runs showed ``RUNNING`` with no end time, because nothing anywhere called
+    ``finalize``. The two that looked right did so by accident — a Lightning consumer adapts
+    its trackers into ``pl.Logger``s and Lightning finalizes those itself.
+
+    The fix went into ``provenance.capture_log_file``, which already stated the run's terminal
+    status and already looped over the trackers — so every backend got it at once. A per-backend
+    call would be eight chances to forget and eight places for the status to disagree with the
+    manifest's, which is exactly the divergence the tracking-parity rules exist to prevent.
+    """
+    offenders = {stem for stem in BACKENDS if "finalize" in called_names(module_source(stem))}
+
+    assert not offenders, (
+        f"{sorted(offenders)} call Tracker.finalize directly. Ending the run belongs to "
+        "marainer's capture_log_file, which every backend already reaches — a local call would "
+        "let a backend's terminal status disagree with its manifest's."
     )
 
 
@@ -189,3 +216,46 @@ def test_a_list_valued_callbacks_key_reaches_the_slot(stem: str) -> None:
                 f"{stem}: `callbacks` must admit a list, or confluid will not broadcast a "
                 f"list-valued key into it (got {annotations['callbacks']})"
             )
+
+
+def _statement_order(stem: str, names: Set[str]) -> Dict[str, int]:
+    """Line number of the first call to each of ``names`` inside the module's ``fit``."""
+    tree = ast.parse(module_source(stem))
+    fit = next(
+        (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "fit"),
+        None,
+    )
+    assert fit is not None, f"{stem}: no fit() found"
+    found: Dict[str, int] = {}
+    for node in ast.walk(fit):
+        if not isinstance(node, ast.Call):
+            continue
+        name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+        if name in names:
+            found.setdefault(name, node.lineno)
+            found[name] = min(found[name], node.lineno)
+    return found
+
+
+@pytest.mark.parametrize("stem", ["keras_classifier", "tensorflow_classifier"])
+def test_no_tracker_write_is_sequenced_after_the_run_ends(stem: str) -> None:
+    """The two callback-driven backends must not log an artifact after their run is closed.
+
+    `keras_tracking_callback`'s `on_train_end` closes the run out, and since 2026-08-02 that
+    means ENDING it on every tracker. Both backends used to call `save_class_names` — which logs
+    a tracker artifact — after `fit()` returned, so the artifact arrived at a finished run.
+    MLflow tolerates it (the file lands, status stays FINISHED); `WandbTracker.finish()` drops
+    the run handle, so the next access starts a NEW run and the artifact lands there instead.
+
+    Read as SOURCE ORDER rather than by running: neither backend's engine is installed on every
+    machine, and the ordering is a property of the code either way.
+    """
+    order = _statement_order(stem, {"save_class_names", "fit", "on_train_end"})
+    end_of_training = order.get("fit") or order.get("on_train_end")
+
+    assert end_of_training is not None, f"{stem}: found neither model.fit() nor callbacks.on_train_end()"
+    assert "save_class_names" in order, f"{stem}: no save_class_names call in fit()"
+    assert order["save_class_names"] < end_of_training, (
+        f"{stem} logs the class-names artifact at line {order['save_class_names']}, after the "
+        f"training call at line {end_of_training} — by then the tracking callback has ended the run."
+    )

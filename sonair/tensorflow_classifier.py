@@ -83,6 +83,7 @@ from recordstream.runnable import ProgressReporting, entrypoint, run_entrypoint
 # third-party group, above every `sonair` line, and `recordstream.keras` is where the competing
 # default lives. Pinned by `tests/test_tensorflow_classifier.py`.
 from sonair._tensorflow import RecordSequence, keras, keras_backend, tf
+from sonair.metric_slots import merge_metric_specs
 
 logger = get_logger(__name__)
 
@@ -147,9 +148,10 @@ class TensorFlowClassifier(ProgressReporting):
         task: Which entry point ``run()`` dispatches to.
         max_epochs: Training epochs.
         batch_size: Rows per batch.
-        logger: ``keras.callbacks.Callback`` instances. They are driven by hand through a
-            ``keras.callbacks.CallbackList``, so a ``CSVLogger`` — or marainer's Keras tracking
-            callback — behaves exactly as it would under ``fit()``.
+        trackers: marainer trackers — one or a list. This run's ONLY output wiring:
+            metrics, provenance and the run manifest all go to them.
+        callbacks: ``keras.callbacks.Callback`` instances, driven by hand through a
+            ``keras.callbacks.CallbackList`` — this loop has no ``fit()`` to run them.
         experiment_name: Run identity, recorded in artifacts and tracking.
         run_name: Run identity; a random ``adjective_noun`` when omitted.
         input_key: Record key holding the image.
@@ -162,6 +164,9 @@ class TensorFlowClassifier(ProgressReporting):
             head is a bare ``Dense``).
         metrics: ``keras.metrics.Metric`` instances. Unlike the Keras backend this cannot take
             the bare string ``"accuracy"`` at face value — see :meth:`_resolve_task_defaults`.
+        train_metrics / val_metrics / test_metrics: That split's OWN metrics, merged over
+            ``metrics`` — how a metric is added to one split only. This backend narrows properly:
+            each traced step closes over its own split's metric objects.
         export_dir: Write a ``tf.saved_model`` directory here after a successful ``fit``.
             ``None`` (the default) exports nothing.
         jit_compile: Trace the train/eval steps with XLA. A real speedup on fixed shapes and a
@@ -180,6 +185,7 @@ class TensorFlowClassifier(ProgressReporting):
         max_epochs: int = 10,
         batch_size: int = 32,
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
+        callbacks: Optional[Iterable[Any]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -188,6 +194,9 @@ class TensorFlowClassifier(ProgressReporting):
         optimizer: KerasOptimizer = "adam",
         loss: Optional[KerasLoss] = None,
         metrics: Optional[Sequence[KerasMetric]] = None,
+        train_metrics: Optional[Sequence[KerasMetric]] = None,
+        val_metrics: Optional[Sequence[KerasMetric]] = None,
+        test_metrics: Optional[Sequence[KerasMetric]] = None,
         export_dir: Optional[str] = None,
         jit_compile: bool = False,
         prefetch: bool = True,
@@ -205,7 +214,9 @@ class TensorFlowClassifier(ProgressReporting):
         self.max_epochs = max_epochs
         self.batch_size = batch_size
         # Internal only: this backend's own tracking callback is appended at run time.
-        self.callbacks: List[Any] = []
+        # Stored VERBATIM like `trackers` (lazy-init): entries may be deferred `Fluid`
+        # markers, and they are flowed where they are used.
+        self.callbacks: Optional[Iterable[Any]] = callbacks
         self.experiment_name = experiment_name
         self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
         self.input_key = str(input_key)
@@ -218,6 +229,13 @@ class TensorFlowClassifier(ProgressReporting):
         # from a user's explicit choice.
         self.loss: Optional[KerasLoss] = loss
         self.metrics: Optional[Sequence[KerasMetric]] = metrics
+        # Per-split ADDITIONS, merged over `metrics` by the shared rule. This backend can serve
+        # all THREE — unlike its Keras sibling, whose `compile()` owns one metric list for the
+        # whole run — because the loop here is hand-written and each traced step closes over
+        # its own split's metric OBJECTS.
+        self.train_metrics: Optional[Sequence[KerasMetric]] = train_metrics
+        self.val_metrics: Optional[Sequence[KerasMetric]] = val_metrics
+        self.test_metrics: Optional[Sequence[KerasMetric]] = test_metrics
         self.multilabel: bool = False
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
@@ -234,7 +252,9 @@ class TensorFlowClassifier(ProgressReporting):
         # The loop's parts, built by `_compile()` — what `keras.Model.compile` would have owned.
         self._optimizer: Any = None
         self._loss_fn: Any = None
-        self._metric_objects: List[Any] = []
+        # One list of LIVE metric objects per split: they are stateful, so the splits cannot
+        # share instances once their metric sets may differ.
+        self._metric_objects: Dict[str, List[Any]] = {}
 
     # ---- run dispatch ------------------------------------------------------- #
     def run(self) -> None:
@@ -388,7 +408,13 @@ class TensorFlowClassifier(ProgressReporting):
         self.model = flow(self.model, num_classes=self.num_classes)
         self._optimizer = _as_optimizer(self.optimizer)
         self._loss_fn = flow(self.loss)
-        self._metric_objects = [_as_metric(m, multilabel=self.multilabel) for m in (self.metrics or [])]
+        self._metric_objects = {
+            split: [
+                _as_metric(m, multilabel=self.multilabel)
+                for m in (merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or [])
+            ]
+            for split in ("train", "val", "test")
+        }
 
     # ---- batching ------------------------------------------------------------ #
     def _sequence(self, source: Any, shuffle: bool = False, with_targets: bool = True) -> RecordSequence:
@@ -450,7 +476,8 @@ class TensorFlowClassifier(ProgressReporting):
         Built once and reused across epochs: a fresh ``@tf.function`` each epoch would retrace
         the whole graph every time, which is slower than the eager loop it replaced.
         """
-        network, optimizer, loss_fn, metrics = self.model, self._optimizer, self._loss_fn, self._metric_objects
+        network, optimizer, loss_fn = self.model, self._optimizer, self._loss_fn
+        metrics = self._metric_objects["train"]
 
         @tf.function(jit_compile=True if self.jit_compile else None)
         def train_step(x: Any, y: Any) -> Any:
@@ -465,9 +492,14 @@ class TensorFlowClassifier(ProgressReporting):
 
         return train_step
 
-    def _eval_step_fn(self) -> Any:
-        """The forward pass plus metric update — no tape, and ``training=False``."""
-        network, loss_fn, metrics = self.model, self._loss_fn, self._metric_objects
+    def _eval_step_fn(self, split: str = "val") -> Any:
+        """The forward pass plus metric update — no tape, and ``training=False``.
+
+        ``split`` selects which metric OBJECTS the traced step updates, so a metric wired to
+        ``val_metrics`` is not also computed on the test pass.
+        """
+        network, loss_fn = self.model, self._loss_fn
+        metrics = self._metric_objects[split]
 
         @tf.function(jit_compile=True if self.jit_compile else None)
         def eval_step(x: Any, y: Any) -> Any:
@@ -489,33 +521,33 @@ class TensorFlowClassifier(ProgressReporting):
         return predict_step
 
     # ---- metric bookkeeping (what `compile()` would have owned) -------------- #
-    def _reset_metrics(self) -> None:
-        for metric in self._metric_objects:
+    def _reset_metrics(self, split: str) -> None:
+        for metric in self._metric_objects[split]:
             metric.reset_state()
 
-    def _metric_results(self) -> Dict[str, float]:
-        return {metric.name: float(metric.result()) for metric in self._metric_objects}
+    def _metric_results(self, split: str) -> Dict[str, float]:
+        return {metric.name: float(metric.result()) for metric in self._metric_objects[split]}
 
-    def _run_epoch(self, dataset: Any, step: Any, callbacks: Any = None) -> Dict[str, float]:
+    def _run_epoch(self, dataset: Any, step: Any, callbacks: Any = None, split: str = "train") -> Dict[str, float]:
         """One pass over ``dataset``, returning ``{"loss": …, **metrics}``.
 
         Shared by training and evaluation because the only difference between them is which
         traced step function is handed in — the loss averaging and the metric reset are the same
         bookkeeping either way.
         """
-        self._reset_metrics()
+        self._reset_metrics(split)
         total, batches = 0.0, 0
         for index, (x, y) in enumerate(dataset):
             total += float(step(x, y))
             batches += 1
             if callbacks is not None:
                 callbacks.on_train_batch_end(index, {"loss": total / batches})
-        return {"loss": total / batches if batches else float("nan"), **self._metric_results()}
+        return {"loss": total / batches if batches else float("nan"), **self._metric_results(split)}
 
     # ---- callbacks + tracking ------------------------------------------------ #
     def _callbacks(self) -> List[Any]:
         """Wired Keras callbacks plus OPTIONAL marainer tracking (a few lines; removable)."""
-        callbacks = [flow(cb) for cb in self.callbacks]
+        callbacks = [flow(cb) for cb in (self.callbacks or [])]
         for callback in callbacks:
             # Keras's file-writing callbacks (`CSVLogger`, `ModelCheckpoint`) open their path
             # without creating its parent, so a perfectly reasonable `./tf_logs/run.csv` dies
@@ -561,7 +593,7 @@ class TensorFlowClassifier(ProgressReporting):
             callbacks.on_epoch_begin(epoch)
             logs = self._run_epoch(train_data, train_step, callbacks)
             if val_data is not None:
-                logs.update({f"val_{k}": v for k, v in self._run_epoch(val_data, eval_step).items()})
+                logs.update({f"val_{k}": v for k, v in self._run_epoch(val_data, eval_step, split="val").items()})
             callbacks.on_epoch_end(epoch, logs)
             # Keras's `fit()` calls this between epochs; a hand-written loop has to.
             sequence.on_epoch_end()
@@ -587,7 +619,7 @@ class TensorFlowClassifier(ProgressReporting):
         if self.test_set is None:
             raise ValueError("TensorFlowClassifier.test() requires a 'test_set'.")
         dataset, _ = self._dataset(self.test_set)
-        self._computed_metrics = self._run_epoch(dataset, self._eval_step_fn())
+        self._computed_metrics = self._run_epoch(dataset, self._eval_step_fn("test"), split="test")
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 

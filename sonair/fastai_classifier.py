@@ -85,6 +85,8 @@ from recordstream import (
 from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint, run_entrypoint
 from torch.utils.data import DataLoader
 
+from sonair.metric_slots import merge_metric_specs
+
 logger = get_logger(__name__)
 
 #: Which entry point :meth:`FastaiClassifier.run` dispatches to — the same vocabulary every
@@ -131,9 +133,10 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         max_epochs: Training epochs.
         batch_size: Rows per batch.
         num_workers: DataLoader worker processes.
-        logger: ``fastai.callback.core.Callback`` instances (``CSVLogger``,
-            ``EarlyStoppingCallback``, …) — the fastai analogue of the Lightning backend's
-            ``logger`` slot, so the same flat key drives both.
+        trackers: marainer trackers — one or a list. This run's ONLY output wiring:
+            metrics, provenance and the run manifest all go to them.
+        callbacks: ``fastai.callback.core.Callback`` instances (``CSVLogger``,
+            ``SaveModelCallback`` …), appended to the ``Learner``'s own set.
         experiment_name: Run identity, recorded in artifacts and tracking.
         run_name: Run identity; a random ``adjective_noun`` when omitted.
         input_key: Record key holding the image.
@@ -149,6 +152,9 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
             backend's sentinel.
         metrics: fastai metrics — callables, or names resolved against ``fastai.metrics``.
             ``None`` picks ``accuracy`` / ``accuracy_multi`` by target shape.
+        val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is
+            no ``train_metrics``: a fastai ``Learner`` computes its metrics on the validation
+            pass only.
     """
 
     def __init__(
@@ -163,6 +169,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         batch_size: int = 32,
         num_workers: int = 0,
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
+        callbacks: Optional[Iterable[Any]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -174,6 +181,8 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         opt_func: FastaiOptimizer = "Adam",
         loss: Optional[Any] = None,
         metrics: Optional[Sequence[FastaiMetric]] = None,
+        val_metrics: Optional[Sequence[FastaiMetric]] = None,
+        test_metrics: Optional[Sequence[FastaiMetric]] = None,
     ) -> None:
         super().__init__()
         # `torch.nn.Module`, not `Lazy[torch.nn.Module]`: the deferred-ness is declared once, on
@@ -191,7 +200,9 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         self.batch_size = batch_size
         self.num_workers = num_workers
         # Internal only: this backend's own tracking callback is appended at run time.
-        self.callbacks: List[Any] = []
+        # Stored VERBATIM like `trackers` (lazy-init): entries may be deferred `Fluid`
+        # markers, and they are flowed where they are used.
+        self.callbacks: Optional[Iterable[Any]] = callbacks
         self.experiment_name = experiment_name
         self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
         self.input_key = str(input_key)
@@ -227,6 +238,12 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         # from a user's explicit choice.
         self.loss: Optional[Any] = loss
         self.metrics: Optional[Sequence[FastaiMetric]] = metrics
+        # Per-split ADDITIONS, merged over `metrics` by the shared rule. There is no
+        # `train_metrics`, and that is a fastai fact rather than an omission: a `Learner`
+        # computes its metrics on the VALIDATION pass only, so a train-only metric would have
+        # nowhere to be computed.
+        self.val_metrics: Optional[Sequence[FastaiMetric]] = val_metrics
+        self.test_metrics: Optional[Sequence[FastaiMetric]] = test_metrics
         self.multilabel: bool = False
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
@@ -377,8 +394,14 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         return DataLoaders(train, flow(self.val_loader, dataset=train_ds))
 
     # ---- the learner -------------------------------------------------------- #
-    def _build_learner(self, dataloaders: DataLoaders) -> Learner:
-        """Assemble the ``Learner``: model, loss, metrics, callbacks, artifact path."""
+    def _build_learner(self, dataloaders: DataLoaders, split: str = "val") -> Learner:
+        """Assemble the ``Learner``: model, loss, metrics, callbacks, artifact path.
+
+        ``split`` picks which metric slot is merged over the shared ``metrics`` — a `Learner`
+        holds ONE list and computes it on the validation pass, so the split is decided by which
+        entry point is building it (``fit`` validates, ``test`` scores the held-out split)
+        rather than by anything inside the Learner.
+        """
         path = self._artifact_dir()
         learner = Learner(
             dataloaders,
@@ -386,7 +409,9 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
             loss_func=flow(self.loss),
             opt_func=_as_opt_func(self.opt_func),
             lr=self.learning_rate,
-            metrics=[_as_metric(m) for m in (self.metrics or [])],
+            metrics=[
+                _as_metric(m) for m in (merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or [])
+            ],
             cbs=self._callbacks(),
             path=Path(path) if path else None,
             **({"wd": self.weight_decay} if self.weight_decay is not None else {}),
@@ -401,7 +426,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         opens ``learn.path/fname`` without creating it, so a perfectly reasonable
         ``./fastai_logs/run.csv`` would die *after* the data walk and the model build.
         """
-        callbacks = [flow(cb) for cb in self.callbacks]
+        callbacks = [flow(cb) for cb in (self.callbacks or [])]
         base = Path(self._artifact_dir() or ".")
         for callback in callbacks:
             fname = getattr(callback, "fname", None)
@@ -444,7 +469,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         if self.test_set is None:
             raise ValueError("FastaiClassifier.test() requires a 'test_set'.")
         loader = flow(self.test_loader, dataset=ensure_record_dataset(self.test_set))
-        learner = self._build_learner(DataLoaders(loader, loader))
+        learner = self._build_learner(DataLoaders(loader, loader), "test")
         values = learner.validate()
         self._computed_metrics = _named_values(learner, values)
         logger.info(f"Evaluation complete: {self._computed_metrics}")

@@ -186,6 +186,19 @@ trackers:
     run_name: efficientvit_b0_mnist
     save_dir: ./lightning_logs
 
+# The OTHER half of a run's wiring, and the one thing that is NOT engine-neutral: a callback
+# is its framework's own object, so this key belongs in a framework block rather than up here
+# (a `keras.callbacks.EarlyStopping` means nothing to a fastai `Learner`). Every backend
+# except `lightning` takes it — Lightning reaches the same thing through its `lightning:`
+# Trainer slot, which already accepts `callbacks:`. A file-writing callback gets its parent
+# directory created, because Keras and fastai both open the path without doing so and the
+# failure otherwise lands minutes into a fit.
+#
+#   keras: !scope:framework=keras
+#     callbacks:
+#       - !class:keras.callbacks.EarlyStopping { patience: 3 }
+#       - !class:keras.callbacks.CSVLogger { filename: ./keras_logs/history.csv }
+
 # ---------------------------------------------------------------------------
 # The framework blocks
 # ---------------------------------------------------------------------------
@@ -241,8 +254,9 @@ keras: !scope:framework=keras
   # The inherited keys this backend cannot use: the metric templates above are torchmetrics
   # classes and `keras.Model.compile()` has no idea what to do with them. `null` puts the slot
   # back to the SENTINEL, which is not the same as an empty list — see the next paragraph.
-  # `val_metrics:` goes too, and note it is inert here for a SECOND reason: this backend
-  # compiles ONE metric list for the whole run, so it has no per-split slot to receive it.
+  # `val_metrics:` goes for the same reason. It IS a real slot here (every backend takes one),
+  # but this engine compiles ONE metric list for the whole run, so what it can do with a
+  # val-only metric is compute it on training too — the union, not the narrowing.
   metrics: null
   val_metrics: null
   # Loss and metrics are left unset on purpose: both backends resolve them from the DATA in

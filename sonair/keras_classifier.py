@@ -45,7 +45,7 @@ from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
 from marainer.run_names import generate_run_name
-from marainer.tracking.base import Tracker
+from marainer.tracking.base import Tracker, as_tracker_list
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -135,7 +135,7 @@ class KerasClassifier(ProgressReporting):
         task: ClassifierTask = "fit",
         max_epochs: int = 10,
         batch_size: int = 32,
-        logger: Optional[Iterable[Any]] = None,
+        trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -160,7 +160,8 @@ class KerasClassifier(ProgressReporting):
         self.num_classes = int(num_classes) if num_classes is not None else None
         self.max_epochs = max_epochs
         self.batch_size = batch_size
-        self.callbacks: List[Any] = list(logger or [])
+        # Internal only: this backend's own tracking callback is appended at run time.
+        self.callbacks: List[Any] = []
         self.experiment_name = experiment_name
         self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
         self.input_key = str(input_key)
@@ -176,7 +177,10 @@ class KerasClassifier(ProgressReporting):
         self.multilabel: bool = False
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
-        self.trackers: Optional[List[Tracker]] = None
+        # Stored VERBATIM (lazy-init mandate: the constructor does no work). It may hold a
+        # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
+        # and flows it at run time.
+        self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
         self._class_names: Optional[List[str]] = None
         self._history: Dict[str, Any] = {}
         self._computed_metrics: Dict[str, float] = {}
@@ -349,7 +353,7 @@ class KerasClassifier(ProgressReporting):
             target = getattr(callback, "filename", None) or getattr(callback, "filepath", None)
             if isinstance(target, (str, Path)):
                 Path(target).expanduser().parent.mkdir(parents=True, exist_ok=True)
-        trackers = [flow(t) for t in (self.trackers or [])]
+        trackers = self._live_trackers()
         if trackers:
             from marainer.keras import keras_tracking_callback
 
@@ -431,7 +435,17 @@ class KerasClassifier(ProgressReporting):
         return None
 
     def _live_trackers(self) -> List[Tracker]:
-        return [flow(t) for t in (self.trackers or [])]
+        """Normalize and flow the wired trackers ONCE, writing the result back to the slot.
+
+        Written back rather than returned fresh each call: ``flow()`` on a LIVE object returns
+        that same object (idempotent), but a deferred ``Fluid`` would be REBUILT on every call —
+        two MLflow runs for one training run. One attribute, flowed in place, is the same idiom
+        this class already uses for ``model`` / ``loss_fn`` / ``predictions_sink``.
+        """
+        # `flow()` resolves a marker to the live object, which the Lazy-typed slot cannot
+        # express — the cast says what the call guarantees.
+        self.trackers = [flow(t) for t in as_tracker_list(self.trackers) or []]
+        return cast(List[Tracker], self.trackers)
 
     # ---- @outputs ------------------------------------------------------------ #
     @property

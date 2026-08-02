@@ -377,10 +377,10 @@ val_set: "VAL_SENTINEL"
 batch_size: 64
 num_workers: 4
 max_epochs: 7
-logger:
-  - !class:pytorch_lightning.loggers.TensorBoardLogger
+trackers:
+  - !class:marainer.CsvTracker
+    experiment_name: bcast
     save_dir: ./_sonair_test_logs
-    name: bcast
 """
 
 
@@ -402,29 +402,70 @@ def test_flat_broadcasting_wires_trainer_attributes_from_top_level_keys() -> Non
     assert _stub(t.train_loader).kwargs["batch_size"] == 64
     assert _stub(t.train_loader).kwargs["num_workers"] == 4
     assert _stub(t.train_loader).kwargs["persistent_workers"] is True
-    # ...and max_epochs/logger into the base's deferred L.Trainer stub at construction.
+    # ...and max_epochs into the deferred L.Trainer stub at construction. `logger` is NOT
+    # staged there any more: the trackers become the Trainer's loggers in `_build_trainer`,
+    # because a tracker may still be a deferred Fluid while this stub is being built.
     assert _stub(t.lightning).kwargs["max_epochs"] == 7
-    assert isinstance(_stub(t.lightning).kwargs["logger"], list) and len(_stub(t.lightning).kwargs["logger"]) == 1
+    assert "logger" not in _stub(t.lightning).kwargs
+    assert t.trackers is not None and len(list(t.trackers)) == 1
 
 
-def test_logger_broadcasts_and_flows_into_lightning() -> None:
-    """`logger: [...]` broadcasts into the base's deferred L.Trainer stub; flowing it
-    materializes the `!class:` logger Fluids into live instances."""
+def test_a_list_valued_trackers_key_reaches_the_slot() -> None:
+    """The property the whole `trackers` slot shape exists for.
+
+    Confluid gates LIST broadcast on the receiving slot's ANNOTATION, so a `trackers: [...]`
+    key only lands because the constructor param is typed `Union[Tracker, Iterable[Tracker]]`.
+    Typed `Optional[List[Tracker]]` and assigned after construction — its previous shape — the
+    same key silently did nothing, and every wired tracker was ignored by a run that otherwise
+    looked fine.
+    """
     from confluid import flow, load
     from confluid.fluid import Fluid
-    from pytorch_lightning.loggers import TensorBoardLogger
 
-    loaded = load(_FLAT_YAML)
-    t = loaded["trainer"]
+    t = load(_FLAT_YAML)["trainer"]
     t = flow(t) if isinstance(t, Fluid) else t
 
-    # Staged on the deferred L.Trainer stub as a list with one logger Fluid...
-    staged = _stub(t.lightning).kwargs["logger"]
-    assert isinstance(staged, list) and len(staged) == 1
-    # ...flowing the lightning stub materializes it into a live TensorBoardLogger.
-    lt = flow(t.lightning)
-    assert any(isinstance(lg, TensorBoardLogger) for lg in lt.loggers)
-    assert all(not isinstance(lg, Fluid) for lg in lt.loggers)
+    assert t.trackers is not None, "a list-valued `trackers:` key did not reach the slot"
+    assert len(list(t.trackers)) == 1
+
+
+def test_the_constructor_does_not_touch_the_trackers_it_was_given() -> None:
+    """Lazy-init: storing VERBATIM is what keeps a deferred marker deferred.
+
+    Normalizing in `__init__` would iterate the value, and a `Fluid` is not iterable —
+    `list(Class(...))` raises `'Class' object is not iterable`.
+    """
+    from confluid.fluid import Class
+
+    marker = Class("marainer.CsvTracker")
+    trainer = LightningClassifier(model=_TinyClassifier(), trackers=marker)
+    assert trainer.trackers is marker  # untouched, not wrapped, not built
+
+
+def test_the_trackers_become_the_trainers_loggers() -> None:
+    """There is no `logger:` slot any more — the trackers ARE the metric sinks."""
+    from marainer import CsvTracker
+    from marainer.lightning import TrackerLogger
+
+    tracker = CsvTracker(experiment_name="e", run_name="r", save_dir="./_sonair_test_logs")
+    trainer = LightningClassifier(model=_TinyClassifier(), trackers=[tracker])
+    built = trainer._build_trainer()
+
+    adapters = [lg for lg in built.loggers if isinstance(lg, TrackerLogger)]
+    assert len(adapters) == 1
+    assert adapters[0].tracker is tracker
+
+
+def test_flowing_twice_does_not_rebuild_a_deferred_tracker() -> None:
+    """A re-flowed `Fluid` would be a SECOND tracker — two MLflow runs for one training run."""
+    from confluid.fluid import Class
+
+    trainer = LightningClassifier(
+        model=_TinyClassifier(), trackers=[Class("marainer.CsvTracker", save_dir="./_sonair_test_logs")]
+    )
+    first = trainer._live_trackers()
+    second = trainer._live_trackers()
+    assert first[0] is second[0]
 
 
 # ---------------------------------------------------------------------------
@@ -786,6 +827,244 @@ def test_metrics_accepts_ready_made_collection() -> None:
     assert all(str(k).startswith("train/") for k in trainer.train_metrics.keys())
     assert all(str(k).startswith("val/") for k in trainer.val_metrics.keys())
     assert all(str(k).startswith("test/") for k in trainer.test_metrics.keys())
+
+
+# ---------------------------------------------------------------------------
+# Non-scalar metrics: a confusion matrix in the metric set
+# ---------------------------------------------------------------------------
+def _confusion_trainer(num_classes: int = 3) -> LightningClassifier:
+    """A classifier whose metric set carries one scalar metric AND one N×N confusion matrix."""
+    from torchmetrics import Metric
+    from torchmetrics.classification import MulticlassAccuracy, MulticlassConfusionMatrix
+
+    return LightningClassifier(
+        model=_TinyClassifier(num_classes=num_classes),
+        train_set=_make_records(16, num_classes=num_classes),
+        num_classes=num_classes,
+        balance_classes=False,
+        metrics={
+            "accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1),
+            "confusion": LazyClass[Metric](MulticlassConfusionMatrix),
+        },
+    )
+
+
+def test_a_confusion_matrix_in_the_metric_set_does_not_kill_the_val_loop(tmp_path: object) -> None:
+    """The counterfactual this whole path exists for — it used to raise on the first val epoch.
+
+    `self.log_dict(<MetricCollection>)` hands Lightning the computed values, and its
+    `convert_tensors_to_scalars` raises *"does not contain a single element"* on a `[C, C]`
+    matrix. Measured before the fix; this asserts the run now completes AND that the matrix
+    really was computed (not quietly dropped from the collection).
+    """
+    from confluid import Class as ConfluidClass
+    from torch.utils.data import DataLoader
+
+    trainer = _confusion_trainer()
+    trainer.val_set = _make_records(8, num_classes=3)
+    trainer.train_loader = ConfluidClass(DataLoader, batch_size=8, collate_fn=_stack_collate)
+    trainer.val_loader = ConfluidClass(DataLoader, batch_size=8, collate_fn=_stack_collate)
+    trainer.lightning = _cpu_lightning(tmp_path)
+    trainer.run()
+
+    matrix = trainer.val_metrics["val/confusion"].compute()
+    assert matrix.shape == (3, 3)
+    assert int(matrix.sum()) == 8  # every validation record landed in a cell
+
+
+def test_log_dict_receives_the_scalars_only() -> None:
+    """The split is by the COMPUTED value, so the matrix never reaches the metric logger."""
+    logged: List[Any] = []
+    trainer = _confusion_trainer()
+    trainer.initialize()
+    trainer.val_metrics.update(torch.randn(8, 3), torch.randint(0, 3, (8,)))
+    trainer.log_dict = lambda payload, **_: logged.append(payload)  # type: ignore[method-assign]
+
+    trainer._report_epoch_metrics(trainer.val_metrics)
+
+    assert list(logged[0]) == ["val/accuracy_top1"]
+    assert isinstance(logged[0]["val/accuracy_top1"], float)
+
+
+def test_the_confusion_matrix_is_rendered_at_validation_epoch_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It is reported instead — as a table, through marainer's renderer.
+
+    Patched on `sonair.lightning_classifier`, not on `marainer.tracking.render`: an imported
+    name is a BINDING in the importing module, so patching the definition site would not be seen.
+    """
+    from sonair import lightning_classifier as mod
+
+    rendered: List[Any] = []
+    monkeypatch.setattr(mod, "render_matrix_as_table", lambda name, matrix, names: rendered.append((name, names)))
+
+    trainer = _confusion_trainer()
+    trainer.initialize()
+    trainer.val_metrics.update(torch.randn(8, 3), torch.randint(0, 3, (8,)))
+    trainer.log_dict = lambda payload, **_: None  # type: ignore[method-assign]
+    trainer._report_epoch_metrics(trainer.val_metrics)
+
+    assert rendered == [("val/confusion", ["0", "1", "2"])]  # integer targets -> index labels
+
+
+def test_nothing_is_rendered_during_the_sanity_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lightning's sanity pass runs two batches through an untrained model — not worth a table."""
+    from sonair import lightning_classifier as mod
+
+    rendered: List[Any] = []
+    monkeypatch.setattr(mod, "render_matrix_as_table", lambda *a: rendered.append(a))
+
+    trainer = _confusion_trainer()
+    trainer.initialize()
+    trainer.val_metrics.update(torch.randn(8, 3), torch.randint(0, 3, (8,)))
+    trainer.log_dict = lambda payload, **_: None  # type: ignore[method-assign]
+    trainer._trainer = cast(Any, type("_T", (), {"sanity_checking": True})())
+    trainer._report_epoch_metrics(trainer.val_metrics)
+
+    assert rendered == []
+
+
+def test_eval_metrics_reset_at_epoch_START_so_the_final_state_survives_the_run() -> None:
+    """Two epochs must not accumulate — and the last one must still be computable afterwards.
+
+    Handing the collection to `log_dict` used to make Lightning reset it at epoch END, which is
+    why `_write_metrics_sidecar` / `computed_metrics` (both `compute()` AFTER the run) saw an
+    empty metric. Resetting at epoch start does both jobs with one call.
+    """
+    trainer = _confusion_trainer()
+    trainer.initialize()
+    trainer.log_dict = lambda payload, **_: None  # type: ignore[method-assign]
+
+    for _ in range(2):
+        trainer.on_validation_epoch_start()
+        trainer.val_metrics.update(torch.randn(8, 3), torch.randint(0, 3, (8,)))
+        trainer.on_validation_epoch_end()
+
+    assert int(trainer.val_metrics["val/confusion"].compute().sum()) == 8  # one epoch, not two
+
+
+def test_a_rendered_matrix_reaches_every_wired_tracker() -> None:
+    """The log is not the only destination — otherwise a tracked run records the scalars only.
+
+    `log_text` is the channel that exists for a value a `{name: float}` metric call cannot
+    carry; this asserts the classifier actually uses it, and hands over the SAME table it logs.
+    """
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.texts: List[Any] = []
+
+        def log_text(self, name: str, text: str, step: Any = None) -> None:
+            self.texts.append((name, text, step))
+
+    tracker = _Recorder()
+    trainer = _confusion_trainer()
+    trainer.trackers = cast(Any, [tracker])
+    trainer.initialize()
+    trainer.val_metrics.update(torch.randn(8, 3), torch.randint(0, 3, (8,)))
+    trainer.log_dict = lambda payload, **_: None  # type: ignore[method-assign]
+
+    trainer._report_epoch_metrics(trainer.val_metrics)
+
+    assert len(tracker.texts) == 1
+    name, table, step = tracker.texts[0]
+    assert name == "val/confusion"
+    assert table.startswith("val/confusion:") and "pred:0" in table  # the rendered table, not the tensor
+    assert step is None  # no Trainer attached, so there is no epoch to report
+
+
+# ---------------------------------------------------------------------------
+# Per-split metric slots: `<split>_metrics` merged over the shared `metrics`
+# ---------------------------------------------------------------------------
+def _split_trainer(**slots: Any) -> LightningClassifier:
+    """Shared `metrics` = accuracy; whatever the caller adds per split."""
+    from torchmetrics import Metric
+    from torchmetrics.classification import MulticlassAccuracy
+
+    return LightningClassifier(
+        model=_TinyClassifier(num_classes=3),
+        train_set=_make_records(16),
+        num_classes=3,
+        balance_classes=False,
+        metrics={"accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1)},
+        **slots,
+    )
+
+
+def test_a_split_slot_adds_to_the_shared_set_for_that_split_only() -> None:
+    """The point of the split slots: a confusion matrix on validation and nowhere else.
+
+    Merging rather than replacing is what makes that expressible without restating the shared
+    metrics beside it — which in a config is duplication that then drifts.
+    """
+    from torchmetrics import Metric
+    from torchmetrics.classification import MulticlassConfusionMatrix
+
+    trainer = _split_trainer(val_metrics={"confusion": LazyClass[Metric](MulticlassConfusionMatrix)})
+    trainer.initialize()
+
+    assert sorted(str(k) for k in trainer.val_metrics.keys()) == ["val/accuracy_top1", "val/confusion"]
+    assert [str(k) for k in trainer.train_metrics.keys()] == ["train/accuracy_top1"]
+    assert [str(k) for k in trainer.test_metrics.keys()] == ["test/accuracy_top1"]
+
+
+def test_a_split_slot_shadows_a_shared_entry_of_the_same_name() -> None:
+    """Merge semantics, so the split can also OVERRIDE — same name, that split's template wins."""
+    from torchmetrics import Metric
+    from torchmetrics.classification import MulticlassAccuracy
+
+    trainer = _split_trainer(val_metrics={"accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=2)})
+    trainer.initialize()
+
+    assert [str(k) for k in trainer.val_metrics.keys()] == ["val/accuracy_top1"]
+    assert trainer.val_metrics["val/accuracy_top1"].top_k == 2
+    assert trainer.train_metrics["train/accuracy_top1"].top_k == 1
+
+
+def test_a_ready_made_collection_in_a_split_slot_replaces_instead_of_merging() -> None:
+    """There is no key-wise way to merge a built `MetricCollection`, so it takes the split whole.
+
+    Ignoring it would be the worse answer — a wired metric set that silently does nothing.
+    """
+    from torchmetrics import MetricCollection
+    from torchmetrics.classification import MulticlassF1Score
+
+    trainer = _split_trainer(test_metrics=MetricCollection({"f1": MulticlassF1Score(num_classes=3)}))
+    trainer.initialize()
+
+    assert [str(k) for k in trainer.test_metrics.keys()] == ["test/f1"]
+    assert [str(k) for k in trainer.train_metrics.keys()] == ["train/accuracy_top1"]
+
+
+def test_the_split_slots_are_built_once() -> None:
+    """`initialize()` is called at the top of every `run()`, and the slots are dual-purpose.
+
+    Once a slot may arrive holding a SPEC, `is None` can no longer tell "not built" from
+    "wired" — so a second initialize must not re-prefix an already-built collection into
+    `val/val/confusion`.
+    """
+    from torchmetrics import Metric
+    from torchmetrics.classification import MulticlassConfusionMatrix
+
+    trainer = _split_trainer(val_metrics={"confusion": LazyClass[Metric](MulticlassConfusionMatrix)})
+    trainer.initialize()
+    first = trainer.val_metrics
+    trainer.initialize()
+
+    assert trainer.val_metrics is first
+    assert sorted(str(k) for k in trainer.val_metrics.keys()) == ["val/accuracy_top1", "val/confusion"]
+
+
+def test_a_per_step_train_metric_is_scalar_filtered_too() -> None:
+    """`training_step` logs per-BATCH values; the same filter applies or it dies on batch one."""
+    logged: List[Any] = []
+    trainer = _confusion_trainer()
+    trainer.initialize()
+    trainer.log_dict = lambda payload, **_: logged.append(payload)  # type: ignore[method-assign]
+    trainer.log = lambda *a, **k: None  # type: ignore[method-assign]
+
+    trainer.training_step(_make_batch(8, num_classes=3), 0)
+
+    assert list(logged[0]) == ["train/accuracy_top1"]
 
 
 # ---------------------------------------------------------------------------

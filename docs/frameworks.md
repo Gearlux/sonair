@@ -41,7 +41,7 @@ the backend is a flag rather than a subcommand.
 |---|---|---|
 | CLI verbs (`train`/`evaluate`/`predict`) | no | [`cli.py`](../sonair/cli.py) |
 | Config shape (the `runnable:` root) | no | the workspace-wide runner contract |
-| Logging backends (`logger:`, `trackers:`) | no | wired by the runnable |
+| Tracking backends (`trackers:`) | no | wired by the runnable |
 | Dataset / ops / collate | no | `recordstream` |
 | **The runnable class** | **yes** | `sonair/<backend>_classifier.py` |
 | **The model wrapper** | *sometimes* | `sonair/<backend>_model.py` |
@@ -262,12 +262,29 @@ keras: !scope:framework=keras
 ```
 
 Note that **every framework-specific key is a top-level sibling** — `runnable`,
-`model`, `logger` — rather than `model:` living inside `runnable:`. That is not
+`model`, `trackers` — rather than `model:` living inside `runnable:`. That is not
 style. A scope block replaces a *key*, taking its whole subtree with it, so a
 nested `model:` disappears the instant a block swaps the runnable, and the
 backend that inherits it dies with `__init__() missing 1 required positional
 argument: 'model'`. Keep the slots siblings and a block can override one without
 erasing another.
+
+The flip side of sharing the top level is that an inherited key is only right
+for the backends whose engine can consume it. **The metric keys are engine-bound**
+— the example's `metrics:` and `val_metrics:` are `torchmetrics` classes, which
+the three torch-backed backends read unchanged and `keras.Model.compile()` cannot
+take at all — so a block on another engine must override both. Writing
+`metrics: null` restores the classifier's own sentinel, which is *not* the same
+as an empty list: `None` means "not chosen", so `initialize()` resolves the
+engine's defaults from the data. (`val_metrics:` is doubly inapplicable there —
+only the two torch backends have per-split metric slots at all; a Keras
+`compile()` takes one metric list for the whole run.) The same applies
+to any key whose value is a framework object (`loss`, `optimizer`). Tracking is
+NOT among them: a marainer tracker is engine-neutral, so `trackers:` is shared by
+every block rather than overridden per framework.
+`tests/test_cli_frameworks.py::test_no_framework_inherits_a_metric_set_its_engine_cannot_consume`
+pins it at the config level, so it fails wherever the mistake is made rather
+than only on a machine that has the engine installed.
 
 Activate a block with `--framework`, on either runner:
 

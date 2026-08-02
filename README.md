@@ -144,7 +144,7 @@ recordstream run examples/train_efficientvit_b0_mnist.yaml
 
 That one config carries **every** backend: engine-agnostic keys (dataset, batch
 size, epochs) at the top level, and one `!scope:framework=<name>` block per
-alternative overriding only `runnable` / `model` / `logger`. `--framework <name>`
+alternative overriding only `runnable` / `model`. `--framework <name>`
 activates the matching block — the same flag on either runner, because it is a
 property of the config rather than of the CLI.
 
@@ -197,7 +197,7 @@ result.
 ### What a backend swap actually costs
 
 The `keras` block in the example config overrides four keys and nothing else: `runnable`,
-`model`, `logger`, and `preprocess`. Only that last one is a *data* difference, and it is a
+`model` and `preprocess`. Only that last one is a *data* difference, and it is a
 real one — **Keras is channels-last, torch is channels-first** — so the Keras chain stops
 after `Normalize` (leaving `HWC`) where the torch chain adds `ToTensor` to transpose to `CHW`.
 
@@ -208,7 +208,7 @@ metrics sidecar — and the batching, since `recordstream.keras.RecordSequence` 
 eight-line batch-shaping function plus `compile()`/`fit()` — that ratio is the demonstration.
 
 The other two blocks make the point twice more, from opposite directions. The `fastai` block
-is the smallest of the four: it overrides `runnable` and `logger`, and *nothing else* — no
+is the smallest of the four: it overrides `runnable`, and *nothing else* — no
 `model`, no `preprocess`, because fastai runs on torch and consumes the reference backend's
 `TimmModel` and its `[N, 3, H, W]` batches unchanged. The `tensorflow` block overrides no
 `model` either, for the mirror reason: in TensorFlow ≥ 2.16 `tf.keras` **is** Keras 3, so
@@ -512,6 +512,55 @@ Every backend that owns a loss slot leaves `loss` / `metrics` unset by default a
 them from the data at `initialize()` (`Sparse`/`CrossEntropy` for int64 ids, the binary/`BCE` family for a
 `MultiLabel` target). Everything below is for when you want to say it yourself.
 
+### Per-split metrics
+
+`metrics:` is what **every** split measures. `train_metrics:` / `val_metrics:` / `test_metrics:`
+are what **that** split measures on top — merged over the shared set by name, so adding one
+metric to one split does not mean restating the others beside it:
+
+```yaml
+metrics:                       # every split
+  accuracy_top1: !lazy:torchmetrics.classification.MulticlassAccuracy { top_k: 1 }
+  f1_macro: !lazy:torchmetrics.classification.MulticlassF1Score { average: macro }
+
+val_metrics:                   # validation ALSO gets this
+  confusion: !lazy:torchmetrics.classification.MulticlassConfusionMatrix
+```
+
+A same-named entry shadows, so a split can override one template rather than add to it
+(`val_metrics: {accuracy_top1: !lazy:…MulticlassAccuracy {top_k: 2}}`). Merging needs both to be
+mappings — a ready-made `MetricCollection` in a split slot *replaces*, since there is no key-wise
+way to combine it.
+
+### Metrics that are not a single number (a confusion matrix)
+
+Most metrics compute to one number, which is what a metric logger stores. A few do not — a
+confusion matrix is `C × C` — and the example above is the reason the split slots exist: it
+belongs on validation, not on a training split whose metrics are per-batch.
+
+The scalars are logged exactly as before. The matrix takes the other route, because it cannot go
+down the metric channel at all: a Lightning logger reduces every logged value to one number and
+raises *"does not contain a single element"* on a matrix, and a `Tracker.log_metrics` call is
+`{name: float}` in every backend. At the end of every validation and test epoch it is **rendered
+as a table into the log, and pushed to each wired tracker's text channel** (`Tracker.log_text` —
+MLflow artifact, TensorBoard's Text tab with a per-epoch step slider, Aim, ClearML):
+
+```
+val/confusion:
+
+|        |   pred:0 |   pred:1 |   pred:2 | …
+|--------|----------|----------|----------|
+| true:0 |        8 |        0 |        0 | …
+| true:1 |        0 |       14 |        0 | …
+```
+
+Rows are true classes, columns predicted (the torchmetrics convention). Labels come from the
+run's `class_names` when the dataset has them, and are class indices otherwise. The metrics
+sidecar and the `computed_metrics` output stay scalar-only. See
+[`examples/train_efficientvit_b0_mnist.yaml`](examples/train_efficientvit_b0_mnist.yaml) for the
+wiring in context — and note that a backend on another engine must override both keys, since
+torchmetrics classes are `framework="torch"`.
+
 ### Wiring a Keras loss or metric
 
 The classifier's head is a bare `Dense` with **no activation**, so it emits raw logits. That
@@ -614,8 +663,9 @@ its own `pytorch_lightning.Trainer` from the `lightning` slot / ergonomic knobs.
 uses marainer ONLY for OPTIONAL experiment tracking: when `trackers` are wired it
 attaches a `marainer.lightning.TrackingCallback` (git/config/log-file provenance),
 and `log_system_metrics: true` activates framework-free system-metric logging.
-Removing marainer would take only a few line changes. Wire stock
-`pytorch_lightning.loggers.*` classes under the `logger:` knob (a list broadcasts).
+Removing marainer would take only a few line changes. There is no separate `logger:`
+knob of `pytorch_lightning.loggers.*` — the trackers ARE this run's metric sinks, adapted
+to Lightning's logger interface, so one key drives every backend.
 
 `LightningClassifier` declares three read-only post-run `@output`s directly —
 `trained_model` (the live trained `nn.Module`), `computed_metrics`

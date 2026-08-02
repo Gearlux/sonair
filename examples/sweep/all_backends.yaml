@@ -1,0 +1,224 @@
+# The sweep overlay: EVERY backend live, EVERY convnet reachable, EVERY tracker selectable.
+#
+#   ../../examples/sweep/run_sweep.sh                   # the driver — see that script
+#   sonair train examples/sweep/all_backends.yaml --framework jax --model convnet --tracker mlflow
+#
+# ---------------------------------------------------------------------------
+# Why this is an OVERLAY and not a copy
+# ---------------------------------------------------------------------------
+# `include:` deep-merges the neighbouring example under this file, which then overrides only
+# what a sweep needs. Everything that makes the demo a demo — the dataset, the preprocessing
+# chain, the batch/epoch knobs, the model slot, the argument for why each framework-specific
+# key is a top-level sibling — is READ from there, so the two cannot drift.
+#
+# Three things this file adds, and each is the reason it exists rather than living in the
+# example itself:
+#
+#  1. THE FIVE COMMENTED BLOCKS, LIVE. `tensorflow` / `fastai` / `huggingface` / `jax` / `mlx`
+#     are commented out in the example on purpose — its blocks must load on a DEFAULT checkout,
+#     which installs only the workspace's selected frameworks. A sweep is opt-in and runs on a
+#     machine that has them, so here they are live. Their contents are the example's own
+#     comments, transcribed; if you change one there, change it here.
+#  2. A CONVNET PER BACKEND. The example offers ONE convnet (`--model convnet` -> `TorchConvNet`)
+#     because that is the one its three live backends share. The other four engines each have
+#     their own implementation of the same spec (`sonair/convnet/spec.py`), and reaching them
+#     needs a block that is active only when BOTH dimensions are — a `convnet:` block NESTED
+#     inside the framework block, which confluid splices exactly when both scopes are on.
+#     So `--framework mlx --model convnet` gets `MlxConvNet`, not the torch one.
+#  3. A TRACKER DIMENSION. `--tracker mlflow` picks where the results go, the same way
+#     `--framework` picks the engine. The names come from the top-level `experiment_name:` /
+#     `run_name:` through `!ref:`, so the ONE pair the CLI sets reaches the run AND the tracker.
+#
+# ---------------------------------------------------------------------------
+# What the matrix looks like
+# ---------------------------------------------------------------------------
+#   backend      zoo model                        convnet (--model convnet)
+#   lightning    TimmModel efficientvit_b0        TorchConvNet
+#   torch        TimmModel efficientvit_b0        TorchConvNet
+#   fastai       TimmModel efficientvit_b0        TorchConvNet
+#   keras        KerasModel MobileNetV3Small      KerasConvNet
+#   tensorflow   KerasModel MobileNetV3Small      TensorFlowConvNet
+#   huggingface  HuggingFaceModel resnet-18       — (see below)
+#   jax          —                                FlaxConvNet
+#   mlx          —                                MlxConvNet
+#
+# The two gaps are structural, not missing work. JAX and MLX have no zoo to wrap (transformers
+# dropped Flax in v5; there is no MLX image zoo), which is exactly why `convnet/spec.py` exists.
+# And `huggingface` has no convnet: a `transformers.Trainer` calls its model with `labels=` and
+# subscripts `outputs["loss"]`, so it drives models that compute their own loss from
+# `config.problem_type` — a convnet returning bare logits does not satisfy that contract, and
+# making it do so would mean wrapping it in the zoo machinery the spec exists to avoid.
+
+include: ../train_efficientvit_b0_mnist.yaml
+
+# ===========================================================================
+# Where the results go — one dimension, one block per tracker
+# ===========================================================================
+# `!ref:` rather than a literal: the CLI sets `experiment_name` / `run_name` ONCE at the top
+# level and both the run and its tracker read the same value. A literal here would drift from
+# whatever the run is actually called, which is the one thing a sweep must not do.
+#
+# With no `--tracker` at all the include's TensorBoardTracker still applies, so this file
+# changes nothing about running the example by hand.
+
+mlflow: !scope:tracker=mlflow
+  trackers:
+    - !class:marainer.MlflowTracker
+      experiment_name: !ref:experiment_name
+      run_name: !ref:run_name
+      # The workspace's own server (`aisland mlflow start`). Unset it and MLflow falls back to
+      # the ambient MLFLOW_TRACKING_URI, then to a local ./mlruns directory.
+      tracking_uri: http://127.0.0.1:5005
+      # Off for a sweep: each run would start a sampler thread and a subprocess monitor, and
+      # thirteen of those in a row measure the sweep more than the model.
+      log_system_metrics: false
+
+tensorboard: !scope:tracker=tensorboard
+  trackers:
+    - !class:marainer.TensorBoardTracker
+      experiment_name: !ref:experiment_name
+      run_name: !ref:run_name
+      save_dir: ./sweep_logs/tensorboard
+
+csv: !scope:tracker=csv
+  trackers:
+    - !class:marainer.CsvTracker
+      experiment_name: !ref:experiment_name
+      run_name: !ref:run_name
+      save_dir: ./sweep_logs/csv
+
+aim: !scope:tracker=aim
+  trackers:
+    - !class:marainer.AimTracker
+      experiment_name: !ref:experiment_name
+      run_name: !ref:run_name
+      save_dir: ./sweep_logs/aim
+
+clearml: !scope:tracker=clearml
+  trackers:
+    - !class:marainer.ClearMLTracker
+      experiment_name: !ref:experiment_name
+      run_name: !ref:run_name
+      # No server and no credentials — the runs land on disk for `clearml-data`/the UI to import.
+      offline: true
+
+wandb: !scope:tracker=wandb
+  trackers:
+    - !class:marainer.WandbTracker
+      experiment_name: !ref:experiment_name
+      run_name: !ref:run_name
+      save_dir: ./sweep_logs/wandb
+
+# ===========================================================================
+# A convnet for the backends that share the torch one
+# ===========================================================================
+# `lightning`, `torch` and `fastai` all run on torch, so the example's own top-level
+# `convnet: !scope:model=convnet` block already gives them `TorchConvNet` — nothing to add.
+# The blocks below give the other four engines the same architecture in their own module type,
+# and give each commented-out backend its live definition.
+
+# Keras — RESTATED IN FULL, and that is a trap worth naming: `include:` deep-merges two
+# MAPPINGS, and a scope block is not one (`deep_merge` recurses only when both sides are
+# `dict`, and a `!scope:` parses to a `ScopeBlock` object). So an overlay block with the same
+# key REPLACES the included one wholesale rather than adding to it. A `keras:` block here
+# holding only the nested convnet silently dropped the runnable, the model and the
+# preprocessing chain — `--framework keras` resolved to `LightningClassifier` + `TimmModel`
+# and would have trained the wrong thing under the right name. Caught by resolving the whole
+# matrix before running any of it; the guard against a repeat is
+# `tests/test_sweep_config.py::test_every_backend_resolves_to_its_own_runnable_and_model`.
+keras: !scope:framework=keras
+  runnable: !class:sonair.KerasClassifier
+  model: !lazy:sonair.KerasModel
+    model_name: MobileNetV3Small
+    input_shape: [224, 224, 3]
+    pretrained: true
+  metrics: null
+  val_metrics: null
+  preprocess:
+    - !class:recordstream.ops.image.ConvertToImage
+      width: 224
+      height: 224
+  convnet: !scope:model=convnet
+    # `keras.layers`, so it runs on whichever engine KERAS_BACKEND names.
+    model: !lazy:sonair.convnet.keras_convnet.KerasConvNet
+      input_shape: [224, 224, 3]
+
+# TensorFlow — the example's commented block, live, plus its own convnet. `TensorFlowConvNet`
+# is the spec in raw `tf.nn` ops on a `tf.Module`; `KerasConvNet` would also run here (tf.keras
+# IS Keras 3), and picking the tf-native one is what makes the comparison a comparison.
+tensorflow: !scope:framework=tensorflow
+  runnable: !class:sonair.TensorFlowClassifier
+    export_dir: ./sweep_logs/exported/mnist_mobilenetv3
+    jit_compile: false
+  model: !lazy:sonair.KerasModel
+    model_name: MobileNetV3Small
+    input_shape: [224, 224, 3]
+    pretrained: true
+  metrics: null
+  val_metrics: null
+  preprocess:
+    - !class:recordstream.ops.image.ConvertToImage
+      width: 224
+      height: 224
+  convnet: !scope:model=convnet
+    model: !lazy:sonair.convnet.tensorflow_convnet.TensorFlowConvNet
+      input_shape: [224, 224, 3]
+
+# fastai — the smallest block, because fastai runs on torch: it inherits the model slot
+# unchanged, whether that is `TimmModel` or (under `--model convnet`) `TorchConvNet`.
+fastai: !scope:framework=fastai
+  runnable: !class:sonair.FastaiClassifier
+    learning_rate: 0.001
+    one_cycle: true
+    metrics: [accuracy, top_k_accuracy]
+  val_metrics: null
+
+# huggingface — `transformers.Trainer` fine-tuning a Hub checkpoint. `resnet-18` rather than the
+# example's ViT-base: a sweep runs this thirteen times and a 22M-parameter CNN downloads and
+# fine-tunes in a fraction of the time, which is the same choice the AGENTS end-to-end check made.
+huggingface: !scope:framework=huggingface
+  runnable: !class:sonair.HuggingFaceClassifier
+    learning_rate: 0.00005
+    metrics: [accuracy]
+    output_dir: ./sweep_logs/hf_runs
+  model: !lazy:sonair.HuggingFaceModel
+    model_name: microsoft/resnet-18
+    pretrained: true
+  val_metrics: null
+
+# jax — a jitted optax loop over Flax. No zoo, so `--model convnet` is the only shape it has;
+# the block sets `FlaxConvNet` unconditionally and the nested block is what makes `--model
+# convnet` name the same thing rather than fall through to the torch one.
+jax: !scope:framework=jax
+  runnable: !class:sonair.JaxClassifier
+    learning_rate: 0.001
+    optimizer: adam
+    metrics: [accuracy]
+  model: !lazy:sonair.convnet.flax_convnet.FlaxConvNet
+    input_shape: [224, 224, 3]     # channels LAST, like the keras block
+  val_metrics: null
+  preprocess:                      # ...and so the chain STOPS before a CHW ToTensor
+    - !class:recordstream.ops.image.ConvertToImage
+      width: 224
+      height: 224
+  convnet: !scope:model=convnet
+    model: !lazy:sonair.convnet.flax_convnet.FlaxConvNet
+      input_shape: [224, 224, 3]
+
+# mlx — the jax block with two words changed, which is the point: same architecture, same
+# channels-last preprocessing, same knobs. Apple silicon only.
+mlx: !scope:framework=mlx
+  runnable: !class:sonair.MlxClassifier
+    learning_rate: 0.001
+    optimizer: Adam                # a CLASS name here, unlike jax's optax factory
+    metrics: [accuracy]
+  model: !lazy:sonair.convnet.mlx_convnet.MlxConvNet
+    input_shape: [224, 224, 3]
+  val_metrics: null
+  preprocess:
+    - !class:recordstream.ops.image.ConvertToImage
+      width: 224
+      height: 224
+  convnet: !scope:model=convnet
+    model: !lazy:sonair.convnet.mlx_convnet.MlxConvNet
+      input_shape: [224, 224, 3]

@@ -45,6 +45,41 @@ def test_every_flowed_slot_is_declared_lazy() -> None:
     )
 
 
+def _declared_lazy_slots(source: str) -> Set[str]:
+    """Slot names a module annotates ``Lazy[...]`` — as a ctor param OR an ``__init__`` body attr."""
+    params = set(re.findall(r"\b([a-z_]+): (?:Mandatory\[)?(?:Optional\[)?Lazy\[", source))
+    body = set(re.findall(r"self\.([a-z_]+): (?:Optional\[)?Lazy\[", source))
+    return params | body
+
+
+def test_every_backend_declares_the_slots_it_flows() -> None:
+    """The same rule as above, applied to ALL EIGHT backends by reading their SOURCE.
+
+    ``lazy_param_names`` needs the class IMPORTED, and seven of the eight need a framework a
+    default install lacks — so an import-based sweep would skip exactly where a copy-pasted slot
+    lands. A regex over the module text covers every backend on every machine.
+    """
+    offenders: Dict[str, list] = {}
+    checked = 0
+    for path in sorted(_PACKAGE.glob("*_classifier.py")):
+        source = path.read_text()
+        flowed = set(re.findall(r"flow\(\s*self\.([a-z_]+)", source))
+        assert flowed, f"{path.name}: found no flow(self.<slot>) calls — has the dispatch changed?"
+
+        undeclared = sorted(flowed - _declared_lazy_slots(source))
+        if undeclared:
+            offenders[path.name] = undeclared
+        checked += 1
+
+    assert checked >= 8, f"expected every backend to be scanned, saw {checked}"
+    assert not offenders, (
+        f"{offenders} are flowed at run time but not annotated Lazy[T]. "
+        "An auto-flow walker would build them eagerly — for a slot needing a runtime "
+        "kwarg (or a positional runtime arg) that raises; for the rest it silently "
+        "discards the deferral."
+    )
+
+
 def _model_slot_annotations() -> Dict[str, str]:
     """``{module filename: source text of the ``model`` ctor param's annotation}``.
 

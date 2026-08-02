@@ -223,6 +223,98 @@ def test_reporting_is_off_by_default() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The three transformers objects are DEFERRED SLOTS
+# ---------------------------------------------------------------------------
+# All three were constructed inline until 2026-08-02. `TrainingArguments` alone takes ~100
+# knobs and this class restates seven — while this is the backend that swaps the MOST, so
+# unreachable knobs cost the most here. The targets are STRING paths so declaring the slots
+# does not drag `transformers` into module import.
+
+
+def test_the_transformers_objects_are_deferred_slots() -> None:
+    assert {"test_loader", "training_arguments", "trainer"} <= lazy_param_names(HuggingFaceClassifier)
+
+    clf = HuggingFaceClassifier(model=_NO_MODEL)
+
+    for name in ("test_loader", "training_arguments", "trainer"):
+        assert isinstance(getattr(clf, name), Fluid), f"{name} must stay deferred"
+
+
+def test_declaring_the_slots_does_not_import_transformers() -> None:
+    """The string targets are load-bearing: this module has no top-level `import transformers`.
+
+    Read from SOURCE rather than by probing `sys.modules` — the suite has already imported
+    transformers by the time this runs, so a probe would pass vacuously.
+    """
+    import inspect
+
+    import sonair.huggingface_classifier as module
+
+    source = inspect.getsource(module)
+    top_level = [line for line in source.splitlines() if line.startswith(("import transformers", "from transformers"))]
+
+    assert not top_level, f"module-level transformers import: {top_level}"
+    assert 'LazyClass(\n            "transformers.TrainingArguments"' in source or (
+        'LazyClass("transformers.TrainingArguments"' in source
+    )
+
+
+def test_a_wired_training_argument_reaches_the_built_object(tmp_path: Path) -> None:
+    """Gradient accumulation, warmup, fp16 — none is a sonair knob, and none needs to be."""
+    from confluid import LazyClass
+
+    clf = HuggingFaceClassifier(model=_NO_MODEL, output_dir=str(tmp_path))
+    clf.training_arguments = LazyClass(
+        "transformers.TrainingArguments",
+        num_train_epochs=3,
+        gradient_accumulation_steps=4,
+        warmup_steps=10,
+    )
+
+    args = clf._training_arguments()
+
+    assert args.gradient_accumulation_steps == 4 and args.warmup_steps == 10
+    assert args.num_train_epochs == 3
+    assert str(args.output_dir) == str(tmp_path), "output_dir is the run's, injected at flow time"
+
+
+def test_a_wired_trainer_slot_reaches_the_built_object(tmp_path: Path) -> None:
+    """The whole `Trainer` is replaceable — the canonical reason being a `compute_loss` override.
+
+    Such a subclass adds no ``__init__`` of its own, so confluid reads the inherited
+    ``Trainer`` signature and every run-supplied kwarg still lands.
+    """
+    import transformers
+    from confluid import LazyClass
+
+    class _CustomLossTrainer(transformers.Trainer):
+        def compute_loss(self, model: Any, inputs: Any, *args: Any, **kwargs: Any) -> Any:
+            return super().compute_loss(model, inputs, *args, **kwargs)
+
+    clf = HuggingFaceClassifier(model=_TinyHF(), output_dir=str(tmp_path))
+    clf.trainer = LazyClass(_CustomLossTrainer)
+
+    trainer = clf._build_trainer(train=_records(4))
+
+    assert isinstance(trainer, _CustomLossTrainer)
+    assert trainer.data_collator == clf._to_hf_batch, "the run-supplied kwargs still arrive"
+
+
+def test_the_predict_loader_comes_from_the_deferred_slot() -> None:
+    """The same construction every other torch backend uses — so `drop_last` is a knob here too."""
+    from confluid import LazyClass
+    from recordstream import collate_records
+    from torch.utils.data import DataLoader
+
+    clf = HuggingFaceClassifier(model=_NO_MODEL, batch_size=2)
+    clf.test_loader = LazyClass(DataLoader, batch_size=1, drop_last=True, collate_fn=collate_records)
+
+    loader = clf._record_loader(_records(4))
+
+    assert loader.batch_size == 1 and loader.drop_last is True
+
+
+# ---------------------------------------------------------------------------
 # Task-shaped defaults
 # ---------------------------------------------------------------------------
 

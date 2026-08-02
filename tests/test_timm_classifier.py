@@ -90,6 +90,34 @@ def test_backbone_property_validates_lazily() -> None:
         _ = TimmModel(model_name=TEST_MODEL, num_classes=0, pretrained=False).backbone
 
 
+def test_flowing_a_LIVE_model_builds_it() -> None:
+    """A model that never went through a marker is still built by ``flow()``.
+
+    This is the confluid contract every backend relies on rather than a timm detail: a model
+    wired ``!class:sonair.TimmModel()`` (eager, parens) or constructed in Python reaches a
+    trainer already live, and `flow()` fires `solidify()` on its pass-through so the backbone
+    exists before an optimizer reads `parameters()`. Without it the failure lands far away, as
+    *"optimizer got an empty parameter list"* — which is exactly how it was found.
+    """
+    from confluid import flow
+
+    live = TimmModel(model_name=TEST_MODEL, num_classes=4, pretrained=False)
+    assert list(live.parameters()) == []  # a bare constructor does no functional work
+
+    assert flow(live) is live, "a live object flows to itself"
+    assert sum(p.numel() for p in live.parameters()) > 0, "...and is built on the way through"
+
+
+def test_flow_solidify_false_leaves_a_live_model_unbuilt() -> None:
+    """The cheap-introspection path must stay cheap for a live model too."""
+    from confluid import flow
+
+    live = TimmModel(model_name=TEST_MODEL, num_classes=4, pretrained=False)
+
+    assert flow(live, solidify=False) is live
+    assert list(live.parameters()) == []
+
+
 # --- Input validation ------------------------------------------------------
 
 

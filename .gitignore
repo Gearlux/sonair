@@ -37,9 +37,20 @@ logs/
 # `save_dir` / `filename` / `fname` / `checkpoint_dir` / `export_dir` before
 # adding a backend, and add its path here in the same change.
 lightning_logs/
+# The marainer tracker default: `save_dir` is declared ONCE on the `Tracker` ABC as
+# "./runs", so every backend (csv / tensorboard / mlflow / aim / clearml / wandb) lands
+# here when a config omits it — and wandb nests its own directory inside, so this one
+# entry covers all of them. A tracker pointed at an explicit `save_dir` (the example
+# config's ./lightning_logs, or a $VAR outside the repo) never reaches it.
+runs/
 keras_logs/
 tensorflow_logs/
 fastai_logs/
+# `examples/sweep/run_sweep.sh` writes here: the per-run training logs it names in its
+# summary, the file-backed trackers' output (`--tracker csv` / `tensorboard` / `aim`), the
+# TensorFlow SavedModel export and the HuggingFace Trainer's state. All of it is a sweep's
+# by-product; the RESULTS live in whichever tracker the sweep was pointed at.
+sweep_logs/
 torch_runs/
 hf_runs/
 exported/

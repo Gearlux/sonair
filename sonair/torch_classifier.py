@@ -53,8 +53,8 @@ from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, outp
 from confluid.registry import resolve_class
 from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
-from marainer.run_names import generate_run_name
-from marainer.torch import build_metric_collection, scalar_metrics
+from marainer.run_names import generate_run_name, run_prefix
+from marainer.torch import Device, build_metric_collection, resolve_device, scalar_metrics
 from marainer.tracking.base import Tracker, as_tracker_list
 from marainer.tracking.provenance import capture_log_file
 from marainer.tracking.render import render_matrix_as_figure, render_matrix_as_table
@@ -69,6 +69,7 @@ from recordstream import (
     classification_output,
     collate_records,
     ensure_record_dataset,
+    first_value,
     inverse_frequency_weights,
     is_class_id,
     iter_key,
@@ -89,41 +90,18 @@ logger = get_logger(__name__)
 #: backend uses, because the verb is a property of the TASK, not of the engine.
 ClassifierTask = Literal["fit", "evaluate", "test", "predict"]
 
-#: Where the run executes. ``"auto"`` prefers CUDA, then Apple's MPS, then CPU — the order a
-#: ``Trainer`` would have chosen for you, written out because there is no Trainer.
-Device = Literal["auto", "cpu", "cuda", "mps"]
-
 #: What a metrics slot admits: a ``{name: template}`` mapping, a ready-made collection, or
 #: ``None`` for "not chosen". Declared here rather than imported from the Lightning backend for
 #: the reason this whole module exists — that import would pull ``pytorch_lightning`` into a
 #: deliberately framework-free one (``test_it_needs_no_training_framework`` scans for exactly it).
 MetricsSpec = Optional[Union[Dict[str, Union[Metric, LazyClass[Metric]]], MetricCollection]]
 
+#: Re-exported so ``TorchClassifier``'s ``device`` knob can be read from this module the way
+#: every other name in its signature can. It is marainer's (``marainer.torch.device``): a
+#: ``Trainer`` picks an accelerator for you, a hand-written loop has to pick one itself, and
+#: every such loop picks identically — so the choice is a torch-platform helper, not this
+#: backend's private function.
 __all__ = ["ClassifierTask", "Device", "TorchClassifier"]
-
-
-def _first_target(source: Any, target_key: str) -> Any:
-    """The first non-``None`` target in ``source`` — one peek is enough to know the label kind."""
-    for target in iter_key(source, target_key):
-        if target is not None:
-            return target
-    return None
-
-
-def _resolve_device(choice: Device) -> torch.device:
-    """``"auto"`` -> the best device actually present; anything else taken at its word.
-
-    Explicit rather than clever: an operator who wrote ``device: cpu`` to compare against a GPU
-    run gets CPU, and one who wrote ``cuda`` on a machine without it gets torch's own error
-    rather than a silent fallback that makes the benchmark meaningless.
-    """
-    if choice != "auto":
-        return torch.device(choice)
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
 
 
 @configurable(task="classification", role="trainer", framework="torch")
@@ -204,7 +182,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         self.max_epochs = max_epochs
         self.batch_size = batch_size
         self.experiment_name = experiment_name
-        self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
+        self.run_name = run_name if run_name is not None else generate_run_name(prefix=run_prefix(task))
         self.input_key = str(input_key)
         self.target_key = str(target_key)
         self.label_map = label_map
@@ -266,7 +244,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
     # ---- setup -------------------------------------------------------------- #
     def initialize(self) -> None:
         """Resolve labels and ``num_classes``, build the model, and place everything on a device."""
-        self._device = _resolve_device(self.device_choice)
+        self._device = resolve_device(self.device_choice)
         logger.info(f"sonair torch backend on {self._device}.")
         if self.task == "fit":
             self._initialize_fit()
@@ -277,15 +255,12 @@ class TorchClassifier(TorchRunner, ProgressReporting):
                 f"TorchClassifier.model must be a torch.nn.Module, got {type(self.model).__name__}. "
                 "Wire `!lazy:sonair.TimmModel` (or any nn.Module) into the model slot."
             )
-        # Build a model that arrived LIVE. `flow()` fires `solidify()` when it materializes a
-        # deferred spec, and returns a live object untouched — so a config wiring
-        # `!class:sonair.TimmModel` (or handing one in from Python) reaches here with an unbuilt
-        # backbone and NO parameters, and the optimizer then dies with *"optimizer got an empty
-        # parameter list"* (hit for real). Lazy models are already built by the flow above, so
-        # the second call is the free cache hit `solidify()` is written to be.
-        build = getattr(self.model, "solidify", None)
-        if callable(build):
-            build()
+        # The model is BUILT by the `flow()` above, whether it arrived deferred or live —
+        # confluid fires `solidify()` on its idempotency pass-through too (2026-08-02), so a
+        # config wiring `!class:sonair.TimmModel()` (or a model handed in from Python) no longer
+        # reaches the optimizer with an unbuilt backbone and NO parameters. That used to need a
+        # `getattr(self.model, "solidify", None)` dance here, i.e. this backend re-implementing
+        # confluid's own hook; the fix belonged in `flow()`, which had always promised it.
         self.model.to(self._device)
         # The loss moves too, and it is not decoration: a balanced `CrossEntropyLoss` holds its
         # class weights in a BUFFER, and a CPU buffer against CUDA logits raises mid-batch.
@@ -308,7 +283,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
 
         # `iter_key` unwraps a MultiLabel to its list of values, so a sequence here IS a
         # multi-label target — the item type, not a guess about what a list might mean.
-        first = _first_target(self.train_set, self.target_key)
+        first = first_value(self.train_set, self.target_key)
         self.multilabel = isinstance(first, (list, tuple, set))
         probe = next(iter(first), None) if self.multilabel else first
         targets_are_names = probe is not None and not is_class_id(probe)
@@ -366,7 +341,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         self.num_classes = int(nc)
         if self.test_set is not None:
             dataset = ensure_record_dataset(self.test_set)
-            first = _first_target(dataset, self.target_key)
+            first = first_value(dataset, self.target_key)
             self.multilabel = isinstance(first, (list, tuple, set))
             probe = next(iter(first), None) if self.multilabel else first
             if probe is not None and not is_class_id(probe):
@@ -736,7 +711,3 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         if self.label_map is not None:
             return list(self.label_map.class_names)
         return list(self._class_names or [])
-
-
-def _run_prefix(task: str) -> str:
-    return {"fit": "train", "predict": "predict"}.get(task, "evaluate")

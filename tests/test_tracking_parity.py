@@ -171,14 +171,21 @@ def test_a_list_valued_callbacks_key_reaches_the_slot(stem: str) -> None:
     """The same annotation gate `trackers` needed: a LIST only lands on a list-admitting slot.
 
     Checked on the ANNOTATION rather than by building each backend, because most need a
-    framework a default install lacks — and a bare `List[...]` assigned post-construction is
+    framework a default install lacks — and a bare attribute assigned post-construction is
     exactly the shape that silently swallowed the key before.
+
+    `List` and `Iterable` both satisfy confluid's gate (measured against
+    `engine._classify_annotation`, which reports `list` for either), but only `List[X]`
+    carries `X` through `to_pydantic` — an `Iterable[X]` field converts to a bare `Any`
+    whatever `X` is, so the element type reaches no form spec. That is why these slots are
+    spelled `List[...]` while `trackers` keeps its `Union[Lazy[T], Iterable[Lazy[T]]]` shape:
+    there the single-tracker arm is what carries the type.
     """
     for node in ast.walk(ast.parse(module_source(stem))):
         if isinstance(node, ast.FunctionDef) and node.name == "__init__":
             annotations = {arg.arg: ast.unparse(arg.annotation) for arg in node.args.args if arg.annotation is not None}
             assert "callbacks" in annotations, f"{stem} cannot wire framework callbacks from config"
-            assert "Iterable" in annotations["callbacks"], (
-                f"{stem}: `callbacks` must admit an iterable, or confluid will not broadcast a "
+            assert any(c in annotations["callbacks"] for c in ("List", "Iterable")), (
+                f"{stem}: `callbacks` must admit a list, or confluid will not broadcast a "
                 f"list-valued key into it (got {annotations['callbacks']})"
             )

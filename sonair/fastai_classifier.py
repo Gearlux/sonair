@@ -59,12 +59,13 @@ from fastai import optimizer as fastai_optimizer
 # delegation to the MODEL and raises `'TimmModel' object has no attribute 'fit_one_cycle'`
 # (hit for real). Do not "tidy" this away.
 from fastai.callback import schedule  # noqa: F401
+from fastai.callback.core import Callback as FastaiCallback
 from fastai.data.core import DataLoaders
 from fastai.learner import Learner
 from fastai.losses import BCEWithLogitsLossFlat, CrossEntropyLossFlat
 from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
-from marainer.run_names import generate_run_name
+from marainer.run_names import generate_run_name, run_prefix
 from marainer.tracking.base import Tracker, as_tracker_list
 from marainer.tracking.provenance import capture_log_file, log_run_context
 from recordstream import (
@@ -78,6 +79,7 @@ from recordstream import (
     classification_output,
     collate_records,
     ensure_record_dataset,
+    first_value,
     is_class_id,
     iter_key,
     multi_hot,
@@ -101,19 +103,13 @@ FastaiMetric = Union[str, Callable[..., Any]]
 #: A fastai optimizer FUNCTION (``fastai.optimizer.Adam`` and friends) or its name.
 FastaiOptimizer = Union[str, Callable[..., Any]]
 
+#: What the ``loss`` slot admits: any callable over ``(predictions, targets)``. Deliberately
+#: NOT ``torch.nn.Module`` — the ``*Flat`` family a fastai config reaches for are
+#: ``fastai.losses.BaseLoss`` OBJECTS holding the real loss in ``.func``, not modules — while a
+#: plain ``torch.nn`` loss satisfies the same call and a ``Learner`` takes either.
+FastaiLoss = Callable[..., Any]
+
 __all__ = ["ClassifierTask", "FastaiClassifier"]
-
-
-def _first_target(source: Any, target_key: str) -> Any:
-    """The first non-``None`` target in ``source`` — one peek is enough to know the label kind."""
-    for target in iter_key(source, target_key):
-        if target is not None:
-            return target
-    return None
-
-
-def _run_prefix(task: str) -> str:
-    return {"fit": "train", "predict": "predict"}.get(task, "evaluate")
 
 
 @configurable(task="classification", role="trainer", framework="torch")
@@ -155,6 +151,12 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is
             no ``train_metrics``: a fastai ``Learner`` computes its metrics on the validation
             pass only.
+
+    Post-construction slots (YAML / broadcasting): ``train/val/test_loader`` (the torch
+    ``DataLoader``s), ``dataloaders`` (fastai's ``DataLoaders`` around them — its ``path``),
+    ``learner`` (every ``Learner`` knob this class does not restate: ``splitter``,
+    ``model_dir``, ``moms``, ``wd_bn_bias``, ``train_bn``, ``default_cbs``),
+    ``predictions_sink``, ``metrics_sidecar_path``.
     """
 
     def __init__(
@@ -169,7 +171,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         batch_size: int = 32,
         num_workers: int = 0,
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
-        callbacks: Optional[Iterable[Any]] = None,
+        callbacks: Optional[List[Lazy[FastaiCallback]]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -179,7 +181,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         one_cycle: bool = True,
         weight_decay: Optional[float] = None,
         opt_func: FastaiOptimizer = "Adam",
-        loss: Optional[Any] = None,
+        loss: Optional[Lazy[FastaiLoss]] = None,
         metrics: Optional[Sequence[FastaiMetric]] = None,
         val_metrics: Optional[Sequence[FastaiMetric]] = None,
         test_metrics: Optional[Sequence[FastaiMetric]] = None,
@@ -202,9 +204,9 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         # Internal only: this backend's own tracking callback is appended at run time.
         # Stored VERBATIM like `trackers` (lazy-init): entries may be deferred `Fluid`
         # markers, and they are flowed where they are used.
-        self.callbacks: Optional[Iterable[Any]] = callbacks
+        self.callbacks: Optional[List[Lazy[FastaiCallback]]] = callbacks
         self.experiment_name = experiment_name
-        self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
+        self.run_name = run_name if run_name is not None else generate_run_name(prefix=run_prefix(task))
         self.input_key = str(input_key)
         self.target_key = str(target_key)
         self.label_map = label_map
@@ -232,11 +234,28 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         self.train_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=True, **loader_kw)
         self.val_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=False, **loader_kw)
         self.test_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=False, **loader_kw)
+        # fastai's own two objects, deferred for the same reason the loaders are: everything
+        # this backend CONSTRUCTS should be reachable from config. Both were built inline until
+        # 2026-08-02, which made every knob they take and this class does not restate — a
+        # `DataLoaders` `path` (what a `Learner` falls back to for its artifact directory), a
+        # `Learner`'s `moms` / `splitter` / `model_dir` / `wd_bn_bias` / `train_bn` —
+        # unreachable from YAML. (`DataLoaders(device=…)` is NOT among them and must not be
+        # advertised: its setter calls `dl.to(device)` on every loader, which a plain torch
+        # `DataLoader` has no method for — hence fastai's own `hasattr(loaders[0], 'to')` guard.)
+        #
+        # `DataLoaders(*loaders, path=…, device=…)` takes its loaders POSITIONALLY, so nothing a
+        # marker can carry could deliver them; `_dataloaders()` supplies them as `flow()`'s
+        # positional runtime args (confluid 0.3.0), the same channel `dataset=` uses for a
+        # loader. The `Learner`'s inputs all have keywords, so it takes only the ergonomic knobs
+        # here and gets the rest at flow time. `wd=None` IS fastai's own default, so passing it
+        # unconditionally is what the old `**({"wd": …} if … else {})` dance meant.
+        self.dataloaders: Lazy[DataLoaders] = LazyClass(DataLoaders)
+        self.learner: Lazy[Learner] = LazyClass(Learner, lr=learning_rate, wd=weight_decay)
         # Sentinels, for the same reason every other backend uses them: the right loss and
         # metrics depend on whether the targets are single- or multi-label, which is only known
         # once `initialize()` has peeked the data. A live default here could not be told apart
         # from a user's explicit choice.
-        self.loss: Optional[Any] = loss
+        self.loss: Optional[FastaiLoss] = cast(Optional[FastaiLoss], loss)
         self.metrics: Optional[Sequence[FastaiMetric]] = metrics
         # Per-split ADDITIONS, merged over `metrics` by the shared rule. There is no
         # `train_metrics`, and that is a fastai fact rather than an omission: a `Learner`
@@ -288,7 +307,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         if self.test_set is not None:
             self.test_set = ensure_record_dataset(self.test_set)
 
-        first = _first_target(self.train_set, self.target_key)
+        first = first_value(self.train_set, self.target_key)
         self.multilabel = isinstance(first, (list, tuple, set))
         probe = next(iter(first), None) if self.multilabel else first
         targets_are_names = probe is not None and not is_class_id(probe)
@@ -322,7 +341,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         if self.test_set is None:
             return
         dataset = ensure_record_dataset(self.test_set)
-        first = _first_target(dataset, self.target_key)
+        first = first_value(dataset, self.target_key)
         self.multilabel = isinstance(first, (list, tuple, set))
         probe = next(iter(first), None) if self.multilabel else first
         if probe is not None and not is_class_id(probe):
@@ -380,18 +399,21 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
 
         The loaders come from the deferred ``train_loader`` / ``val_loader`` slots, flowed with
         the ``dataset=`` that did not exist at construction — the same two lines the Lightning
-        backend's ``fit()`` writes.
+        backend's ``fit()`` writes — and the ``DataLoaders`` around them from its own deferred
+        slot, flowed with the two of them POSITIONALLY, since ``DataLoaders(*loaders, …)`` has
+        no keyword for them.
         """
         train_ds = ensure_record_dataset(self.train_set)
         train = flow(self.train_loader, dataset=train_ds)
         if self.val_set is not None:
-            return DataLoaders(train, flow(self.val_loader, dataset=ensure_record_dataset(self.val_set)))
+            valid = flow(self.val_loader, dataset=ensure_record_dataset(self.val_set))
+            return cast(DataLoaders, flow(self.dataloaders, train, valid))
         logger.warning(
             "No 'val_set' wired: fastai's Learner always validates, so the TRAINING data is being "
             "used for validation and the reported metrics measure fit, not generalization. Wire a "
             "'val_set' to get a real held-out score."
         )
-        return DataLoaders(train, flow(self.val_loader, dataset=train_ds))
+        return cast(DataLoaders, flow(self.dataloaders, train, flow(self.val_loader, dataset=train_ds)))
 
     # ---- the learner -------------------------------------------------------- #
     def _build_learner(self, dataloaders: DataLoaders, split: str = "val") -> Learner:
@@ -401,20 +423,27 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         holds ONE list and computes it on the validation pass, so the split is decided by which
         entry point is building it (``fit`` validates, ``test`` scores the held-out split)
         rather than by anything inside the Learner.
+
+        Everything passed here is something only the RUN knows — the data, the flowed loss, the
+        resolved optimizer function, this split's metrics, the callbacks, the artifact path. The
+        ergonomic knobs (``lr`` / ``wd``) are already baked into the deferred ``learner`` slot,
+        and every knob neither names is whatever the config put there.
         """
         path = self._artifact_dir()
-        learner = Learner(
-            dataloaders,
-            self.model,
-            loss_func=flow(self.loss),
-            opt_func=_as_opt_func(self.opt_func),
-            lr=self.learning_rate,
-            metrics=[
-                _as_metric(m) for m in (merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or [])
-            ],
-            cbs=self._callbacks(),
-            path=Path(path) if path else None,
-            **({"wd": self.weight_decay} if self.weight_decay is not None else {}),
+        learner = cast(
+            Learner,
+            flow(
+                self.learner,
+                dls=dataloaders,
+                model=self.model,
+                loss_func=flow(self.loss),
+                opt_func=_as_opt_func(self.opt_func),
+                metrics=[
+                    _as_metric(m) for m in (merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or [])
+                ],
+                cbs=self._callbacks(),
+                path=Path(path) if path else None,
+            ),
         )
         self._learner = learner
         return learner

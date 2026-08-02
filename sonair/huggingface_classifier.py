@@ -37,14 +37,14 @@ Minimal flat YAML::
 """
 
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union, cast
 
 import numpy as np
 import torch
-from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
+from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
-from marainer.run_names import generate_run_name
+from marainer.run_names import generate_run_name, run_prefix
 from marainer.tracking.base import Tracker, as_tracker_list
 from marainer.tracking.provenance import capture_log_file, log_run_context
 from recordstream import (
@@ -58,13 +58,13 @@ from recordstream import (
     classification_output,
     collate_records,
     ensure_record_dataset,
+    first_value,
     is_class_id,
     iter_key,
     multi_hot,
 )
 from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint, run_entrypoint
 from torch.utils.data import DataLoader
-from torch.utils.data import Dataset as TorchDataset
 
 from sonair.huggingface_model import HuggingFaceModel
 from sonair.metric_slots import merge_metric_specs
@@ -89,19 +89,18 @@ HuggingFaceMetric = Union[str, Callable[[np.ndarray, np.ndarray], float]]
 #: ``import transformers`` this module deliberately defers to the methods that need it.
 HuggingFaceNetwork = Union[HuggingFaceModel, torch.nn.Module]
 
-__all__ = ["ClassifierTask", "HuggingFaceClassifier", "HuggingFaceNetwork"]
+#: What the ``callbacks`` slot holds. This is the ONE backend whose element type stays open,
+#: and for the same reason the union above names ``torch.nn.Module``: the honest type is
+#: ``transformers.TrainerCallback``, and naming it would force the module-level
+#: ``import transformers`` this module defers. Unlike the model slot there is no lighter
+#: standin — a ``TrainerCallback`` is a plain object with ``on_*`` hooks and inherits nothing
+#: importable from elsewhere — so the type lives in the docstring instead.
+HuggingFaceCallback = Any
 
+if TYPE_CHECKING:  # the deferred slots' real types, without the module-level import
+    from transformers import Trainer, TrainingArguments
 
-def _first_target(source: Any, target_key: str) -> Any:
-    """The first non-``None`` target in ``source`` — one peek is enough to know the label kind."""
-    for target in iter_key(source, target_key):
-        if target is not None:
-            return target
-    return None
-
-
-def _run_prefix(task: str) -> str:
-    return {"fit": "train", "predict": "predict"}.get(task, "evaluate")
+__all__ = ["ClassifierTask", "HuggingFaceCallback", "HuggingFaceClassifier", "HuggingFaceNetwork"]
 
 
 def _accuracy(logits: np.ndarray, labels: np.ndarray) -> float:
@@ -164,6 +163,12 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
             ``(logits, labels)``. ``None`` picks by target shape.
         val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is
             no ``train_metrics``: ``compute_metrics`` is the Trainer's EVALUATION hook.
+
+    Post-construction slots (YAML / broadcasting): ``training_arguments`` (every
+    ``transformers.TrainingArguments`` knob the ctor does not restate — gradient accumulation,
+    mixed precision, warmup, scheduler, …), ``trainer`` (the ``transformers.Trainer`` itself:
+    ``optimizers``, ``processing_class``, a Trainer SUBCLASS), ``test_loader`` (the record-dict
+    ``DataLoader`` :meth:`predict` walks), ``predictions_sink``, ``metrics_sidecar_path``.
     """
 
     def __init__(
@@ -178,7 +183,7 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         batch_size: int = 32,
         num_workers: int = 0,
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
-        callbacks: Optional[Iterable[Any]] = None,
+        callbacks: Optional[List[HuggingFaceCallback]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -208,9 +213,9 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         # Internal only: this backend's own tracking callback is appended at run time.
         # Stored VERBATIM like `trackers` (lazy-init): entries may be deferred `Fluid`
         # markers, and they are flowed where they are used.
-        self.callbacks: Optional[Iterable[Any]] = callbacks
+        self.callbacks: Optional[List[HuggingFaceCallback]] = callbacks
         self.experiment_name = experiment_name
-        self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
+        self.run_name = run_name if run_name is not None else generate_run_name(prefix=run_prefix(task))
         self.input_key = str(input_key)
         self.target_key = str(target_key)
         self.label_map = label_map
@@ -229,6 +234,42 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         self.val_metrics: Optional[Sequence[HuggingFaceMetric]] = val_metrics
         self.test_metrics: Optional[Sequence[HuggingFaceMetric]] = test_metrics
         self.multilabel: bool = False
+        # The three transformers objects this backend constructs, all deferred so a config can
+        # reach every knob they take. `TrainingArguments` alone has ~100 of them (gradient
+        # accumulation, mixed precision, warmup, deepspeed, …) and this class restates SEVEN —
+        # while it swaps the MOST of any backend, so unreachable knobs cost the most here.
+        # Everything derivable at construction is baked; what only the run knows arrives as a
+        # flow kwarg (`output_dir=` reads `metrics_sidecar_path`, a post-construction slot).
+        #
+        # The targets are STRING paths, and that is load-bearing rather than stylistic: this
+        # module has no top-level `import transformers` (the methods that need it import it in
+        # their bodies), and confluid resolves a dotted target at flow time — so the slots stay
+        # declarable without dragging the library into every `import sonair`.
+        self.test_loader: Lazy[DataLoader[Any]] = LazyClass(
+            DataLoader,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=collate_records,
+        )
+        self.training_arguments: Lazy["TrainingArguments"] = LazyClass(
+            "transformers.TrainingArguments",
+            num_train_epochs=max_epochs,
+            per_device_train_batch_size=batch_size,
+            per_device_eval_batch_size=batch_size,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            dataloader_num_workers=num_workers,
+            # A generic map-style source is not a `datasets.Dataset`, so Trainer must not try to
+            # drop "unused" columns by inspecting the model signature — our collate already
+            # produces exactly the two keys the model takes.
+            remove_unused_columns=False,
+            report_to=report_to,
+            run_name=self.run_name,
+            disable_tqdm=True,
+            save_strategy="no",
+        )
+        self.trainer: Lazy["Trainer"] = LazyClass("transformers.Trainer")
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
         # Stored VERBATIM (lazy-init mandate: the constructor does no work). It may hold a
@@ -271,7 +312,7 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         if self.test_set is not None:
             self.test_set = ensure_record_dataset(self.test_set)
 
-        first = _first_target(self.train_set, self.target_key)
+        first = first_value(self.train_set, self.target_key)
         self.multilabel = isinstance(first, (list, tuple, set))
         probe = next(iter(first), None) if self.multilabel else first
         targets_are_names = probe is not None and not is_class_id(probe)
@@ -305,7 +346,7 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         if self.test_set is None:
             return
         dataset = ensure_record_dataset(self.test_set)
-        first = _first_target(dataset, self.target_key)
+        first = first_value(dataset, self.target_key)
         self.multilabel = isinstance(first, (list, tuple, set))
         probe = next(iter(first), None) if self.multilabel else first
         if probe is not None and not is_class_id(probe):
@@ -362,45 +403,32 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         Prediction pairs each output row with the metadata that travelled beside the image, and
         :meth:`_to_hf_batch` has already dropped it. So the predict path keeps the record dict
         and reads it with recordstream's generic readers, exactly as the other backends do.
+
+        The loader comes from the deferred ``test_loader`` slot, flowed with the ``dataset=``
+        that did not exist at construction — the same construction every other torch backend
+        uses, so ``pin_memory`` / ``drop_last`` / a sampler are config knobs here too.
         """
-        return DataLoader(
-            # `DataLoader` is duck-typed at RUN time (it needs `__getitem__`/`__len__`, which a
-            # map-style `Stream` has) but its stubs demand the nominal torch base, which a
-            # `Stream` deliberately does not inherit — that would put torch in recordstream's core.
-            cast("TorchDataset[Any]", ensure_record_dataset(source)),
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            collate_fn=collate_records,
-        )
+        return cast(DataLoader, flow(self.test_loader, dataset=ensure_record_dataset(source)))
 
     # ---- the Trainer -------------------------------------------------------- #
     def _training_arguments(self) -> Any:
-        """``TrainingArguments`` from the shared knobs — the flat config, in Trainer's words."""
-        from transformers import TrainingArguments
+        """``TrainingArguments`` from the shared knobs — the flat config, in Trainer's words.
 
-        return TrainingArguments(
-            output_dir=self._output_dir(),
-            num_train_epochs=self.max_epochs,
-            per_device_train_batch_size=self.batch_size,
-            per_device_eval_batch_size=self.batch_size,
-            learning_rate=self.learning_rate,
-            weight_decay=self.weight_decay,
-            dataloader_num_workers=self.num_workers,
-            # A generic map-style source is not a `datasets.Dataset`, so Trainer must not try to
-            # drop "unused" columns by inspecting the model signature — our collate already
-            # produces exactly the two keys the model takes.
-            remove_unused_columns=False,
-            report_to=self.report_to,
-            run_name=self.run_name,
-            disable_tqdm=True,
-            save_strategy="no",
-        )
+        Every knob derivable at construction is already baked into the deferred slot; only
+        ``output_dir`` arrives here, because it reads ``metrics_sidecar_path``, which a config
+        may set after the constructor has run.
+        """
+        return flow(self.training_arguments, output_dir=self._output_dir())
 
     def _build_trainer(self, train: Any = None, evaluate: Any = None, split: str = "val") -> Any:
-        from transformers import Trainer
+        """Flow the ``Trainer`` with everything only the RUN knows.
 
-        return Trainer(
+        The model, the split datasets, the batch shape and this split's metric hook cannot be
+        config values — they are derived from the data or built per entry point — so they are
+        flow kwargs, and every other ``Trainer`` knob is whatever the config put on the slot.
+        """
+        return flow(
+            self.trainer,
             model=self._network(),
             args=self._training_arguments(),
             train_dataset=train,

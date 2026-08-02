@@ -27,6 +27,7 @@ Minimal flat YAML (top-level keys wired by Confluid broadcasting)::
 """
 
 import inspect
+from collections.abc import Mapping
 from typing import Any, Dict, Iterable, List, Literal, Optional, Union, cast
 
 import numpy as np
@@ -38,6 +39,7 @@ from confluid.registry import resolve_class
 from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
 from marainer.lightning import (
+    TrackerLogger,
     TrackingCallback,
     activate_for_lightning,
     attach_lightning_progress,
@@ -46,8 +48,8 @@ from marainer.lightning import (
     scalar_metrics,
 )
 from marainer.run_names import generate_run_name
-from marainer.tracking.base import Tracker
-from pytorch_lightning.loggers import Logger
+from marainer.tracking.base import Tracker, as_tracker_list
+from marainer.tracking.render import render_matrix_as_table
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -64,6 +66,7 @@ from recordstream import (
     iter_key,
     multi_hot,
 )
+from recordstream.ops.image import confusion_matrices_payload
 from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint, run_entrypoint
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
@@ -75,6 +78,11 @@ logger = get_logger(__name__)
 
 #: Which entry point :meth:`LightningClassifier.run` dispatches to.
 ClassifierTask = Literal["fit", "evaluate", "test", "predict"]
+
+#: What a metrics slot admits: a ``{name: template}`` mapping, a ready-made collection, or
+#: ``None`` for "not chosen". Named because FOUR slots share it (the shared set + one per split)
+#: and `to_pydantic` reads the annotation for navigaitor's form-spec / StreamStudio widgets.
+MetricsSpec = Optional[Union[Dict[str, Union[Metric, LazyClass[Metric]]], MetricCollection]]
 
 
 def _first_target(source: Any, target_key: str) -> Any:
@@ -127,7 +135,10 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             after ``fit`` when set).
         num_classes: Output class count; omit to resolve from the model or the dataset.
         task: Entry point :meth:`run` dispatches to — ``"fit"`` / ``"evaluate"`` / ``"test"`` / ``"predict"``.
-        max_epochs / batch_size / num_workers / logger: ergonomic flat-config knobs.
+        max_epochs / batch_size / num_workers: ergonomic flat-config knobs.
+        trackers: marainer trackers — one or a list. They ARE this run's metric sinks:
+            each is adapted to Lightning's logger interface, so there is no separate
+            `logger:` slot of `pytorch_lightning.loggers`.
         experiment_name / run_name: tracking identity.
         input_key: Record key carrying the model input image (default ``"image"``).
         target_key: Record key carrying the classification target (default ``"class"``).
@@ -136,10 +147,14 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             on the eval path).
         balance_classes: Inject inverse-frequency class weights into a weight-capable loss (``fit``).
         metrics: Single-metric templates flowed per split (default top-1 accuracy + macro F1).
+        train_metrics / val_metrics / test_metrics: That split's OWN templates, merged over
+            ``metrics`` — how a metric is added to one split only (a confusion matrix on
+            validation). Each slot holds the spec until :meth:`initialize` builds it, and the
+            live prefixed ``MetricCollection`` after.
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``optimizer``, ``train/val/test_loader``,
     ``lightning``, ``loss_fn``, ``predictions_sink``, ``metrics_sidecar_path``,
-    ``trackers`` (optional marainer :class:`~marainer.tracking.base.Tracker` list), ``log_system_metrics``.
+    ``log_system_metrics``.
     """
 
     def __init__(
@@ -152,14 +167,17 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         max_epochs: int = 10,
         batch_size: int = 32,
         num_workers: int = 0,
-        logger: Optional[Union[Logger, Iterable[Logger], bool]] = None,
+        trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
         target_key: str = "class",
         label_map: Optional[LabelMap] = None,
         balance_classes: bool = True,
-        metrics: Optional[dict[str, Metric | LazyClass[Metric]] | MetricCollection] = None,
+        metrics: MetricsSpec = None,
+        train_metrics: MetricsSpec = None,
+        val_metrics: MetricsSpec = None,
+        test_metrics: MetricsSpec = None,
     ) -> None:
         super().__init__()
         self.model: Lazy[nn.Module] = model
@@ -204,20 +222,30 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self.train_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=True, **loader_kw)
         self.val_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=False, **loader_kw)
         self.test_loader: Lazy[DataLoader[Any]] = LazyClass(DataLoader, shuffle=False, **loader_kw)
-        self.lightning: Lazy[L.Trainer] = LazyClass(L.Trainer, max_epochs=max_epochs, logger=logger)
+        # No `logger=` here: the trackers ARE the metric sinks, adapted to Lightning's logger
+        # interface in `_build_trainer` (a Tracker may still be a deferred Fluid at this point,
+        # so the adapter is built at run time, not now).
+        self.lightning: Lazy[L.Trainer] = LazyClass(L.Trainer, max_epochs=max_epochs)
         self.metrics: Any = metrics
         #: True once `initialize()` sees multi-label targets. Drives the loss/metric defaults,
         #: the multi-hot collate, and whether metrics size by `num_labels` or `num_classes`.
         self.multilabel: bool = False
-        self.train_metrics: Any = None
-        self.val_metrics: Any = None
-        self.test_metrics: Any = None
+        # Per-split slots, each dual-purpose the way `model` is: they hold that split's metrics
+        # SPEC until `initialize()` builds it, and the live prefixed `MetricCollection` after.
+        # `_metrics_built` is what tells the two states apart — `is None` cannot, once a slot
+        # may legitimately arrive carrying a spec.
+        self.train_metrics: Any = train_metrics
+        self.val_metrics: Any = val_metrics
+        self.test_metrics: Any = test_metrics
+        self._metrics_built: bool = False
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
-        self.trackers: Optional[List[Tracker]] = None
+        # Stored VERBATIM (lazy-init mandate: the constructor does no work). It may hold a
+        # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
+        # and flows it at run time.
+        self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
         self.log_system_metrics: bool = True
         self._class_names: Optional[List[str]] = None
-        self._trackers: List[Tracker] = []
 
     @property
     def __needs_autograd__(self) -> bool:  # type: ignore[override]  # dynamic per-task override of the marker
@@ -258,8 +286,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         loss: torch.Tensor = cast(nn.Module, self.loss_fn)(preds, y)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
         if isinstance(self.train_metrics, MetricCollection):
-            self.train_metrics(preds, y)
-            self.log_dict(self.train_metrics, on_step=True, on_epoch=False)
+            # The per-BATCH values, SCALARS only — `log_dict` cannot carry the rest (see
+            # `_report_epoch_metrics`), and a per-step confusion matrix says nothing anyway.
+            self.log_dict(scalar_metrics(self.train_metrics(preds, y)), on_step=True, on_epoch=False)
         return loss
 
     def on_train_epoch_end(self) -> None:
@@ -275,7 +304,6 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self.log("val/loss", loss, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
         if isinstance(self.val_metrics, MetricCollection):
             self.val_metrics.update(preds, y)
-            self.log_dict(self.val_metrics, on_step=False, on_epoch=True, batch_size=x.shape[0])
         return loss
 
     def test_step(self, batch: Any, batch_idx: int) -> Any:
@@ -283,7 +311,6 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         preds = self(x)
         if isinstance(self.test_metrics, MetricCollection):
             self.test_metrics.update(preds, self._targets(batch))
-            self.log_dict(self.test_metrics, on_step=False, on_epoch=True, batch_size=x.shape[0])
         if self.predictions_sink is not None:
             self._write_predictions(classification_output(preds), batch)
         return preds
@@ -299,6 +326,57 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         if self.predictions_sink is not None:
             self._write_predictions(out, batch)
         return out
+
+    # ---- epoch-end metric reporting ----------------------------------------- #
+    # An eval split's metrics are computed HERE rather than by handing the whole
+    # `MetricCollection` to `log_dict`, and the reason is that `log_dict` carries SCALARS
+    # only: Lightning reduces every logged value through `convert_tensors_to_scalars`, which
+    # raises *"does not contain a single element"* on an N×N confusion matrix — so a config
+    # wiring one used to kill the validation loop on the first epoch (measured). Which
+    # metrics are scalar cannot be decided when they are BUILT — it is a property of the
+    # COMPUTED value, and a fresh `MulticlassAUROC.compute()` raises where a fresh
+    # `MulticlassConfusionMatrix.compute()` returns a matrix, so no probe tells them apart
+    # up front. Computing once at epoch end does: the scalars go to `log_dict` exactly as
+    # before, the matrices are rendered.
+    #
+    # Reset happens at epoch START, not end, so the LAST epoch's state survives the run —
+    # `_write_metrics_sidecar` and the `computed_metrics` @output both `compute()` after
+    # `trainer.validate()` / `.test()` has returned.
+    def on_validation_epoch_start(self) -> None:
+        if isinstance(self.val_metrics, MetricCollection):
+            self.val_metrics.reset()
+
+    def on_validation_epoch_end(self) -> None:
+        self._report_epoch_metrics(self.val_metrics)
+
+    def on_test_epoch_start(self) -> None:
+        if isinstance(self.test_metrics, MetricCollection):
+            self.test_metrics.reset()
+
+    def on_test_epoch_end(self) -> None:
+        self._report_epoch_metrics(self.test_metrics)
+
+    def _report_epoch_metrics(self, collection: Any) -> None:
+        """Compute one split's metrics: scalars to ``log_dict``, confusion matrices reported.
+
+        Which computed values ARE confusion matrices is recordstream's rule
+        (:func:`~recordstream.ops.image.confusion_matrices_payload` — square 2-D, by SHAPE not
+        by metric name), and the table is marainer's renderer; this method only decides WHEN
+        and WHERE — the log always, plus every wired tracker's text channel, which is what
+        puts the matrix in MLflow / TensorBoard / Aim / ClearML beside the scalars.
+        """
+        if not isinstance(collection, MetricCollection):
+            return
+        values = collection.compute()
+        self.log_dict(scalar_metrics(values))
+        if self._trainer is not None and self.trainer.sanity_checking:
+            return  # two batches through an untrained model: a matrix nobody wants to read
+        step = self.current_epoch if self._trainer is not None else None
+        for payload in confusion_matrices_payload(values, self.class_names or None):
+            table = render_matrix_as_table(payload["name"], payload["counts"], payload["class_names"])
+            logger.info(table)
+            for tracker in self._live_trackers():
+                tracker.log_text(payload["name"], table, step=step)
 
     def configure_optimizers(self) -> Any:
         return flow(self.optimizer, params=self.parameters())
@@ -318,7 +396,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         trainer.fit(model=self, train_dataloaders=t_loader, val_dataloaders=v_loader)
         logger.info("Training complete.")
         self._class_names = class_names(train_ds, val_ds, test_ds)
-        save_class_names(self._class_names, checkpoint_dir(trainer), self._trackers)
+        save_class_names(self._class_names, checkpoint_dir(trainer), self._live_trackers())
 
         if test_ds is not None:
             trainer.test(model=self, dataloaders=flow(self.test_loader, dataset=test_ds))
@@ -361,15 +439,37 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             self.predictions_sink.close()
         self._write_metrics_sidecar(getattr(self, metrics_slot))
 
+    def _live_trackers(self) -> List[Tracker]:
+        """Normalize and flow the wired trackers ONCE, writing the result back to the slot.
+
+        Written back rather than returned fresh each call: ``flow()`` on a LIVE object returns
+        that same object (idempotent), but a deferred ``Fluid`` would be REBUILT on every call —
+        two MLflow runs for one training run. One attribute, flowed in place, is the same idiom
+        this class already uses for ``model`` / ``loss_fn`` / ``predictions_sink``.
+        """
+        # `flow()` resolves a marker to the live object, which the Lazy-typed slot cannot
+        # express — the cast says what the call guarantees.
+        self.trackers = [flow(t) for t in as_tracker_list(self.trackers) or []]
+        return cast(List[Tracker], self.trackers)
+
     def _build_trainer(self) -> L.Trainer:
-        """Flow the ``pl.Trainer`` and attach the OPTIONAL marainer tracking (a few lines; removable)."""
-        trainer = cast(L.Trainer, flow(self.lightning))
-        if self.trackers:
-            self._trackers = list(self.trackers)
+        """Flow the ``pl.Trainer`` and attach the OPTIONAL marainer tracking (a few lines; removable).
+
+        The trackers ARE the Trainer's loggers: each is flowed (it may still be a deferred
+        ``Fluid``) and adapted through ``TrackerLogger``, so Lightning's per-step metrics land
+        in the same backends as the provenance and the manifest. There is no separate
+        ``logger:`` slot — one wiring, one place a run's output goes.
+        """
+        trackers = self._live_trackers()
+        adapters = [TrackerLogger(t) for t in trackers]
+        # A runtime kwarg wins over the stored one, so an explicitly wired `lightning:` block
+        # keeps every knob it set and only gains the loggers.
+        trainer = cast(L.Trainer, flow(self.lightning, logger=adapters or False))
+        if trackers:
             # `runnable=self` rather than a params dict: marainer derives the hyperparameters
             # from the flowed object graph AND dumps the resolved config, so this backend and
             # the torch one cannot answer "what were the hyperparameters?" differently.
-            cb = TrackingCallback(self._trackers, runnable=self)
+            cb = TrackingCallback(trackers, runnable=self)
             trainer.callbacks.append(cb)  # type: ignore[attr-defined]
         attach_lightning_progress(trainer, self)
         if self.log_system_metrics:
@@ -440,11 +540,11 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             self._balance_loss(self.num_classes, raw_targets)
 
         self.model = flow(self.model, num_classes=self.num_classes)
-        if self.train_metrics is None:
-            base = build_metric_collection(self.metrics, **self._metric_dims())
-            self.train_metrics = base.clone(prefix="train/")
-            self.val_metrics = base.clone(prefix="val/")
-            self.test_metrics = base.clone(prefix="test/")
+        if not self._metrics_built:
+            self.train_metrics = self._build_split_metrics(self.train_metrics, "train/")
+            self.val_metrics = self._build_split_metrics(self.val_metrics, "val/")
+            self.test_metrics = self._build_split_metrics(self.test_metrics, "test/")
+            self._metrics_built = True
 
     def _initialize_eval(self) -> None:
         # The trained model's head is authoritative for eval — flow it first, read num_classes off it.
@@ -471,9 +571,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         setattr(self, eval_slot, dataset)
         metrics_slot = "val_metrics" if self.task == "evaluate" else "test_metrics"
         prefix = "val/" if self.task == "evaluate" else "test/"
-        if getattr(self, metrics_slot) is None:
-            base = build_metric_collection(self.metrics, **self._metric_dims())
-            setattr(self, metrics_slot, base.clone(prefix=prefix))
+        if not self._metrics_built:
+            setattr(self, metrics_slot, self._build_split_metrics(getattr(self, metrics_slot), prefix))
+            self._metrics_built = True
 
     def _walk_targets(self, source: Any) -> List[Any]:
         """Materialize the target column once, with a progress bar.
@@ -531,6 +631,23 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
                     "f1_macro": LazyClass[Metric](MulticlassF1Score, average="macro"),
                 }
             )
+
+    def _build_split_metrics(self, spec: Any, prefix: str) -> MetricCollection:
+        """One split's live, prefixed collection — its own spec MERGED over the shared one.
+
+        The two slots answer different questions: ``metrics`` is what every split measures,
+        ``<split>_metrics`` is what THIS split measures on top. Merging (rather than replacing)
+        is what lets a confusion matrix be added to the validation split alone without
+        restating the shared accuracy / F1 beside it — a same-named entry still shadows, so
+        the split can also override one. Merging needs both to be mappings; anything else (a
+        ready-made ``MetricCollection``, a list) REPLACES, because there is no key-wise way
+        to combine them and silently ignoring the split's spec would be worse.
+        """
+        if spec is None:
+            spec = self.metrics
+        elif isinstance(spec, Mapping) and isinstance(self.metrics, Mapping):
+            spec = {**self.metrics, **spec}
+        return build_metric_collection(spec, **self._metric_dims()).clone(prefix=prefix)
 
     def _metric_dims(self) -> dict[str, int]:
         """The sizing kwarg metric templates are flowed with.

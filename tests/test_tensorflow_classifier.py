@@ -340,35 +340,6 @@ def test_a_wired_val_set_is_scored_every_epoch(keras_module: Any) -> None:
 
 
 @requires_tensorflow
-def test_keras_callbacks_are_driven_by_hand(keras_module: Any, tmp_path: Path) -> None:
-    """A hand-written loop has no ``fit()`` to run callbacks, so it drives a ``CallbackList``.
-
-    ``CSVLogger`` is the check because it exercises the whole protocol — ``on_train_begin``
-    opens the file, ``on_epoch_end`` writes a row, ``on_train_end`` closes it. Its parent
-    directory is created for it, the same defence the Keras backend added after a real run died
-    minutes into training.
-    """
-    from recordstream import Stream
-
-    from sonair.tensorflow_classifier import TensorFlowClassifier
-
-    target = tmp_path / "not_yet" / "history.csv"
-    clf = TensorFlowClassifier(
-        model=_Shim(_dense_model(keras_module), 3),
-        train_set=Stream(source=_records(8)),
-        num_classes=3,
-        max_epochs=2,
-        batch_size=4,
-        logger=[keras_module.callbacks.CSVLogger(filename=str(target))],
-    )
-    clf.run()
-
-    rows = target.read_text().strip().splitlines()
-    assert rows[0].startswith("epoch,")
-    assert len(rows) == 3, "a header plus one row per epoch"
-
-
-@requires_tensorflow
 def test_shuffling_reshuffles_between_epochs(keras_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """``PyDataset.on_epoch_end`` is Keras's job under ``fit()`` and the loop's job here.
 

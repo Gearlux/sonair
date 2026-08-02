@@ -43,8 +43,9 @@ Run it with ``sonair train cfg.yaml --framework torch``.
 """
 
 import inspect
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Union, cast
+from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Union, cast
 
 import numpy as np
 import torch
@@ -55,8 +56,9 @@ from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
 from marainer.run_names import generate_run_name
 from marainer.torch import build_metric_collection, scalar_metrics
-from marainer.tracking.base import Tracker
+from marainer.tracking.base import Tracker, as_tracker_list
 from marainer.tracking.provenance import capture_log_file
+from marainer.tracking.render import render_matrix_as_table
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -73,6 +75,7 @@ from recordstream import (
     iter_key,
     multi_hot,
 )
+from recordstream.ops.image import confusion_matrices_payload
 from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint, run_entrypoint
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
@@ -88,6 +91,12 @@ ClassifierTask = Literal["fit", "evaluate", "test", "predict"]
 #: Where the run executes. ``"auto"`` prefers CUDA, then Apple's MPS, then CPU — the order a
 #: ``Trainer`` would have chosen for you, written out because there is no Trainer.
 Device = Literal["auto", "cpu", "cuda", "mps"]
+
+#: What a metrics slot admits: a ``{name: template}`` mapping, a ready-made collection, or
+#: ``None`` for "not chosen". Declared here rather than imported from the Lightning backend for
+#: the reason this whole module exists — that import would pull ``pytorch_lightning`` into a
+#: deliberately framework-free one (``test_it_needs_no_training_framework`` scans for exactly it).
+MetricsSpec = Optional[Union[Dict[str, Union[Metric, LazyClass[Metric]]], MetricCollection]]
 
 __all__ = ["ClassifierTask", "Device", "TorchClassifier"]
 
@@ -138,6 +147,10 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         label_map: Pin the name-to-id encoding instead of fitting it from the train targets.
         balance_classes: Inject inverse-frequency class weights into a weight-capable loss.
         metrics: torchmetrics templates, flowed per split. ``None`` picks by target shape.
+        train_metrics / val_metrics / test_metrics: That split's OWN templates, merged over
+            ``metrics`` — how a metric is added to one split only (a confusion matrix on
+            validation). Each slot holds the spec until :meth:`initialize` builds it, and the
+            live prefixed ``MetricCollection`` after.
         device: Where to run — see :data:`Device`.
         checkpoint_dir: Directory for ``model.pt`` (a plain ``state_dict``) and the run's
             ``class_names.json``. ``None`` writes no weights, which is what a smoke run wants.
@@ -164,10 +177,14 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         target_key: str = "class",
         label_map: Optional[LabelMap] = None,
         balance_classes: bool = True,
-        metrics: Optional[Union[Dict[str, Union[Metric, LazyClass[Metric]]], MetricCollection]] = None,
+        metrics: MetricsSpec = None,
+        train_metrics: MetricsSpec = None,
+        val_metrics: MetricsSpec = None,
+        test_metrics: MetricsSpec = None,
         device: Device = "auto",
         checkpoint_dir: Optional[str] = None,
         grad_clip: Optional[float] = None,
+        trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
     ) -> None:
         super().__init__()
         # `nn.Module`, not `Lazy[nn.Module]`: the DEFERRED-ness is declared once, on the ctor
@@ -211,12 +228,19 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         self.loss_fn: Optional[Lazy[nn.Module]] = None
         self.metrics: Any = metrics
         self.multilabel: bool = False
-        self.train_metrics: Optional[MetricCollection] = None
-        self.val_metrics: Optional[MetricCollection] = None
-        self.test_metrics: Optional[MetricCollection] = None
+        # Dual-purpose the way `model` is: that split's metrics SPEC until `initialize()` builds
+        # it, the live prefixed collection after. `_metrics_built` tells the two states apart —
+        # `is None` cannot, once a slot may legitimately arrive carrying a spec.
+        self.train_metrics: Any = train_metrics
+        self.val_metrics: Any = val_metrics
+        self.test_metrics: Any = test_metrics
+        self._metrics_built: bool = False
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
-        self.trackers: Optional[List[Tracker]] = None
+        # Stored VERBATIM (lazy-init mandate: the constructor does no work). It may hold a
+        # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
+        # and flows it at run time.
+        self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
         self._class_names: Optional[List[str]] = None
         self._history: Dict[str, List[float]] = {}
         self._computed_metrics: Dict[str, float] = {}
@@ -317,10 +341,11 @@ class TorchClassifier(TorchRunner, ProgressReporting):
             self._balance_loss(self.num_classes, raw_targets)
 
         self.model = flow(self.model, num_classes=self.num_classes)
-        base = build_metric_collection(self.metrics, **self._metric_dims())
-        self.train_metrics = base.clone(prefix="train/")
-        self.val_metrics = base.clone(prefix="val/")
-        self.test_metrics = base.clone(prefix="test/")
+        if not self._metrics_built:
+            self.train_metrics = self._build_split_metrics(self.train_metrics, "train/")
+            self.val_metrics = self._build_split_metrics(self.val_metrics, "val/")
+            self.test_metrics = self._build_split_metrics(self.test_metrics, "test/")
+            self._metrics_built = True
 
     def _initialize_eval(self) -> None:
         """Model-driven setup: the trained head's width is authoritative, not the eval split's.
@@ -349,8 +374,9 @@ class TorchClassifier(TorchRunner, ProgressReporting):
             self.test_set = dataset
             self._class_names = class_names(dataset)
         self._resolve_task_defaults()
-        base = build_metric_collection(self.metrics, **self._metric_dims())
-        self.test_metrics = base.clone(prefix="test/")
+        if not self._metrics_built:
+            self.test_metrics = self._build_split_metrics(self.test_metrics, "test/")
+            self._metrics_built = True
 
     def _resolve_task_defaults(self) -> None:
         """Fill the ``loss_fn`` / ``metrics`` sentinels once the target shape is known.
@@ -375,6 +401,21 @@ class TorchClassifier(TorchRunner, ProgressReporting):
                     "f1_macro": LazyClass[Metric](MulticlassF1Score, average="macro"),
                 }
             )
+
+    def _build_split_metrics(self, spec: Any, prefix: str) -> MetricCollection:
+        """One split's live, prefixed collection — its own spec MERGED over the shared one.
+
+        Identical rule to the Lightning backend, and that is the point: ``metrics`` is what
+        every split measures, ``<split>_metrics`` what THIS split measures on top, so a
+        confusion matrix can be added to validation alone without restating the shared
+        accuracy / F1. A same-named entry shadows; a non-mapping spec (a ready-made
+        ``MetricCollection``, a list) REPLACES, because there is no key-wise way to merge it.
+        """
+        if spec is None:
+            spec = self.metrics
+        elif isinstance(spec, Mapping) and isinstance(self.metrics, Mapping):
+            spec = {**self.metrics, **spec}
+        return build_metric_collection(spec, **self._metric_dims()).clone(prefix=prefix)
 
     def _metric_dims(self) -> Dict[str, int]:
         """The sizing kwarg metric templates are flowed with.
@@ -489,11 +530,31 @@ class TorchClassifier(TorchRunner, ProgressReporting):
                 metrics.update(logits, y)
         return total / batches if batches else float("nan")
 
-    def _epoch_metrics(self, collection: Optional[MetricCollection]) -> Dict[str, float]:
-        """Compute and RESET a split's metrics — the bookkeeping a ``Trainer`` hides."""
+    def _epoch_metrics(
+        self,
+        collection: Optional[MetricCollection],
+        trackers: Sequence[Tracker] = (),
+        step: Optional[int] = None,
+    ) -> Dict[str, float]:
+        """Compute and RESET a split's metrics — the bookkeeping a ``Trainer`` hides.
+
+        Only the SCALARS are RETURNED: they go on to `Tracker.log_metrics`, which is a
+        `{name: float}` channel in every backend. A non-scalar metric (an N×N confusion
+        matrix) has no place there and would otherwise vanish silently, so it takes the
+        other route — rendered into the log and pushed to each tracker's `log_text`, which
+        is the channel that exists for exactly this. recordstream decides which computed
+        values ARE confusion matrices (square 2-D, by SHAPE not by metric name), marainer
+        renders the table.
+        """
         if collection is None:
             return {}
-        values = scalar_metrics(collection.compute())
+        computed = collection.compute()
+        for payload in confusion_matrices_payload(computed, self._class_names or None):
+            table = render_matrix_as_table(payload["name"], payload["counts"], payload["class_names"])
+            logger.info(table)
+            for tracker in trackers:
+                tracker.log_text(payload["name"], table, step=step)
+        values = scalar_metrics(computed)
         collection.reset()
         return values
 
@@ -513,10 +574,10 @@ class TorchClassifier(TorchRunner, ProgressReporting):
 
         for epoch in range(self.max_epochs):
             logs: Dict[str, float] = {"train/loss": self._train_epoch(train_loader, optimizer)}
-            logs.update(self._epoch_metrics(self.train_metrics))
+            logs.update(self._epoch_metrics(self.train_metrics, trackers, epoch))
             if loaders["val"] is not None:
                 logs["val/loss"] = self._eval_epoch(cast(DataLoader[Any], loaders["val"]), self.val_metrics)
-                logs.update(self._epoch_metrics(self.val_metrics))
+                logs.update(self._epoch_metrics(self.val_metrics, trackers, epoch))
             for tracker in trackers:
                 tracker.log_metrics(logs, step=epoch)
             for key, value in logs.items():
@@ -549,9 +610,10 @@ class TorchClassifier(TorchRunner, ProgressReporting):
 
     def _score(self, loader: DataLoader[Any]) -> Dict[str, float]:
         """Evaluate over ``loader`` and report — shared by ``test`` and the post-fit test pass."""
+        trackers = self._live_trackers()
         results = {"test/loss": self._eval_epoch(loader, self.test_metrics)}
-        results.update(self._epoch_metrics(self.test_metrics))
-        for tracker in self._live_trackers():
+        results.update(self._epoch_metrics(self.test_metrics, trackers))
+        for tracker in trackers:
             tracker.log_metrics(results)
         logger.info(f"Evaluation complete: {results}")
         return results
@@ -605,7 +667,17 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         logger.info(f"Saved weights to {path}")
 
     def _live_trackers(self) -> List[Tracker]:
-        return [flow(t) for t in (self.trackers or [])]
+        """Normalize and flow the wired trackers ONCE, writing the result back to the slot.
+
+        Written back rather than returned fresh each call: ``flow()`` on a LIVE object returns
+        that same object (idempotent), but a deferred ``Fluid`` would be REBUILT on every call —
+        two MLflow runs for one training run. One attribute, flowed in place, is the same idiom
+        this class already uses for ``model`` / ``loss_fn`` / ``predictions_sink``.
+        """
+        # `flow()` resolves a marker to the live object, which the Lazy-typed slot cannot
+        # express — the cast says what the call guarantees.
+        self.trackers = [flow(t) for t in as_tracker_list(self.trackers) or []]
+        return cast(List[Tracker], self.trackers)
 
     def _log_run_context(self, trackers: List[Tracker]) -> Any:
         """Provenance through marainer's plain FUNCTIONS — hookup style (1).

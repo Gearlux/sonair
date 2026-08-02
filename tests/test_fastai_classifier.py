@@ -10,7 +10,6 @@ Skipped when fastai is not installed — it is a selectable backend (``sonair[fa
 core dependency.
 """
 
-from pathlib import Path
 from typing import Any, List, Tuple, cast
 
 import numpy as np
@@ -380,28 +379,6 @@ def test_a_wired_val_set_is_used_for_validation() -> None:
 
     assert dataloaders.valid.dataset is not dataloaders.train.dataset
     assert len(dataloaders.valid.dataset) == 4
-
-
-def test_a_wired_callback_gets_its_parent_directory_created(tmp_path: Path) -> None:
-    """fastai's ``CSVLogger`` opens ``learn.path/fname`` without creating it — the same failure
-    the Keras backend guards, and it lands minutes into a run rather than at the start."""
-    from fastai.callback.progress import CSVLogger
-
-    clf = FastaiClassifier(
-        model=_Tiny(),
-        train_set=_stream(_records(8)),
-        val_set=_stream(_records(8)),
-        num_classes=3,
-        max_epochs=1,
-        batch_size=4,
-        logger=[CSVLogger(fname="not_yet/history.csv")],
-    )
-    clf.metrics_sidecar_path = str(tmp_path / "metrics.json")
-    clf.run()
-
-    rows = (tmp_path / "not_yet" / "history.csv").read_text().strip().splitlines()
-    assert rows[0].startswith("epoch,")
-    assert len(rows) == 2, "a header plus one row per epoch"
 
 
 def test_evaluate_scores_the_test_set() -> None:

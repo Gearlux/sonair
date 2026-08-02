@@ -201,6 +201,84 @@ def test_metrics_are_reset_between_epochs() -> None:
     assert len(resets) == 3, f"one reset per epoch, got {len(resets)}"
 
 
+def test_a_confusion_matrix_is_rendered_rather_than_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_epoch_metrics` returns SCALARS — a `Tracker.log_metrics` channel takes nothing else.
+
+    A non-scalar metric would therefore vanish without a trace, which is worse than not
+    supporting it. It is rendered into the log instead; the scalars beside it are unaffected.
+    Patched on `sonair.torch_classifier`, the module that BINDS the name.
+    """
+    from confluid import LazyClass
+    from torchmetrics import Metric
+    from torchmetrics.classification import MulticlassConfusionMatrix
+
+    from sonair import torch_classifier as mod
+
+    rendered: List[Any] = []
+    monkeypatch.setattr(mod, "render_matrix_as_table", lambda name, matrix, names: rendered.append(name))
+
+    clf = _clf(train_set=Stream(source=_records(16)), num_classes=NUM_CLASSES)
+    clf.metrics = {"confusion": LazyClass[Metric](MulticlassConfusionMatrix)}
+    clf.initialize()
+    collection = clf.train_metrics
+    assert collection is not None
+    collection.update(torch.randn(8, NUM_CLASSES), torch.randint(0, NUM_CLASSES, (8,)))
+
+    assert clf._epoch_metrics(collection) == {}  # nothing scalar to report
+    assert rendered == ["train/confusion"]
+
+
+def test_a_rendered_matrix_reaches_every_wired_tracker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The log is not the only destination — `log_text` is the channel that exists for this.
+
+    Without it a tracked run records the scalars and nothing else, which reads as a complete
+    record rather than a missing one.
+    """
+    from confluid import LazyClass
+    from torchmetrics import Metric
+    from torchmetrics.classification import MulticlassConfusionMatrix
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.texts: List[Any] = []
+
+        def log_text(self, name: str, text: str, step: Any = None) -> None:
+            self.texts.append((name, text, step))
+
+    tracker = _Recorder()
+    clf = _clf(train_set=Stream(source=_records(16)), num_classes=NUM_CLASSES)
+    clf.metrics = {"confusion": LazyClass[Metric](MulticlassConfusionMatrix)}
+    clf.initialize()
+    collection = clf.val_metrics
+    assert collection is not None
+    collection.update(torch.randn(8, NUM_CLASSES), torch.randint(0, NUM_CLASSES, (8,)))
+
+    clf._epoch_metrics(collection, [tracker], step=2)  # type: ignore[list-item]
+
+    assert len(tracker.texts) == 1
+    name, table, step = tracker.texts[0]
+    assert (name, step) == ("val/confusion", 2)
+    assert table.startswith("val/confusion:") and "pred:0" in table
+
+
+def test_a_split_slot_adds_to_the_shared_set_for_that_split_only() -> None:
+    """Same rule as the Lightning backend — a config moving between them must not change shape."""
+    from confluid import LazyClass
+    from torchmetrics import Metric
+    from torchmetrics.classification import MulticlassAccuracy, MulticlassConfusionMatrix
+
+    clf = _clf(
+        train_set=Stream(source=_records(16)),
+        num_classes=NUM_CLASSES,
+        metrics={"accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1)},
+        val_metrics={"confusion": LazyClass[Metric](MulticlassConfusionMatrix)},
+    )
+    clf.initialize()
+
+    assert sorted(str(k) for k in clf.val_metrics.keys()) == ["val/accuracy_top1", "val/confusion"]
+    assert [str(k) for k in clf.train_metrics.keys()] == ["train/accuracy_top1"]
+
+
 def test_the_eval_pass_puts_the_model_in_eval_mode() -> None:
     """`model.eval()` and `torch.no_grad()` are the loop's job here — dropout/batch-norm depend
     on the first, and the second is what keeps evaluation from building a graph."""
@@ -394,10 +472,12 @@ def test_the_constructor_mirrors_the_lightning_backends_knobs() -> None:
     theirs = set(inspect.signature(LightningClassifier.__init__).parameters)
     mine = set(inspect.signature(TorchClassifier.__init__).parameters)
 
-    # `logger` is Lightning's slot of `pl.loggers.Logger`s. There is no Trainer here to hand
-    # them to, so it is deliberately absent — tracking goes through `trackers`, which both have.
-    assert theirs - mine == {"logger"}
+    # Nothing Lightning-only remains: the `logger` slot of `pl.loggers.Logger`s is GONE, and
+    # both backends take the same `trackers` — which is the point of removing it.
+    assert theirs - mine == set()
     assert mine - theirs == {"device", "checkpoint_dir", "grad_clip"}
+    assert "trackers" in theirs and "trackers" in mine
+    assert "logger" not in theirs and "logger" not in mine
 
 
 def test_the_run_dispatch_covers_every_task() -> None:

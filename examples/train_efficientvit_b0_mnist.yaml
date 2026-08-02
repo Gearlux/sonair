@@ -32,7 +32,7 @@
 # How it stays this small:
 #  * `sonair.LightningClassifier` bakes loss (CrossEntropy), collate, optimizer
 #    (AdamW) and metrics (top-1 / macro-F1), and turns the ergonomic knobs
-#    (batch_size / num_workers / max_epochs / logger) into DataLoaders + a
+#    (batch_size / num_workers / max_epochs / trackers) into DataLoaders + a
 #    `pytorch_lightning.Trainer`.
 #  * Every top-level key is wired in by **Confluid broadcasting** — sibling keys
 #    inject into the same-named constructor params, no nesting or `!ref:`.
@@ -78,12 +78,14 @@ train_set: !class:recordstream.Stream
   source: !class:recordstream.sources.huggingface.HuggingFaceSource()
     path: "mnist"
     split: train
+    count: 1000
   ops: !ref:preprocess
 
 val_set: !class:recordstream.Stream
   source: !class:recordstream.sources.huggingface.HuggingFaceSource()
     path: "mnist"
     split: test
+    count: 100
   ops: !ref:preprocess
 
 batch_size: 32
@@ -95,7 +97,7 @@ max_epochs: 3
 # ===========================================================================
 # Top level = the default backend (lightning).
 #
-# EVERY framework-specific key sits at THIS level — `runnable`, `model`, `logger`
+# EVERY framework-specific key sits at THIS level — `runnable`, `model`, `metrics`
 # — and an alternative backend overrides the ones it must. That flatness is not
 # cosmetic. A scope block replaces a KEY, taking its whole subtree with it, so a
 # `model:` nested INSIDE `runnable:` would vanish the moment a block swapped the
@@ -142,13 +144,47 @@ convnet: !scope:model=convnet
                                    # so this one line is identical in all five blocks.
 
 
-# Broadcasts into the classifier's ctor, which bakes it into its own
-# `LazyClass(pytorch_lightning.Trainer, logger=[...])`; `_build_trainer()`'s
-# `flow(self.lightning)` at run() materializes these `!class:` Fluids.
-logger:
-  - !class:pytorch_lightning.loggers.TensorBoardLogger
+# TWO metric keys, and the difference between them IS the feature. `metrics:` is what EVERY
+# split measures; `<split>_metrics:` is what that one split measures on top, merged over the
+# shared set by name. So the confusion matrix below is computed for VALIDATION only — which is
+# where it answers something ("99% top-1, but which digits does it confuse?" — on MNIST, 4↔9 and
+# 3↔5) — while the training split, whose metrics are per-batch, never builds one.
+#
+# Both keys are spelled out rather than left to the classifier's own `accuracy_top1` + `f1_macro`
+# default, because the point of the file is that the config is the program.
+#
+# `!lazy:` for the same reason the model is: `num_classes` (10) is derived from the dataset and
+# injected at run time, so it is never written here. Dotted paths rather than the bare registered
+# names (`!lazy:MulticlassAccuracy`) because a bare `sonair train` with no `--framework` imports
+# no loss/metric module, and an unresolvable bare name is an error.
+#
+# These are `torchmetrics` classes — `framework="torch"` — so the three torch-backed backends
+# (lightning / torch / fastai) all read these two keys, and a backend on another engine MUST
+# override them; see `metrics: null` in the keras block.
+metrics:
+  accuracy_top1: !lazy:torchmetrics.classification.MulticlassAccuracy
+    top_k: 1
+  f1_macro: !lazy:torchmetrics.classification.MulticlassF1Score
+    average: macro
+
+val_metrics:
+  confusion: !lazy:torchmetrics.classification.MulticlassConfusionMatrix
+
+# Where the run's output goes — ONE key for every backend, because a marainer tracker is
+# engine-neutral (the Lightning backend adapts it to a `pytorch_lightning` logger, the others
+# call it directly). Swap `TensorBoardTracker` for `MlflowTracker` / `CsvTracker` / `AimTracker`
+# and nothing else in this file changes.
+#
+# It is also what makes the confusion matrix VISIBLE rather than merely computed: a matrix
+# cannot go down the metric channel (one number per name — a Lightning logger raises *"does not
+# contain a single element"* on a 10x10 tensor), so it goes to the tracker's TEXT channel, which
+# for TensorBoard is the Text tab with a per-epoch step slider. It is rendered into the log too,
+# so a run with no trackers wired still shows it.
+trackers:
+  - !class:marainer.TensorBoardTracker
+    experiment_name: mnist_classification
+    run_name: efficientvit_b0_mnist
     save_dir: ./lightning_logs
-    name: mnist_efficientvit_b0
 
 # ---------------------------------------------------------------------------
 # The framework blocks
@@ -181,9 +217,9 @@ lightning: !scope:framework=lightning
 # `pytorch_lightning.Trainer` for a hand-written loop and NOTHING else changes. Same
 # `TimmModel` (inherited from the top-level `model:` — which is why that key lives
 # there and not inside `runnable:`), same `preprocess` chain, same `torch.nn` loss set,
-# same metrics, same artifacts. The one key it must drop is `logger:` — those are
-# `pytorch_lightning` loggers and there is no Trainer to hand them to; tracking goes
-# through `trackers:`, which every backend has.
+# same metrics, same artifacts — and the same `trackers:`, which is a marainer object and
+# so belongs to no engine. This block overrides ONE key, which is as small as a backend
+# swap gets.
 #
 #   sonair train examples/train_efficientvit_b0_mnist.yaml --framework torch
 #
@@ -193,19 +229,22 @@ torch: !scope:framework=torch
   #   device: auto            # auto | cpu | cuda | mps
   #   checkpoint_dir: ./torch_runs/mnist
   #   grad_clip: 1.0
-  logger: null
 
 keras: !scope:framework=keras
   # Everything above this line is shared verbatim — dataset, splits, batch size, epochs,
-  # run identity. What a backend swap actually costs is THIS block.
+  # run identity, trackers. What a backend swap actually costs is THIS block.
   runnable: !class:sonair.KerasClassifier
   model: !lazy:sonair.KerasModel
     model_name: MobileNetV3Small
     input_shape: [224, 224, 3]
     pretrained: true
-  logger:
-    - !class:keras.callbacks.CSVLogger
-      filename: ./keras_logs/mnist.csv
+  # The inherited keys this backend cannot use: the metric templates above are torchmetrics
+  # classes and `keras.Model.compile()` has no idea what to do with them. `null` puts the slot
+  # back to the SENTINEL, which is not the same as an empty list — see the next paragraph.
+  # `val_metrics:` goes too, and note it is inert here for a SECOND reason: this backend
+  # compiles ONE metric list for the whole run, so it has no per-split slot to receive it.
+  metrics: null
+  val_metrics: null
   # Loss and metrics are left unset on purpose: both backends resolve them from the DATA in
   # `initialize()` (int64 ids here -> SparseCategoricalCrossentropy + accuracy), so "not
   # chosen" stays distinguishable from "chosen". To say it yourself, pick from the registered
@@ -278,9 +317,8 @@ keras: !scope:framework=keras
 #   # model: !lazy:sonair.TensorFlowModel
 #   #   saved_model: ./exported/mnist_mobilenetv3
 #   #   num_classes: 10
-#   logger:
-#     - !class:keras.callbacks.CSVLogger
-#       filename: ./tensorflow_logs/mnist.csv
+#   metrics: null                    # torchmetrics again — back to the sentinel, as in `keras`
+#   val_metrics: null
 #   preprocess:
 #     - !class:recordstream.ops.image.ConvertToImage
 #       width: 224
@@ -303,9 +341,9 @@ keras: !scope:framework=keras
 #     # unchanged, whether that is `TimmModel` or `TorchConvNet`. There is no
 #     # `FastaiConvNet` for the same reason there is no `fastai_model.py`: a backend
 #     # that adds no new wiring surface adds no new module.
-#   logger:
-#     - !class:fastai.callback.progress.CSVLogger
-#       fname: fastai_logs/mnist.csv
+#   # `metrics:` are names here, so the block sets them on the runnable above; the
+#   # torchmetrics `val_metrics:` from the top level has no reader and is dropped.
+#   val_metrics: null
 
 # huggingface — `transformers.Trainer` fine-tuning a Hub checkpoint. The block is bigger
 # than fastai's for one honest reason: this backend swaps the MODEL as well as the loop, so

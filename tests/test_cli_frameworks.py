@@ -349,6 +349,33 @@ def test_every_declared_framework_resolves_to_a_complete_runnable() -> None:
         )
 
 
+def test_no_framework_inherits_a_metric_set_its_engine_cannot_consume() -> None:
+    """`metrics:` is ENGINE-BOUND, so an inherited top-level value is only right for some blocks.
+
+    The example's top-level set is torchmetrics (`framework="torch"`), which the three
+    torch-backed backends read unchanged — but `keras.Model.compile()` cannot take a
+    `MulticlassAccuracy`, so a Keras-engine block MUST override the key (`metrics: null`
+    puts it back to the classifier's own sentinel). Config-level for the same reason as the
+    test above: it fails wherever the mistake is made, not only where keras is installed.
+    """
+    torch_backed = {"lightning", "torch", "fastai"}
+    for framework in sorted(_declared_frameworks()):
+        document = confluid.load(confluid.load_config(EXAMPLE), flow=False, scopes=[f"framework={framework}"])
+        assert isinstance(document, dict)
+        for key in ("metrics", "val_metrics"):
+            value = document.get(key)
+            if framework in torch_backed:
+                assert value, f"--framework {framework}: runs on torch, so it should inherit `{key}`"
+            else:
+                assert not value, (
+                    f"--framework {framework}: inherited the top-level torchmetrics `{key}`, which its "
+                    f"engine cannot consume. Override it in that block (`{key}: null` restores the sentinel)."
+                )
+        if framework in torch_backed:
+            assert "confusion" in document["val_metrics"], "the confusion matrix belongs to the validation split"
+            assert "confusion" not in document["metrics"], "...and must NOT be in the shared, every-split set"
+
+
 def test_the_example_keeps_the_engine_agnostic_keys_shared() -> None:
     """One config for every backend: shared top level + scoped overrides."""
     default = confluid.load(confluid.load_config(EXAMPLE), flow=False)

@@ -29,7 +29,7 @@ from marainer import CsvTracker  # noqa: E402
 from recordstream import Stream  # noqa: E402
 from recordstream.items import Image, Label  # noqa: E402
 
-from sonair.torch_classifier import TorchClassifier, _resolve_device  # noqa: E402
+from sonair.torch_classifier import TorchClassifier  # noqa: E402
 
 NUM_CLASSES = 3
 
@@ -44,6 +44,27 @@ class _Tiny(nn.Module):
 
     def forward(self, x: Any) -> Any:
         return self.fc(x.flatten(1))
+
+
+class _LazyBuilt(nn.Module):
+    """A model shaped like ``TimmModel``: the constructor does no work, ``solidify()`` builds.
+
+    So it has NO parameters until something builds it — which is what makes the live-model
+    path below a real check rather than a tautology.
+    """
+
+    def __init__(self, num_classes: int = NUM_CLASSES) -> None:
+        super().__init__()
+        self.num_classes = num_classes
+        self.fc: Any = None
+
+    def solidify(self) -> Any:
+        if self.fc is None:
+            self.fc = nn.Linear(3 * 8 * 8, self.num_classes)
+        return self.fc
+
+    def forward(self, x: Any) -> Any:
+        return self.solidify()(x.flatten(1))
 
 
 class _CaptureSink:
@@ -134,13 +155,38 @@ def test_zero_arg_construction_does_no_work() -> None:
 
 
 @pytest.mark.parametrize("choice", ["cpu", "auto"])
-def test_the_device_is_resolved_not_guessed(choice: str) -> None:
-    """`auto` picks what is present; an explicit choice is taken at its word."""
-    resolved = _resolve_device(choice)  # type: ignore[arg-type]
+def test_the_device_knob_reaches_the_resolver(choice: str) -> None:
+    """The `device` ctor knob is what `initialize()` places the run on.
 
-    assert isinstance(resolved, torch.device)
+    WHAT `auto` resolves to is marainer's (`tests/test_device.py` there pins the
+    CUDA -> MPS -> CPU order with the probes patched); what this backend owns is that the
+    knob is honoured at all rather than a device being guessed per call site.
+    """
+    clf = _clf(task="fit", device=choice, train_set=_records(8), max_epochs=1)
+    clf.initialize()
+
+    assert isinstance(clf._device, torch.device)
     if choice == "cpu":
-        assert resolved.type == "cpu"
+        assert clf._device.type == "cpu"
+
+
+def test_a_LIVE_lazy_model_is_built_before_the_optimizer_reads_it() -> None:
+    """The failure this backend used to hand-patch around, now confluid's job.
+
+    A model wired `!class:sonair.TimmModel()` (eager, parens) or handed in from Python arrives
+    LIVE and unbuilt, so `parameters()` is empty — and the crash lands one step later, inside
+    `torch.optim`, as *"optimizer got an empty parameter list"*. `initialize()` used to call
+    `getattr(self.model, "solidify", None)` itself; `flow()` now fires the hook on its live
+    pass-through, so the backend does nothing special and the run simply works.
+    """
+    model = _LazyBuilt()
+    assert list(model.parameters()) == []
+
+    clf = _clf(model=model, task="fit", train_set=Stream(source=_records(8)), max_epochs=1)
+    clf.run()
+
+    assert sum(p.numel() for p in model.parameters()) > 0
+    assert clf._history["train/loss"], "the loop ran, so the optimizer got real parameters"
 
 
 # --------------------------------------------------------------------------- #

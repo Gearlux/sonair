@@ -186,6 +186,28 @@ trackers:
     run_name: efficientvit_b0_mnist
     save_dir: ./lightning_logs
 
+# The other backends, and how each finds its server. Note the three DIFFERENT ways, because
+# a wrong guess here fails silently — the run trains, the tracker records, nothing appears in
+# the UI you are watching, and no log line says why:
+#
+#   - !class:marainer.AimTracker         # aisland aim start
+#       experiment_name: mnist_classification
+#       save_dir: $AIM_REPO              # published to the workspace .env by the service
+#
+#   - !class:marainer.ClearMLTracker     # aisland clearml start
+#       experiment_name: mnist_classification
+#       # NO host key at all — the ClearML SDK reads CLEARML_API_HOST / _WEB_HOST /
+#       # _FILES_HOST and its credentials from the environment itself. `offline: true`
+#       # records to local disk instead and needs no server and no credentials.
+#
+#   - !class:marainer.MlflowTracker      # aisland mlflow start
+#       experiment_name: mnist_classification
+#       tracking_uri: http://localhost:5005   # a LITERAL: this service publishes no var
+#
+# `$VAR` is expanded when the app loads the config (liquifai `expand_strings`), so the
+# variable must be EXPORTED — `source project.bashrc` does it. An unset one is left as the
+# literal text `$AIM_REPO`, which becomes a directory of that name rather than an error.
+
 # The OTHER half of a run's wiring, and the one thing that is NOT engine-neutral: a callback
 # is its framework's own object, so this key belongs in a framework block rather than up here
 # (a `keras.callbacks.EarlyStopping` means nothing to a fastai `Learner`). Every backend

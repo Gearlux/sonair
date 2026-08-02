@@ -236,6 +236,71 @@ def test_predict_gets_record_batches_from_the_SAME_slot() -> None:
 
 
 # ---------------------------------------------------------------------------
+# fastai's OWN two objects are deferred slots too
+# ---------------------------------------------------------------------------
+# `DataLoaders` and `Learner` were built inline until 2026-08-02, which left every knob this
+# class does not restate unreachable from config. `DataLoaders(*loaders, …)` takes its loaders
+# POSITIONALLY, so nothing a marker can carry could deliver them — they arrive as `flow()`'s
+# positional runtime args, the same channel `dataset=` uses for a loader.
+
+
+def test_the_fastai_objects_are_deferred_slots() -> None:
+    assert {"dataloaders", "learner"} <= lazy_param_names(FastaiClassifier)
+
+    clf = FastaiClassifier(model=_NO_MODEL, learning_rate=0.02, weight_decay=0.01)
+
+    assert isinstance(clf.dataloaders, Fluid) and isinstance(clf.learner, Fluid)
+    assert cast(Fluid, clf.learner).kwargs == {"lr": 0.02, "wd": 0.01}
+
+
+def test_a_wired_dataloaders_knob_reaches_the_built_object() -> None:
+    """`path` is unreachable any other way — this class does not (and should not) restate it.
+
+    It is what a `Learner` falls back to for its artifact directory when no explicit `path` is
+    given, so it decides where `SaveModelCallback` and friends write.
+    """
+    from fastai.data.core import DataLoaders
+
+    clf = FastaiClassifier(model=_NO_MODEL, num_classes=3, train_set=_records(4), batch_size=2)
+    clf.dataloaders = LazyClass(DataLoaders, path="artifacts")
+
+    built = clf._dataloaders()
+
+    assert isinstance(built, DataLoaders)
+    assert str(built.path) == "artifacts"
+    assert len(built.loaders) == 2, "the two loaders still arrive positionally"
+
+
+def test_a_wired_learner_knob_reaches_the_built_object() -> None:
+    """`moms` / `model_dir` / `wd_bn_bias` / `train_bn` / `splitter` — none is a sonair knob."""
+    from fastai.learner import Learner
+
+    clf = FastaiClassifier(model=_Tiny(), num_classes=3, train_set=_records(4), batch_size=2)
+    clf._resolve_task_defaults()  # what `initialize()` does: fill the loss sentinel
+    clf.learner = LazyClass(Learner, lr=0.05, model_dir="weights", train_bn=False)
+
+    learner = clf._build_learner(clf._dataloaders())
+
+    assert learner.lr == 0.05
+    assert str(learner.model_dir) == "weights"
+    assert learner.train_bn is False
+
+
+def test_the_run_supplied_arguments_still_win_over_the_slot() -> None:
+    """A config cannot pin the data or the model — those are the run's, and they are kwargs."""
+    from fastai.learner import Learner
+
+    model = _Tiny()
+    clf = FastaiClassifier(model=model, num_classes=3, train_set=_records(4), batch_size=2)
+    clf._resolve_task_defaults()
+    clf.learner = LazyClass(Learner, model=_Tiny(num_classes=99))
+
+    learner = clf._build_learner(clf._dataloaders())
+
+    assert learner.model is model
+
+
+# ---------------------------------------------------------------------------
 # Task-shaped defaults
 # ---------------------------------------------------------------------------
 

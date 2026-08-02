@@ -194,6 +194,59 @@ On the shipped MNIST config (3 epochs), `lightning` reaches **99.52%** top-1 and
 is not a benchmark — it is evidence that one config drives several engines to a comparable
 result.
 
+### Running them all — the sweep
+
+`examples/sweep/` trains every backend this machine has, twice each (once on a model-zoo
+backbone and once on the shared conv spec), and reports the lot from one tracker:
+
+```bash
+examples/sweep/run_sweep.sh                     # every installed backend, into MLflow
+examples/sweep/run_sweep.sh --tracker csv       # ...into the always-available CSV backend
+examples/sweep/run_sweep.sh --only jax,mlx      # just those two
+examples/sweep/run_sweep.sh --dry-run           # print the matrix and the commands, run nothing
+```
+
+Every run is the same `examples/sweep/all_backends.yaml` with two flags changed. That file is
+an **overlay**: it `include:`s the example above and adds only what a sweep needs — the five
+backend blocks the example keeps commented (they must load on a checkout that installs three
+frameworks, and a sweep is opt-in), a convnet per engine, and a `--tracker` dimension.
+
+The matrix, and why two cells are empty:
+
+| Backend | zoo model | `--model convnet` |
+|---|---|---|
+| lightning · torch · fastai | `TimmModel` efficientvit_b0 | `TorchConvNet` |
+| keras | `KerasModel` MobileNetV3Small | `KerasConvNet` |
+| tensorflow | `KerasModel` MobileNetV3Small | `TensorFlowConvNet` |
+| huggingface | `HuggingFaceModel` resnet-18 | — a `transformers.Trainer` drives models that compute their own loss |
+| jax | — no Flax zoo exists | `FlaxConvNet` |
+| mlx | — no MLX image zoo exists | `MlxConvNet` |
+
+Those two gaps are the reason [`sonair/convnet/spec.py`](sonair/convnet/spec.py) exists: one
+architecture, written natively per framework, so the comparison is between *frameworks* rather
+than between five different networks.
+
+The script builds its matrix by **probing** which frameworks import, not by reading
+`sonair frameworks` (which advertises all eight regardless), so a machine with three extras
+runs three backends and says which it skipped. Each run is its own process — not a style
+choice: Keras 3 binds its compute engine at import, so `keras` and `tensorflow` cannot share an
+interpreter. A backend that fails does not abort the others; its log is named in the summary.
+
+The experiment is named `<Day>_<Mon>_<D>_<YYYY>_<N>`, N counted from the tracker itself, so a
+wiped tracker restarts at 1. At the end the script prints one row per run — every metric any
+backend recorded, since they genuinely disagree on naming (`val/accuracy_top1` under torch,
+`val_accuracy` under Keras):
+
+```
+| run               | status   |   sec |   val/accuracy_top1 |   val_accuracy |   val/loss |
+|-------------------|----------|-------|---------------------|----------------|------------|
+| lightning_zoo     | FINISHED |    74 |              0.9727 |                |     0.1744 |
+| lightning_convnet | FINISHED |    73 |              0.2857 |                |     2.1602 |
+```
+
+MLflow and CSV can be read back from here; the others are write surfaces from this machine and
+the report says where to open them instead.
+
 ### What a backend swap actually costs
 
 The `keras` block in the example config overrides four keys and nothing else: `runnable`,
@@ -685,6 +738,52 @@ and `log_system_metrics: true` activates framework-free system-metric logging.
 Removing marainer would take only a few line changes. There is no separate `logger:`
 knob of `pytorch_lightning.loggers.*` — the trackers ARE this run's metric sinks, adapted
 to Lightning's logger interface, so one key drives every backend.
+
+### Pointing a tracker at a running service
+
+Each tracking backend finds its server a different way, and a wrong guess fails quietly —
+the run trains, the tracker records, and nothing appears in the UI you are watching:
+
+```yaml
+trackers:
+  - !class:marainer.TensorBoardTracker      # a local directory, no service
+    save_dir: ./lightning_logs
+
+  - !class:marainer.AimTracker              # a local repository the UI serves
+    save_dir: $AIM_REPO
+
+  - !class:marainer.MlflowTracker           # a URL
+    tracking_uri: http://localhost:5005
+
+  - !class:marainer.ClearMLTracker          # nothing here at all — see below
+    experiment_name: mnist_classification
+```
+
+`$VAR` is expanded when the app loads the config, so the variable must be **exported** in
+the environment the run starts from. An unset one is left as the literal text `$AIM_REPO`
+and becomes a directory of that name rather than an error. `ClearMLTracker` takes no host
+key: the ClearML SDK reads `CLEARML_API_HOST` / `_WEB_HOST` / `_FILES_HOST` and its
+credentials straight from the environment (`offline: true` records to local disk instead
+and needs no server and no credentials).
+
+`examples/train_efficientvit_b0_mnist.yaml` carries all four as commented alternatives.
+
+### Framework callbacks
+
+`trackers:` is a run's output wiring; `callbacks:` is its engine's own callback list — a
+separate key because a callback is the one part of a run that is NOT engine-neutral:
+
+```yaml
+keras: !scope:framework=keras
+  callbacks:
+    - !class:keras.callbacks.EarlyStopping(patience=3)
+    - !class:keras.callbacks.ModelCheckpoint(filepath=ckpt/best.keras)
+```
+
+Available on the `keras` / `tensorflow` / `fastai` / `huggingface` backends (their engine's
+own `Callback` class) and on `jax` / `mlx`, whose loops are sonair's own and take a plain
+`callback(epoch, logs)` callable. The `lightning` backend reaches the same thing through its
+`lightning:` Trainer slot; the bare-`torch` backend has no callback protocol by design.
 
 `LightningClassifier` declares three read-only post-run `@output`s directly —
 `trained_model` (the live trained `nn.Module`), `computed_metrics`

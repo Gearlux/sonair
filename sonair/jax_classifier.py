@@ -48,7 +48,7 @@ from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from flax import nnx
 from loggair import get_logger
 from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
-from marainer.run_names import generate_run_name
+from marainer.run_names import generate_run_name, run_prefix
 from marainer.tracking.base import Tracker, as_tracker_list
 from marainer.tracking.provenance import capture_log_file, log_run_context
 from recordstream import (
@@ -60,6 +60,7 @@ from recordstream import (
     batch_values,
     class_names,
     ensure_record_dataset,
+    first_value,
     is_class_id,
     iter_key,
     multi_hot,
@@ -82,19 +83,13 @@ JaxLoss = Union[str, Callable[..., Any]]
 JaxMetric = Union[str, Callable[..., Any]]
 JaxOptimizer = Union[str, Callable[..., Any]]
 
-__all__ = ["ClassifierTask", "JaxClassifier"]
+#: What the ``callbacks`` slot holds. There is no JAX callback CLASS to name — this backend
+#: owns its loop, so a callback is a plain callable invoked once per epoch with the epoch index
+#: and that epoch's metric logs (see :meth:`JaxClassifier.fit`). Spelling the signature out is
+#: what makes the slot checkable; the framework backends name their engine's class instead.
+EpochCallback = Callable[[int, Dict[str, float]], None]
 
-
-def _first_target(source: Any, target_key: str) -> Any:
-    """The first non-``None`` target in ``source`` — one peek is enough to know the label kind."""
-    for target in iter_key(source, target_key):
-        if target is not None:
-            return target
-    return None
-
-
-def _run_prefix(task: str) -> str:
-    return {"fit": "train", "predict": "predict"}.get(task, "evaluate")
+__all__ = ["ClassifierTask", "EpochCallback", "JaxClassifier"]
 
 
 def _accuracy(logits: Any, labels: Any) -> Any:
@@ -163,7 +158,7 @@ class JaxClassifier(ProgressReporting):
         max_epochs: int = 10,
         batch_size: int = 32,
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
-        callbacks: Optional[Iterable[Any]] = None,
+        callbacks: Optional[List[Lazy[EpochCallback]]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -193,9 +188,9 @@ class JaxClassifier(ProgressReporting):
         # Internal only: this backend's own tracking callback is appended at run time.
         # Stored VERBATIM like `trackers` (lazy-init): entries may be deferred `Fluid`
         # markers, and they are flowed where they are used.
-        self.callbacks: Optional[Iterable[Any]] = callbacks
+        self.callbacks: Optional[List[Lazy[EpochCallback]]] = callbacks
         self.experiment_name = experiment_name
-        self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
+        self.run_name = run_name if run_name is not None else generate_run_name(prefix=run_prefix(task))
         self.input_key = str(input_key)
         self.target_key = str(target_key)
         self.label_map = label_map
@@ -249,7 +244,7 @@ class JaxClassifier(ProgressReporting):
         if self.test_set is not None:
             self.test_set = ensure_record_dataset(self.test_set)
 
-        first = _first_target(self.train_set, self.target_key)
+        first = first_value(self.train_set, self.target_key)
         self.multilabel = isinstance(first, (list, tuple, set))
         probe = next(iter(first), None) if self.multilabel else first
         targets_are_names = probe is not None and not is_class_id(probe)
@@ -283,7 +278,7 @@ class JaxClassifier(ProgressReporting):
         if self.test_set is None:
             return
         dataset = ensure_record_dataset(self.test_set)
-        first = _first_target(dataset, self.target_key)
+        first = first_value(dataset, self.target_key)
         self.multilabel = isinstance(first, (list, tuple, set))
         probe = next(iter(first), None) if self.multilabel else first
         if probe is not None and not is_class_id(probe):

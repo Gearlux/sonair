@@ -46,7 +46,7 @@ from marainer.lightning import (
     checkpoint_dir,
     scalar_metrics,
 )
-from marainer.run_names import generate_run_name
+from marainer.run_names import generate_run_name, run_prefix
 from marainer.tracking.base import Tracker, as_tracker_list
 from marainer.tracking.render import render_matrix_as_figure, render_matrix_as_table
 from recordstream import (
@@ -60,6 +60,7 @@ from recordstream import (
     classification_output,
     collate_records,
     ensure_record_dataset,
+    first_value,
     inverse_frequency_weights,
     is_class_id,
     iter_key,
@@ -86,19 +87,6 @@ ClassifierTask = Literal["fit", "evaluate", "test", "predict"]
 MetricsSpec = Optional[Union[Dict[str, Union[Metric, LazyClass[Metric]]], MetricCollection]]
 
 
-def _first_target(source: Any, target_key: str) -> Any:
-    """The first non-``None`` target value in ``source`` (``None`` when there are none).
-
-    One peek is enough to know whether the targets need encoding — the ANSWER comes from
-    :func:`recordstream.is_class_id`, the single rule for "is this a class id or a class name?",
-    rather than a type check re-derived here.
-    """
-    for target in iter_key(flow(source), target_key):
-        if target is not None:
-            return target
-    return None
-
-
 def _per_record_predictions(preds: Any) -> List[Any]:
     """Split a model's prediction output into ONE entry per record.
 
@@ -118,10 +106,6 @@ def _per_record_predictions(preds: Any) -> List[Any]:
             n = lengths.pop()
             return [{k: v[i] for k, v in preds.items()} for i in range(n)]
     return [preds]
-
-
-def _run_prefix(task: str) -> str:
-    return {"fit": "train", "predict": "predict"}.get(task, "evaluate")
 
 
 @configurable(task="classification", role="trainer", framework="torch")
@@ -192,7 +176,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self.task: ClassifierTask = task
         self.num_classes = int(num_classes) if num_classes is not None else None
         self.experiment_name = experiment_name
-        self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
+        self.run_name = run_name if run_name is not None else generate_run_name(prefix=run_prefix(task))
         self.input_key = str(input_key)
         self.target_key = str(target_key)
         self.label_map = label_map
@@ -510,7 +494,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
 
         # `iter_key` unwraps a MultiLabel to its list of values, so a sequence here IS a
         # multi-label target — the item type, not a guess about what a list might mean.
-        first = _first_target(self.train_set, self.target_key)
+        first = first_value(self.train_set, self.target_key)
         self.multilabel = isinstance(first, (list, tuple, set))
 
         # Names need a LabelMap; ids do not. `is_class_id` is recordstream's rule (bool excluded,
@@ -575,7 +559,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         if source is None:
             return
         dataset = ensure_record_dataset(source)
-        first = _first_target(dataset, self.target_key)
+        first = first_value(dataset, self.target_key)
         self.multilabel = isinstance(first, (list, tuple, set))
         self._resolve_task_defaults()
         probe = next(iter(first), None) if self.multilabel else first

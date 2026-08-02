@@ -300,6 +300,34 @@ def test_a_wired_trainer_slot_reaches_the_built_object(tmp_path: Path) -> None:
     assert trainer.data_collator == clf._to_hf_batch, "the run-supplied kwargs still arrive"
 
 
+def test_a_trainer_subclass_that_overrides_init_with_kwargs_also_works(tmp_path: Path) -> None:
+    """The other subclass shape: `def __init__(self, **kwargs)` forwarding to `Trainer`.
+
+    A `**kwargs` signature names no parameter for `model` / `args` / `data_collator`, so
+    confluid's constructor-kwarg filter used to drop every one of them and build the
+    Trainer with NOTHING — surfacing as transformers' own *"`Trainer` requires either a
+    `model` or `model_init` argument"*, which points nowhere near the cause. A runtime
+    kwarg is a call argument, so it now passes through.
+    """
+    import transformers
+    from confluid import LazyClass
+
+    seen: Dict[str, Any] = {}
+
+    class _ForwardingTrainer(transformers.Trainer):
+        def __init__(self, **kwargs: Any) -> None:
+            seen.update(kwargs)
+            super().__init__(**kwargs)
+
+    clf = HuggingFaceClassifier(model=_TinyHF(), output_dir=str(tmp_path))
+    clf.trainer = LazyClass(_ForwardingTrainer)
+
+    trainer = clf._build_trainer(train=_records(4))
+
+    assert isinstance(trainer, _ForwardingTrainer)
+    assert seen["model"] is clf._network() and seen["data_collator"] == clf._to_hf_batch
+
+
 def test_the_predict_loader_comes_from_the_deferred_slot() -> None:
     """The same construction every other torch backend uses — so `drop_last` is a knob here too."""
     from confluid import LazyClass

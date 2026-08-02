@@ -248,6 +248,30 @@ def test_an_explicitly_wired_metric_set_is_never_replaced() -> None:
     assert clf.metrics == ["top_k_categorical_accuracy"]
 
 
+def test_the_split_slots_are_compiled_as_their_union() -> None:
+    """This engine cannot narrow a metric to one split, and says so by widening rather than dropping.
+
+    `keras.Model.compile` takes ONE metric list and reports it on training AND validation, so a
+    metric wired to `val_metrics` is computed on both. That is noise a reader can ignore; the
+    alternative — accepting the slot and never calling it — is a metric that silently reports
+    nothing, which is the failure the per-split slots exist to remove.
+    """
+    clf = _classifier(
+        train_set=Stream(source=_records()),
+        metrics=["accuracy"],
+        val_metrics=["top_k_categorical_accuracy"],
+    )
+
+    assert clf._compiled_metrics() == ["accuracy", "top_k_categorical_accuracy"]
+
+
+def test_the_union_does_not_compile_a_metric_twice() -> None:
+    """Two entries with the same name would collide in Keras's own history keys."""
+    clf = _classifier(metrics=["accuracy"], val_metrics=["accuracy"], test_metrics=["accuracy"])
+
+    assert clf._compiled_metrics() == ["accuracy"]
+
+
 # --------------------------------------------------------------------------- #
 # Predict — the SAME sink the torch backend uses
 # --------------------------------------------------------------------------- #

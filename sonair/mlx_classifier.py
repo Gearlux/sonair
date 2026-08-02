@@ -67,6 +67,8 @@ from recordstream import (
 from recordstream.keras import RecordSequence
 from recordstream.runnable import ProgressReporting, entrypoint, run_entrypoint
 
+from sonair.metric_slots import merge_metric_specs
+
 # NOTE: no `MlxConvNet` import. This module used to need it because the `model` slot was typed
 # as that concrete class; the slot is `mlx.nn.Module` now, so the default convnet is reached the
 # way any other model is — through the config (`!lazy:sonair.MlxConvNet`).
@@ -131,8 +133,10 @@ class MlxClassifier(ProgressReporting):
         task: Which entry point ``run()`` dispatches to.
         max_epochs: Training epochs.
         batch_size: Rows per batch.
-        logger: Callables invoked as ``callback(epoch, logs)`` after each epoch — MLX ships no
-            callback protocol, so this is the plainest thing that works, as in the JAX backend.
+        trackers: marainer trackers — one or a list. This run's ONLY output wiring:
+            metrics, provenance and the run manifest all go to them.
+        callbacks: Callables invoked as ``callback(epoch, logs)`` after each epoch —
+            MLX ships no callback protocol, so this is the plainest thing that works.
         experiment_name: Run identity, recorded in artifacts and tracking.
         run_name: Run identity; a random ``adjective_noun`` when omitted.
         input_key: Record key holding the image.
@@ -145,6 +149,8 @@ class MlxClassifier(ProgressReporting):
             by target shape, like every other backend's sentinel.
         metrics: Metric names (``"accuracy"``, ``"accuracy_multi"``) or callables. ``None``
             picks by target shape.
+        val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is
+            no ``train_metrics``: the training pass computes the loss and nothing else.
     """
 
     def __init__(
@@ -158,6 +164,7 @@ class MlxClassifier(ProgressReporting):
         max_epochs: int = 10,
         batch_size: int = 32,
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
+        callbacks: Optional[Iterable[Any]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -167,6 +174,8 @@ class MlxClassifier(ProgressReporting):
         optimizer: MlxOptimizer = "Adam",
         loss: Optional[MlxLoss] = None,
         metrics: Optional[Sequence[MlxMetric]] = None,
+        val_metrics: Optional[Sequence[MlxMetric]] = None,
+        test_metrics: Optional[Sequence[MlxMetric]] = None,
     ) -> None:
         super().__init__()
         # `nn.Module`, not `Lazy[nn.Module]`: the deferred-ness is declared once, on the ctor
@@ -184,7 +193,9 @@ class MlxClassifier(ProgressReporting):
         self.max_epochs = max_epochs
         self.batch_size = batch_size
         # Internal only: this backend's own tracking callback is appended at run time.
-        self.callbacks: List[Any] = []
+        # Stored VERBATIM like `trackers` (lazy-init): entries may be deferred `Fluid`
+        # markers, and they are flowed where they are used.
+        self.callbacks: Optional[Iterable[Any]] = callbacks
         self.experiment_name = experiment_name
         self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
         self.input_key = str(input_key)
@@ -197,6 +208,12 @@ class MlxClassifier(ProgressReporting):
         # once `initialize()` has peeked the data.
         self.loss: Optional[MlxLoss] = loss
         self.metrics: Optional[Sequence[MlxMetric]] = metrics
+        # Per-split ADDITIONS, merged over `metrics` by the shared rule. There is no
+        # `train_metrics` here and that is a property of this loop, not an omission: the
+        # training pass computes the LOSS and nothing else, so a train-only metric would
+        # have nowhere to be computed.
+        self.val_metrics: Optional[Sequence[MlxMetric]] = val_metrics
+        self.test_metrics: Optional[Sequence[MlxMetric]] = test_metrics
         self.multilabel: bool = False
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
@@ -334,16 +351,27 @@ class MlxClassifier(ProgressReporting):
 
         return nn.value_and_grad(self.model, compute)
 
-    def _metric_values(self, logits: Any, labels: Any) -> Dict[str, float]:
+    def _split_metrics(self, split: str) -> Sequence[MlxMetric]:
+        """The metric list for one eval split — its own slot merged over the shared ``metrics``.
+
+        The combination rule is the workspace-wide one
+        (:func:`~sonair.metric_slots.merge_metric_specs`), so a config moving between backends
+        keeps its shape. Only ``val`` and ``test`` have a slot: this loop computes metrics on the
+        eval pass only, so a train-only metric would have nowhere to go.
+        """
+        return merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or []
+
+    def _metric_values(self, logits: Any, labels: Any, metrics: Sequence[MlxMetric]) -> Dict[str, float]:
         out: Dict[str, float] = {}
-        for metric in self.metrics or []:
+        for metric in metrics:
             fn = _as_metric(metric)
             out[getattr(fn, "__name__", str(metric)).lstrip("_")] = float(fn(logits, labels))
         return out
 
-    def _evaluate(self, sequence: RecordSequence) -> Dict[str, float]:
+    def _evaluate(self, sequence: RecordSequence, split: str = "val") -> Dict[str, float]:
         """One pass in EVAL mode, returning ``{"loss": …, **metrics}``."""
         loss_fn = _as_loss(self.loss, multilabel=self.multilabel)
+        metrics = self._split_metrics(split)
         total, batches = 0.0, 0
         sums: Dict[str, float] = {}
         # MLX carries train/eval as module STATE, so the mode is set ONCE here rather than
@@ -359,7 +387,7 @@ class MlxClassifier(ProgressReporting):
             mx.eval(loss, logits)  # lazy arrays: nothing has been computed until here
             total += float(loss)
             batches += 1
-            for key, value in self._metric_values(logits, ya).items():
+            for key, value in self._metric_values(logits, ya, metrics).items():
                 sums[key] = sums.get(key, 0.0) + value
         if not batches:
             return {"loss": float("nan")}
@@ -402,7 +430,7 @@ class MlxClassifier(ProgressReporting):
             # A `fit()` would have done this; a hand-written loop must. Forgetting it is
             # INVISIBLE — training silently runs on one fixed row order forever.
             train_seq.on_epoch_end()
-            for callback in self.callbacks:
+            for callback in self.callbacks or []:
                 flow(callback)(epoch, logs)
             # Trackers are the other per-epoch consumer. A `fit()` forwards its logs to every
             # attached logger; a hand-written loop reaches them the same way it reaches callbacks.
@@ -427,7 +455,7 @@ class MlxClassifier(ProgressReporting):
     def test(self) -> None:
         if self.test_set is None:
             raise ValueError("MlxClassifier.test() requires a 'test_set'.")
-        self._computed_metrics = self._evaluate(self._sequence(self.test_set))
+        self._computed_metrics = self._evaluate(self._sequence(self.test_set), "test")
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 

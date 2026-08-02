@@ -27,7 +27,6 @@ Minimal flat YAML (top-level keys wired by Confluid broadcasting)::
 """
 
 import inspect
-from collections.abc import Mapping
 from typing import Any, Dict, Iterable, List, Literal, Optional, Union, cast
 
 import numpy as np
@@ -49,7 +48,7 @@ from marainer.lightning import (
 )
 from marainer.run_names import generate_run_name
 from marainer.tracking.base import Tracker, as_tracker_list
-from marainer.tracking.render import render_matrix_as_table
+from marainer.tracking.render import render_matrix_as_figure, render_matrix_as_table
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -73,6 +72,8 @@ from torch.utils.data import DataLoader
 from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MultilabelAccuracy, MultilabelF1Score
 from tqdm import tqdm
+
+from sonair.metric_slots import merge_metric_specs
 
 logger = get_logger(__name__)
 
@@ -151,6 +152,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             ``metrics`` — how a metric is added to one split only (a confusion matrix on
             validation). Each slot holds the spec until :meth:`initialize` builds it, and the
             live prefixed ``MetricCollection`` after.
+        plot_metrics: ALSO send each non-scalar metric to the trackers as a matplotlib
+            heatmap, not only as a table. Off by default: it makes matplotlib
+            (``marainer[plot]``) a cost of every eval epoch, where the table costs nothing.
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``optimizer``, ``train/val/test_loader``,
     ``lightning``, ``loss_fn``, ``predictions_sink``, ``metrics_sidecar_path``,
@@ -178,6 +182,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         train_metrics: MetricsSpec = None,
         val_metrics: MetricsSpec = None,
         test_metrics: MetricsSpec = None,
+        plot_metrics: bool = False,
     ) -> None:
         super().__init__()
         self.model: Lazy[nn.Module] = model
@@ -238,6 +243,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         self.val_metrics: Any = val_metrics
         self.test_metrics: Any = test_metrics
         self._metrics_built: bool = False
+        self.plot_metrics = plot_metrics
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
         # Stored VERBATIM (lazy-init mandate: the constructor does no work). It may hold a
@@ -361,9 +367,10 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
 
         Which computed values ARE confusion matrices is recordstream's rule
         (:func:`~recordstream.ops.image.confusion_matrices_payload` — square 2-D, by SHAPE not
-        by metric name), and the table is marainer's renderer; this method only decides WHEN
-        and WHERE — the log always, plus every wired tracker's text channel, which is what
-        puts the matrix in MLflow / TensorBoard / Aim / ClearML beside the scalars.
+        by metric name), and the renderers are marainer's; this method only decides WHEN and
+        WHERE — the log always, plus every wired tracker's text channel, which is what puts the
+        matrix in MLflow / TensorBoard / Aim / ClearML beside the scalars, plus its figure
+        channel when :attr:`plot_metrics` asks for one.
         """
         if not isinstance(collection, MetricCollection):
             return
@@ -372,11 +379,21 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         if self._trainer is not None and self.trainer.sanity_checking:
             return  # two batches through an untrained model: a matrix nobody wants to read
         step = self.current_epoch if self._trainer is not None else None
+        trackers = self._live_trackers()
         for payload in confusion_matrices_payload(values, self.class_names or None):
             table = render_matrix_as_table(payload["name"], payload["counts"], payload["class_names"])
             logger.info(table)
-            for tracker in self._live_trackers():
+            # Rendered ONCE per report, not once per tracker: a figure is real work, and every
+            # tracker can be handed the same one.
+            figure = (
+                render_matrix_as_figure(payload["name"], payload["counts"], payload["class_names"])
+                if self.plot_metrics and trackers
+                else None
+            )
+            for tracker in trackers:
                 tracker.log_text(payload["name"], table, step=step)
+                if figure is not None:
+                    tracker.log_figure(payload["name"], figure, step=step)
 
     def configure_optimizers(self) -> Any:
         return flow(self.optimizer, params=self.parameters())
@@ -633,21 +650,15 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             )
 
     def _build_split_metrics(self, spec: Any, prefix: str) -> MetricCollection:
-        """One split's live, prefixed collection — its own spec MERGED over the shared one.
+        """One split's live, prefixed collection — its own spec merged over the shared one.
 
-        The two slots answer different questions: ``metrics`` is what every split measures,
-        ``<split>_metrics`` is what THIS split measures on top. Merging (rather than replacing)
-        is what lets a confusion matrix be added to the validation split alone without
-        restating the shared accuracy / F1 beside it — a same-named entry still shadows, so
-        the split can also override one. Merging needs both to be mappings; anything else (a
-        ready-made ``MetricCollection``, a list) REPLACES, because there is no key-wise way
-        to combine them and silently ignoring the split's spec would be worse.
+        The combination rule is :func:`~sonair.metric_slots.merge_metric_specs`, shared with
+        every other backend so a config moving between them cannot change shape; what is torch's
+        alone is the rest of this line — sizing the templates and prefixing the collection.
         """
-        if spec is None:
-            spec = self.metrics
-        elif isinstance(spec, Mapping) and isinstance(self.metrics, Mapping):
-            spec = {**self.metrics, **spec}
-        return build_metric_collection(spec, **self._metric_dims()).clone(prefix=prefix)
+        return build_metric_collection(merge_metric_specs(self.metrics, spec), **self._metric_dims()).clone(
+            prefix=prefix
+        )
 
     def _metric_dims(self) -> dict[str, int]:
         """The sizing kwarg metric templates are flowed with.

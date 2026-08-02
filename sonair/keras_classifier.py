@@ -63,6 +63,7 @@ from recordstream.keras import RecordSequence
 from recordstream.runnable import ProgressReporting, entrypoint, run_entrypoint
 
 from sonair._keras import keras, keras_backend
+from sonair.metric_slots import union_metric_specs
 
 logger = get_logger(__name__)
 
@@ -109,8 +110,12 @@ class KerasClassifier(ProgressReporting):
         task: Which entry point ``run()`` dispatches to.
         max_epochs: Training epochs.
         batch_size: Rows per batch.
-        logger: Keras callbacks (``keras.callbacks.CSVLogger`` …) — the Keras analogue of the
-            Lightning backend's ``logger`` slot, so the same flat key drives both.
+        trackers: marainer trackers — one or a list. This run's ONLY output wiring:
+            metrics, provenance and the run manifest all go to them.
+        callbacks: ``keras.callbacks.Callback`` instances (``ModelCheckpoint``,
+            ``EarlyStopping`` …). A file-writing one gets its parent directory created,
+            because Keras opens the path without doing so and the failure otherwise lands
+            minutes into a fit.
         experiment_name: Run identity, recorded in artifacts and tracking.
         run_name: Run identity; a random ``adjective_noun`` when omitted.
         input_key: Record key holding the image.
@@ -124,6 +129,9 @@ class KerasClassifier(ProgressReporting):
             backend's sentinel.
         metrics: Keras metrics — string aliases or ``keras.metrics`` instances. ``None`` picks
             a sensible default.
+        train_metrics / val_metrics / test_metrics: That split's OWN metrics, merged over
+            ``metrics``. This engine computes their UNION — ``compile()`` owns one list (see
+            ``_compiled_metrics``), so a metric asked for on one split appears on the others.
     """
 
     def __init__(
@@ -136,6 +144,7 @@ class KerasClassifier(ProgressReporting):
         max_epochs: int = 10,
         batch_size: int = 32,
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
+        callbacks: Optional[Iterable[Any]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -144,6 +153,9 @@ class KerasClassifier(ProgressReporting):
         optimizer: KerasOptimizer = "adam",
         loss: Optional[KerasLoss] = None,
         metrics: Optional[Sequence[KerasMetric]] = None,
+        train_metrics: Optional[Sequence[KerasMetric]] = None,
+        val_metrics: Optional[Sequence[KerasMetric]] = None,
+        test_metrics: Optional[Sequence[KerasMetric]] = None,
     ) -> None:
         super().__init__()
         # `keras.Model`, not `Lazy[keras.Model]`: the DEFERRED-ness is declared once, on the ctor
@@ -161,7 +173,9 @@ class KerasClassifier(ProgressReporting):
         self.max_epochs = max_epochs
         self.batch_size = batch_size
         # Internal only: this backend's own tracking callback is appended at run time.
-        self.callbacks: List[Any] = []
+        # Stored VERBATIM like `trackers` (lazy-init): entries may be deferred `Fluid`
+        # markers, and they are flowed where they are used.
+        self.callbacks: Optional[Iterable[Any]] = callbacks
         self.experiment_name = experiment_name
         self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
         self.input_key = str(input_key)
@@ -174,6 +188,11 @@ class KerasClassifier(ProgressReporting):
         # from a user's explicit choice.
         self.loss: Optional[KerasLoss] = loss
         self.metrics: Optional[Sequence[KerasMetric]] = metrics
+        # Accepted so ONE config idiom drives every backend — but see `_compiled_metrics()`:
+        # this engine computes their UNION, because `compile()` owns a single metric list.
+        self.train_metrics: Optional[Sequence[KerasMetric]] = train_metrics
+        self.val_metrics: Optional[Sequence[KerasMetric]] = val_metrics
+        self.test_metrics: Optional[Sequence[KerasMetric]] = test_metrics
         self.multilabel: bool = False
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
@@ -301,8 +320,24 @@ class KerasClassifier(ProgressReporting):
         self.model.compile(
             optimizer=flow(self.optimizer),
             loss=flow(self.loss),
-            metrics=[flow(m) for m in (self.metrics or [])],
+            metrics=[flow(m) for m in self._compiled_metrics()],
         )
+
+    def _compiled_metrics(self) -> Sequence[KerasMetric]:
+        """The ONE metric list this engine can compute — the UNION of the shared and split slots.
+
+        ``keras.Model.compile`` takes a single list and reports it on training AND validation
+        (prefixed ``val_``), and ``evaluate()`` reuses the compiled set; there is no hook that
+        narrows a metric to one split short of recompiling between phases, which would discard
+        the optimizer state a fit is in the middle of using. So a metric wired to ``val_metrics``
+        is computed on the training split too.
+
+        Widening is the honest failure here: a metric that appears where it was not asked for is
+        noise a reader can ignore, where DROPPING it would be a wired metric that silently
+        reports nothing. The backends whose loop this project owns (bare torch, Lightning,
+        TensorFlow) narrow properly — see :func:`~sonair.metric_slots.merge_metric_specs`.
+        """
+        return union_metric_specs(self.metrics, self.train_metrics, self.val_metrics, self.test_metrics) or []
 
     def _sequence(self, source: Any, shuffle: bool = False, with_targets: bool = True) -> RecordSequence:
         """recordstream's batching adapter, wearing THIS task's batch shape.
@@ -343,7 +378,7 @@ class KerasClassifier(ProgressReporting):
 
     def _callbacks(self) -> List[Any]:
         """Wired Keras callbacks plus OPTIONAL marainer tracking (a few lines; removable)."""
-        callbacks = [flow(cb) for cb in self.callbacks]
+        callbacks = [flow(cb) for cb in (self.callbacks or [])]
         for callback in callbacks:
             # Keras's file-writing callbacks (`CSVLogger`, `ModelCheckpoint`) open their path
             # without creating its parent, so a perfectly reasonable `./keras_logs/run.csv`

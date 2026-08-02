@@ -276,9 +276,11 @@ the three torch-backed backends read unchanged and `keras.Model.compile()` canno
 take at all — so a block on another engine must override both. Writing
 `metrics: null` restores the classifier's own sentinel, which is *not* the same
 as an empty list: `None` means "not chosen", so `initialize()` resolves the
-engine's defaults from the data. (`val_metrics:` is doubly inapplicable there —
-only the two torch backends have per-split metric slots at all; a Keras
-`compile()` takes one metric list for the whole run.) The same applies
+engine's defaults from the data. (`val_metrics:` goes for the same reason. Every
+backend has that slot, but what each can DO with it differs — the backends whose
+loop this project owns narrow properly, a Keras `compile()` takes one metric list
+for the whole run and so computes the union. See the per-split table in the
+README.) The same applies
 to any key whose value is a framework object (`loss`, `optimizer`). Tracking is
 NOT among them: a marainer tracker is engine-neutral, so `trackers:` is shared by
 every block rather than overridden per framework.

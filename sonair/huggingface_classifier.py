@@ -67,6 +67,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import Dataset as TorchDataset
 
 from sonair.huggingface_model import HuggingFaceModel
+from sonair.metric_slots import merge_metric_specs
 
 logger = get_logger(__name__)
 
@@ -141,8 +142,9 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         max_epochs: Training epochs (``TrainingArguments.num_train_epochs``).
         batch_size: Rows per batch (``per_device_train_batch_size``).
         num_workers: DataLoader worker processes (``dataloader_num_workers``).
-        logger: ``transformers.TrainerCallback`` instances — the Trainer analogue of the
-            Lightning backend's ``logger`` slot, so the same flat key drives both.
+        trackers: marainer trackers — one or a list. This run's ONLY output wiring:
+            metrics, provenance and the run manifest all go to them.
+        callbacks: ``transformers.TrainerCallback`` instances, handed to the ``Trainer``.
         experiment_name: Run identity, recorded in artifacts and tracking.
         run_name: Run identity; a random ``adjective_noun`` when omitted.
         input_key: Record key holding the image.
@@ -160,6 +162,8 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
             Tracking here goes through the `trackers` slot, like every other backend.
         metrics: Metric names (``"accuracy"``, ``"accuracy_multi"``) or callables over
             ``(logits, labels)``. ``None`` picks by target shape.
+        val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is
+            no ``train_metrics``: ``compute_metrics`` is the Trainer's EVALUATION hook.
     """
 
     def __init__(
@@ -174,6 +178,7 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         batch_size: int = 32,
         num_workers: int = 0,
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
+        callbacks: Optional[Iterable[Any]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -184,6 +189,8 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         output_dir: Optional[str] = None,
         report_to: str = "none",
         metrics: Optional[Sequence[HuggingFaceMetric]] = None,
+        val_metrics: Optional[Sequence[HuggingFaceMetric]] = None,
+        test_metrics: Optional[Sequence[HuggingFaceMetric]] = None,
     ) -> None:
         super().__init__()
         # `HuggingFaceNetwork`, not `Lazy[HuggingFaceNetwork]`: the deferred-ness is declared
@@ -199,7 +206,9 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         self.batch_size = batch_size
         self.num_workers = num_workers
         # Internal only: this backend's own tracking callback is appended at run time.
-        self.callbacks: List[Any] = []
+        # Stored VERBATIM like `trackers` (lazy-init): entries may be deferred `Fluid`
+        # markers, and they are flowed where they are used.
+        self.callbacks: Optional[Iterable[Any]] = callbacks
         self.experiment_name = experiment_name
         self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
         self.input_key = str(input_key)
@@ -214,6 +223,11 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         # `initialize()` has peeked the data. A live default here could not be told apart from
         # a user's explicit choice.
         self.metrics: Optional[Sequence[HuggingFaceMetric]] = metrics
+        # Per-split ADDITIONS, merged over `metrics` by the shared rule. There is no
+        # `train_metrics`, and that is a `transformers.Trainer` fact: `compute_metrics` is
+        # its EVALUATION hook, so a train-only metric would never be called.
+        self.val_metrics: Optional[Sequence[HuggingFaceMetric]] = val_metrics
+        self.test_metrics: Optional[Sequence[HuggingFaceMetric]] = test_metrics
         self.multilabel: bool = False
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
@@ -383,7 +397,7 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
             save_strategy="no",
         )
 
-    def _build_trainer(self, train: Any = None, evaluate: Any = None) -> Any:
+    def _build_trainer(self, train: Any = None, evaluate: Any = None, split: str = "val") -> Any:
         from transformers import Trainer
 
         return Trainer(
@@ -392,19 +406,30 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
             train_dataset=train,
             eval_dataset=evaluate,
             data_collator=self._to_hf_batch,
-            compute_metrics=self._compute_metrics,
-            callbacks=[flow(cb) for cb in self.callbacks] or None,
+            compute_metrics=self._metrics_hook(split),
+            callbacks=[flow(cb) for cb in (self.callbacks or [])] or None,
         )
 
-    def _compute_metrics(self, eval_pred: Any) -> Dict[str, float]:
-        """Trainer's metric hook, wearing THIS task's metric choice."""
-        logits, labels = eval_pred.predictions, eval_pred.label_ids
-        logits = logits[0] if isinstance(logits, tuple) else logits
-        out: Dict[str, float] = {}
-        for metric in self.metrics or []:
-            fn = _as_metric(metric)
-            out[getattr(fn, "__name__", str(metric)).lstrip("_")] = float(fn(np.asarray(logits), np.asarray(labels)))
-        return out
+    def _metrics_hook(self, split: str) -> Any:
+        """Trainer's ``compute_metrics``, bound to ONE split's metric list.
+
+        A `Trainer` holds a single hook, so the split is decided where the Trainer is BUILT —
+        ``fit`` evaluates the validation split, ``test`` the held-out one — rather than inside
+        the hook, which cannot tell which dataset it was called on.
+        """
+        metrics = merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or []
+
+        def compute_metrics(eval_pred: Any) -> Dict[str, float]:
+            logits, labels = eval_pred.predictions, eval_pred.label_ids
+            logits = logits[0] if isinstance(logits, tuple) else logits
+            out: Dict[str, float] = {}
+            for metric in metrics:
+                fn = _as_metric(metric)
+                name = getattr(fn, "__name__", str(metric)).lstrip("_")
+                out[name] = float(fn(np.asarray(logits), np.asarray(labels)))
+            return out
+
+        return compute_metrics
 
     def _output_dir(self) -> str:
         """Where Trainer writes its state — beside the sidecar when one is configured."""
@@ -447,7 +472,7 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
     def test(self) -> None:
         if self.test_set is None:
             raise ValueError("HuggingFaceClassifier.test() requires a 'test_set'.")
-        results = self._build_trainer(evaluate=self.test_set).evaluate()
+        results = self._build_trainer(evaluate=self.test_set, split="test").evaluate()
         self._computed_metrics = {k: float(v) for k, v in results.items() if _is_number(v)}
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)

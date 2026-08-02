@@ -532,6 +532,20 @@ A same-named entry shadows, so a split can override one template rather than add
 mappings — a ready-made `MetricCollection` in a split slot *replaces*, since there is no key-wise
 way to combine it.
 
+**Every backend takes the slots its engine can serve**, and the asymmetry is the engine's, not an
+omission:
+
+| Backend | Slots | Why |
+|---|---|---|
+| lightning, torch, tensorflow | `train` · `val` · `test` | the loop is this project's, so each split gets its own metric objects |
+| fastai, huggingface, jax, mlx | `val` · `test` | the engine's metric hook *is* its evaluation hook — a fastai `Learner` validates, a `transformers.Trainer` calls `compute_metrics` on eval, and the JAX / MLX training passes compute the loss and nothing else |
+| keras | all three, **as their union** | `compile()` owns one metric list and reports it on train *and* validation, so a metric asked for on one split appears on the others |
+
+Keras widening rather than dropping is deliberate: a metric computed where it was not asked for
+is noise you can ignore, where a wired metric that silently reports nothing is a bug you cannot
+see. `tests/test_metric_slots.py` pins the table in both directions — a backend must declare the
+slots it serves, and must *not* offer one its engine cannot compute.
+
 ### Metrics that are not a single number (a confusion matrix)
 
 Most metrics compute to one number, which is what a metric logger stores. A few do not — a
@@ -556,7 +570,12 @@ val/confusion:
 
 Rows are true classes, columns predicted (the torchmetrics convention). Labels come from the
 run's `class_names` when the dataset has them, and are class indices otherwise. The metrics
-sidecar and the `computed_metrics` output stay scalar-only. See
+sidecar and the `computed_metrics` output stay scalar-only.
+
+Set `plot_metrics: true` to *also* send each matrix as a matplotlib heatmap through
+`Tracker.log_figure` — glanceable, and the only readable form once there are many classes. It is
+off by default because it makes matplotlib (`marainer[plot]`) a cost of every eval epoch, where
+the table costs nothing and works in a plain log. See
 [`examples/train_efficientvit_b0_mnist.yaml`](examples/train_efficientvit_b0_mnist.yaml) for the
 wiring in context — and note that a backend on another engine must override both keys, since
 torchmetrics classes are `framework="torch"`.

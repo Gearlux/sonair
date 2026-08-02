@@ -43,7 +43,6 @@ Run it with ``sonair train cfg.yaml --framework torch``.
 """
 
 import inspect
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Union, cast
 
@@ -58,7 +57,7 @@ from marainer.run_names import generate_run_name
 from marainer.torch import build_metric_collection, scalar_metrics
 from marainer.tracking.base import Tracker, as_tracker_list
 from marainer.tracking.provenance import capture_log_file
-from marainer.tracking.render import render_matrix_as_table
+from marainer.tracking.render import render_matrix_as_figure, render_matrix_as_table
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -81,6 +80,8 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from torchmetrics import Metric, MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MultilabelAccuracy, MultilabelF1Score
+
+from sonair.metric_slots import merge_metric_specs
 
 logger = get_logger(__name__)
 
@@ -151,6 +152,9 @@ class TorchClassifier(TorchRunner, ProgressReporting):
             ``metrics`` — how a metric is added to one split only (a confusion matrix on
             validation). Each slot holds the spec until :meth:`initialize` builds it, and the
             live prefixed ``MetricCollection`` after.
+        plot_metrics: ALSO send each non-scalar metric to the trackers as a matplotlib
+            heatmap, not only as a table. Off by default: it makes matplotlib
+            (``marainer[plot]``) a cost of every eval epoch, where the table costs nothing.
         device: Where to run — see :data:`Device`.
         checkpoint_dir: Directory for ``model.pt`` (a plain ``state_dict``) and the run's
             ``class_names.json``. ``None`` writes no weights, which is what a smoke run wants.
@@ -181,6 +185,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         train_metrics: MetricsSpec = None,
         val_metrics: MetricsSpec = None,
         test_metrics: MetricsSpec = None,
+        plot_metrics: bool = False,
         device: Device = "auto",
         checkpoint_dir: Optional[str] = None,
         grad_clip: Optional[float] = None,
@@ -235,6 +240,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         self.val_metrics: Any = val_metrics
         self.test_metrics: Any = test_metrics
         self._metrics_built: bool = False
+        self.plot_metrics = plot_metrics
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
         self.metrics_sidecar_path: Optional[str] = None
         # Stored VERBATIM (lazy-init mandate: the constructor does no work). It may hold a
@@ -403,19 +409,15 @@ class TorchClassifier(TorchRunner, ProgressReporting):
             )
 
     def _build_split_metrics(self, spec: Any, prefix: str) -> MetricCollection:
-        """One split's live, prefixed collection — its own spec MERGED over the shared one.
+        """One split's live, prefixed collection — its own spec merged over the shared one.
 
-        Identical rule to the Lightning backend, and that is the point: ``metrics`` is what
-        every split measures, ``<split>_metrics`` what THIS split measures on top, so a
-        confusion matrix can be added to validation alone without restating the shared
-        accuracy / F1. A same-named entry shadows; a non-mapping spec (a ready-made
-        ``MetricCollection``, a list) REPLACES, because there is no key-wise way to merge it.
+        The combination rule is :func:`~sonair.metric_slots.merge_metric_specs`, shared with
+        every other backend so a config moving between them cannot change shape; what is torch's
+        alone is the rest of this line — sizing the templates and prefixing the collection.
         """
-        if spec is None:
-            spec = self.metrics
-        elif isinstance(spec, Mapping) and isinstance(self.metrics, Mapping):
-            spec = {**self.metrics, **spec}
-        return build_metric_collection(spec, **self._metric_dims()).clone(prefix=prefix)
+        return build_metric_collection(merge_metric_specs(self.metrics, spec), **self._metric_dims()).clone(
+            prefix=prefix
+        )
 
     def _metric_dims(self) -> Dict[str, int]:
         """The sizing kwarg metric templates are flowed with.
@@ -552,8 +554,17 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         for payload in confusion_matrices_payload(computed, self._class_names or None):
             table = render_matrix_as_table(payload["name"], payload["counts"], payload["class_names"])
             logger.info(table)
+            # Rendered ONCE per report, not once per tracker: a figure is real work, and every
+            # tracker can be handed the same one.
+            figure = (
+                render_matrix_as_figure(payload["name"], payload["counts"], payload["class_names"])
+                if self.plot_metrics and trackers
+                else None
+            )
             for tracker in trackers:
                 tracker.log_text(payload["name"], table, step=step)
+                if figure is not None:
+                    tracker.log_figure(payload["name"], figure, step=step)
         values = scalar_metrics(computed)
         collection.reset()
         return values

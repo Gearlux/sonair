@@ -693,9 +693,10 @@ not an instance of its framework's own module type.
   where `keras` overrides four.
 - This is the strongest evidence the project has for its own claim. The `fastai`
   block in `examples/train_efficientvit_b0_mnist.yaml` changes the runnable class
-  and the logger, and reuses the model, the preprocessing chain and the batch
-  shape *verbatim*. Nothing had to be generalised to make that work — it fell out
-  of the record model and the `@entrypoint` dispatch already being engine-free.
+  and its metric names, and reuses the model, the preprocessing chain, the batch
+  shape and the trackers *verbatim*. Nothing had to be generalised to make that
+  work — it fell out of the record model and the `@entrypoint` dispatch already
+  being engine-free.
 
 **Example.**
 
@@ -703,10 +704,8 @@ not an instance of its framework's own module type.
 # the whole cost of the fastai backend, in config
 fastai: !scope:framework=fastai
   runnable: !class:sonair.FastaiClassifier
-    metrics: [accuracy, top_k_accuracy]
-  logger:
-    - !class:fastai.callback.progress.CSVLogger
-      fname: fastai_logs/mnist.csv
+    metrics: [accuracy, top_k_accuracy]   # NAMES: fastai metrics are plain functions
+  val_metrics: null                       # the torchmetrics above have no reader here
 ```
 
 **What you may change.** Add a model wrapper or a loss module when the backend

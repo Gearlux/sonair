@@ -140,3 +140,45 @@ def test_every_backend_forwards_metrics_to_trackers(stem: str) -> None:
         f"{stem} never forwards metrics to its trackers — a wired backend would record the "
         "config and draw an empty curve."
     )
+
+
+CALLBACK_BACKENDS = [
+    "keras_classifier",
+    "tensorflow_classifier",
+    "fastai_classifier",
+    "jax_classifier",
+    "mlx_classifier",
+    "huggingface_classifier",
+]
+
+
+@pytest.mark.parametrize("stem", BACKENDS)
+def test_no_backend_keeps_a_logger_slot(stem: str) -> None:
+    """`logger:` named two different things and neither survived.
+
+    Lightning's held `pytorch_lightning.loggers` (now the trackers, adapted); the other six
+    held framework CALLBACKS under a misleading name (now `callbacks:`).
+    """
+    for node in ast.walk(ast.parse(module_source(stem))):
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__":
+            names = {arg.arg for arg in node.args.args + node.args.kwonlyargs}
+            assert "logger" not in names, f"{stem} still declares a `logger` constructor slot"
+            assert "trackers" in names
+
+
+@pytest.mark.parametrize("stem", CALLBACK_BACKENDS)
+def test_a_list_valued_callbacks_key_reaches_the_slot(stem: str) -> None:
+    """The same annotation gate `trackers` needed: a LIST only lands on a list-admitting slot.
+
+    Checked on the ANNOTATION rather than by building each backend, because most need a
+    framework a default install lacks — and a bare `List[...]` assigned post-construction is
+    exactly the shape that silently swallowed the key before.
+    """
+    for node in ast.walk(ast.parse(module_source(stem))):
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__":
+            annotations = {arg.arg: ast.unparse(arg.annotation) for arg in node.args.args if arg.annotation is not None}
+            assert "callbacks" in annotations, f"{stem} cannot wire framework callbacks from config"
+            assert "Iterable" in annotations["callbacks"], (
+                f"{stem}: `callbacks` must admit an iterable, or confluid will not broadcast a "
+                f"list-valued key into it (got {annotations['callbacks']})"
+            )

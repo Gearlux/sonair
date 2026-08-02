@@ -67,6 +67,8 @@ from recordstream import (
 from recordstream.keras import RecordSequence
 from recordstream.runnable import ProgressReporting, entrypoint, run_entrypoint
 
+from sonair.metric_slots import merge_metric_specs
+
 logger = get_logger(__name__)
 
 #: Which entry point :meth:`JaxClassifier.run` dispatches to — the same vocabulary every other
@@ -128,9 +130,10 @@ class JaxClassifier(ProgressReporting):
         task: Which entry point ``run()`` dispatches to.
         max_epochs: Training epochs.
         batch_size: Rows per batch.
-        logger: Callables invoked as ``callback(epoch, logs)`` after each epoch — the JAX
-            analogue of the other backends' ``logger`` slot. JAX ships no callback protocol,
-            so this is deliberately the plainest thing that works.
+        trackers: marainer trackers — one or a list. This run's ONLY output wiring:
+            metrics, provenance and the run manifest all go to them.
+        callbacks: Callables invoked as ``callback(epoch, logs)`` after each epoch —
+            JAX ships no callback protocol, so this is the plainest thing that works.
         experiment_name: Run identity, recorded in artifacts and tracking.
         run_name: Run identity; a random ``adjective_noun`` when omitted.
         input_key: Record key holding the image.
@@ -143,6 +146,8 @@ class JaxClassifier(ProgressReporting):
             target shape, like every other backend's sentinel.
         metrics: Metric names (``"accuracy"``, ``"accuracy_multi"``) or callables. ``None``
             picks by target shape.
+        val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is
+            no ``train_metrics``: the training pass computes the loss and nothing else.
         jit: Trace the step functions with ``nnx.jit``. On by default — that IS the JAX story.
             Turn it off to read a Python traceback from inside a step.
     """
@@ -158,6 +163,7 @@ class JaxClassifier(ProgressReporting):
         max_epochs: int = 10,
         batch_size: int = 32,
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
+        callbacks: Optional[Iterable[Any]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -167,6 +173,8 @@ class JaxClassifier(ProgressReporting):
         optimizer: JaxOptimizer = "adam",
         loss: Optional[JaxLoss] = None,
         metrics: Optional[Sequence[JaxMetric]] = None,
+        val_metrics: Optional[Sequence[JaxMetric]] = None,
+        test_metrics: Optional[Sequence[JaxMetric]] = None,
         jit: bool = True,
     ) -> None:
         super().__init__()
@@ -183,7 +191,9 @@ class JaxClassifier(ProgressReporting):
         self.max_epochs = max_epochs
         self.batch_size = batch_size
         # Internal only: this backend's own tracking callback is appended at run time.
-        self.callbacks: List[Any] = []
+        # Stored VERBATIM like `trackers` (lazy-init): entries may be deferred `Fluid`
+        # markers, and they are flowed where they are used.
+        self.callbacks: Optional[Iterable[Any]] = callbacks
         self.experiment_name = experiment_name
         self.run_name = run_name if run_name is not None else generate_run_name(prefix=_run_prefix(task))
         self.input_key = str(input_key)
@@ -197,6 +207,12 @@ class JaxClassifier(ProgressReporting):
         # from a user's explicit choice.
         self.loss: Optional[JaxLoss] = loss
         self.metrics: Optional[Sequence[JaxMetric]] = metrics
+        # Per-split ADDITIONS, merged over `metrics` by the shared rule. There is no
+        # `train_metrics` here and that is a property of this loop, not an omission: the
+        # training pass computes the LOSS and nothing else, so a train-only metric would
+        # have nowhere to be computed.
+        self.val_metrics: Optional[Sequence[JaxMetric]] = val_metrics
+        self.test_metrics: Optional[Sequence[JaxMetric]] = test_metrics
         self.jit = jit
         self.multilabel: bool = False
         self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
@@ -366,15 +382,26 @@ class JaxClassifier(ProgressReporting):
             return nnx.jit(train_step), nnx.jit(eval_step)
         return train_step, eval_step
 
-    def _metric_values(self, logits: Any, labels: Any) -> Dict[str, float]:
+    def _split_metrics(self, split: str) -> Sequence[JaxMetric]:
+        """The metric list for one eval split — its own slot merged over the shared ``metrics``.
+
+        The combination rule is the workspace-wide one
+        (:func:`~sonair.metric_slots.merge_metric_specs`), so a config moving between backends
+        keeps its shape. Only ``val`` and ``test`` have a slot: this loop computes metrics on the
+        eval pass only, so a train-only metric would have nowhere to go.
+        """
+        return merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or []
+
+    def _metric_values(self, logits: Any, labels: Any, metrics: Sequence[JaxMetric]) -> Dict[str, float]:
         out: Dict[str, float] = {}
-        for metric in self.metrics or []:
+        for metric in metrics:
             fn = _as_metric(metric)
             out[getattr(fn, "__name__", str(metric)).lstrip("_")] = float(fn(logits, labels))
         return out
 
-    def _run_epoch(self, sequence: RecordSequence, step: Any, model: Any) -> Dict[str, float]:
+    def _run_epoch(self, sequence: RecordSequence, step: Any, model: Any, split: str = "val") -> Dict[str, float]:
         """One pass over ``sequence`` in EVAL mode, returning ``{"loss": …, **metrics}``."""
+        metrics = self._split_metrics(split)
         total, batches = 0.0, 0
         sums: Dict[str, float] = {}
         for index in range(len(sequence)):
@@ -382,7 +409,7 @@ class JaxClassifier(ProgressReporting):
             loss, logits = step(model, jnp.asarray(x), jnp.asarray(y))
             total += float(loss)
             batches += 1
-            for key, value in self._metric_values(logits, jnp.asarray(y)).items():
+            for key, value in self._metric_values(logits, jnp.asarray(y), metrics).items():
                 sums[key] = sums.get(key, 0.0) + value
         if not batches:
             return {"loss": float("nan")}
@@ -418,7 +445,7 @@ class JaxClassifier(ProgressReporting):
             # A `fit()` would have done this for us; a hand-written loop has to. Forgetting it
             # is INVISIBLE — training just runs on one fixed row order forever.
             train_seq.on_epoch_end()
-            for callback in self.callbacks:
+            for callback in self.callbacks or []:
                 flow(callback)(epoch, logs)
             # Trackers are the other per-epoch consumer. A `fit()` forwards its logs to every
             # attached logger; a hand-written loop reaches them the same way it reaches callbacks.
@@ -445,7 +472,7 @@ class JaxClassifier(ProgressReporting):
         if self.test_set is None:
             raise ValueError("JaxClassifier.test() requires a 'test_set'.")
         _, eval_step = self._make_steps()
-        self._computed_metrics = self._run_epoch(self._sequence(self.test_set), eval_step, self.model)
+        self._computed_metrics = self._run_epoch(self._sequence(self.test_set), eval_step, self.model, "test")
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 

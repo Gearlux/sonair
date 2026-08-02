@@ -972,6 +972,67 @@ def test_a_rendered_matrix_reaches_every_wired_tracker() -> None:
     assert step is None  # no Trainer attached, so there is no epoch to report
 
 
+def test_no_figure_is_rendered_unless_plot_metrics_asks() -> None:
+    """The default stays free: the table costs nothing, a figure costs matplotlib per epoch."""
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.texts: List[Any] = []
+            self.figures: List[Any] = []
+
+        def log_text(self, name: str, text: str, step: Any = None) -> None:
+            self.texts.append(name)
+
+        def log_figure(self, name: str, figure: Any, step: Any = None) -> None:
+            self.figures.append((name, figure))
+
+    def _report(plot: bool) -> _Recorder:
+        tracker = _Recorder()
+        trainer = _confusion_trainer()
+        trainer.trackers = cast(Any, [tracker])
+        trainer.plot_metrics = plot
+        trainer.initialize()
+        trainer.val_metrics.update(torch.randn(8, 3), torch.randint(0, 3, (8,)))
+        trainer.log_dict = lambda payload, **_: None  # type: ignore[method-assign]
+        trainer._report_epoch_metrics(trainer.val_metrics)
+        return tracker
+
+    off = _report(False)
+    assert off.texts == ["val/confusion"] and off.figures == []
+
+    on = _report(True)
+    assert on.texts == ["val/confusion"]
+    assert len(on.figures) == 1
+    name, figure = on.figures[0]
+    assert name == "val/confusion" and type(figure).__name__ == "Figure"
+
+
+def test_one_figure_is_rendered_for_all_trackers() -> None:
+    """Rendering is real work; every tracker can be handed the same figure."""
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.figures: List[Any] = []
+
+        def log_text(self, name: str, text: str, step: Any = None) -> None:
+            pass
+
+        def log_figure(self, name: str, figure: Any, step: Any = None) -> None:
+            self.figures.append(figure)
+
+    a, b = _Recorder(), _Recorder()
+    trainer = _confusion_trainer()
+    trainer.trackers = cast(Any, [a, b])
+    trainer.plot_metrics = True
+    trainer.initialize()
+    trainer.val_metrics.update(torch.randn(8, 3), torch.randint(0, 3, (8,)))
+    trainer.log_dict = lambda payload, **_: None  # type: ignore[method-assign]
+
+    trainer._report_epoch_metrics(trainer.val_metrics)
+
+    assert a.figures[0] is b.figures[0]
+
+
 # ---------------------------------------------------------------------------
 # Per-split metric slots: `<split>_metrics` merged over the shared `metrics`
 # ---------------------------------------------------------------------------

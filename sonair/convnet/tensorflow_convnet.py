@@ -33,6 +33,40 @@ logger = get_logger(__name__)
 __all__ = ["TensorFlowConvNet"]
 
 
+def _glorot_uniform(shape: Tuple[int, ...], seed: int) -> Any:
+    """Glorot-uniform weights from ``tf.random``, written out rather than taken from an initializer.
+
+    **`tf.initializers` IS Keras**, not TensorFlow: since TF 2.16 `tf.keras` is Keras 3, and
+    `tf.initializers.GlorotUniform` resolves to `keras.initializers.GlorotUniform`
+    (`is`-identical, measured). Called in a process where Keras is bound to the TORCH backend —
+    which is this workspace's default, since `recordstream.keras` picks the first engine installed
+    and torch wins — it returns a **torch tensor**, and `tf.Variable` then dies converting an MPS
+    tensor to numpy (*"can't convert mps:0 device type tensor to numpy"*). So a module claiming to
+    be raw `tf.nn` cannot reach for `tf.initializers` at all.
+
+    The bug is invisible until both engines share ONE interpreter, so a file that passes alone
+    fails after any Keras test has run. It was found in the segmentation project's twin of this
+    module and fixed here in the same change; the five lines are duplicated rather than shared
+    because the two projects must not depend on each other.
+
+    ``stateless_uniform`` rather than ``tf.random.uniform``: the seed is the whole argument for a
+    reproducible model, and the stateful op reads a GLOBAL seed another library can move.
+
+    The fans are computed exactly as ``keras.src.initializers.random_initializers.compute_fans``
+    does, so both kernel shapes this model uses are scaled correctly — a Dense head ``(in, out)``
+    has no receptive field, a conv kernel ``(kh, kw, in, out)`` does.
+    """
+    receptive_field = 1
+    for dim in shape[:-2]:
+        receptive_field *= int(dim)
+    if len(shape) == 2:  # a Dense kernel `(in, out)` — no receptive field at all
+        fan_in, fan_out = int(shape[0]), int(shape[1])
+    else:  # a conv kernel `(..., in, out)`
+        fan_in, fan_out = int(shape[-2]) * receptive_field, int(shape[-1]) * receptive_field
+    limit = (6.0 / float(fan_in + fan_out)) ** 0.5
+    return tf.random.stateless_uniform(shape, seed=(seed, 0), minval=-limit, maxval=limit, dtype=tf.float32)
+
+
 class _ConvBlock(tf.Module):
     """One conv → batch-norm → ReLU → max-pool block, in raw ``tf.nn`` ops.
 
@@ -45,8 +79,8 @@ class _ConvBlock(tf.Module):
 
     def __init__(self, in_channels: int, width: int, seed: int, momentum: float = 0.99) -> None:
         super().__init__(name=f"block_{in_channels}_{width}")
-        initializer = tf.initializers.GlorotUniform(seed=seed)
-        self.kernel = tf.Variable(initializer(shape=(KERNEL_SIZE, KERNEL_SIZE, in_channels, width)), name="kernel")
+        kernel = _glorot_uniform((KERNEL_SIZE, KERNEL_SIZE, in_channels, width), seed=seed)
+        self.kernel = tf.Variable(kernel, name="kernel")
         self.bias = tf.Variable(tf.zeros((width,)), name="bias")
         self.gamma = tf.Variable(tf.ones((width,)), name="gamma")
         self.beta = tf.Variable(tf.zeros((width,)), name="beta")
@@ -86,8 +120,8 @@ class _ConvNet(tf.Module):
         for index, width in enumerate(widths):
             self.blocks.append(_ConvBlock(channels, width, seed=seed + index))
             channels = width
-        head_init = tf.initializers.GlorotUniform(seed=seed + len(widths))
-        self.head_kernel = tf.Variable(head_init(shape=(channels, num_classes)), name="head_kernel")
+        head_kernel = _glorot_uniform((channels, num_classes), seed=seed + len(widths))
+        self.head_kernel = tf.Variable(head_kernel, name="head_kernel")
         self.head_bias = tf.Variable(tf.zeros((num_classes,)), name="head_bias")
         self.dropout = dropout
 

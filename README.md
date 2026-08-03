@@ -142,6 +142,25 @@ The run still supplies what only it knows — the data, the model, this split's
 metrics — as runtime arguments, so those cannot be pinned from config and a slot
 never has to enumerate them.
 
+Because these slots hold deferred markers, you can also **tune one without
+restating it**. The backend declares `AdamW(lr=1e-4, weight_decay=0.05)`; a block
+changes only what it names, and the bare form cascades like any other key:
+
+```yaml
+runnable: !class:LightningClassifier
+  model: !class:TimmModel
+  optimizer:          # tunes the declared AdamW — weight_decay: 0.05 survives
+    lr: 0.001
+```
+
+```bash
+sonair train -c config.yaml --lr 0.001    # the bare form cascades to the slot
+```
+
+Writing a marker instead — `optimizer: !lazy:torch.optim.SGD(lr=0.001)` — replaces
+the slot outright, which is what you want for a *different* optimizer; restate the
+hyperparameters you need, since the previous defaults do not carry over.
+
 ### Full end-to-end example
 
 `examples/train_efficientvit_b0_mnist.yaml` trains an efficientvit classifier on

@@ -52,6 +52,11 @@ fastai_logs/
 # by-product; the RESULTS live in whichever tracker the sweep was pointed at.
 sweep_logs/
 torch_runs/
+# MLflow's own default store: an `MlflowTracker` with no `tracking_uri` falls back to
+# the ambient one, and with nothing configured that is `./mlruns` — so a sweep run from
+# this directory leaves several MB of run artifacts here. Wiring `tracking_uri` (the
+# example config shows the literal `http://localhost:5005`) never reaches this path.
+mlruns/
 hf_runs/
 exported/
 checkpoints/

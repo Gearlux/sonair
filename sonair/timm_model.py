@@ -35,7 +35,7 @@ dataset-derived ``num_classes`` at flow time (omit it from the config)::
 (Pin ``num_classes`` explicitly only to override the dataset-derived value.)
 """
 
-from typing import Optional, cast
+from typing import List, Optional, cast
 
 import timm
 import torch
@@ -43,6 +43,7 @@ import torch.nn as nn
 from confluid import configurable
 from loggair import get_logger
 from marainer.torch import load_lightning_checkpoint
+from marainer.uri import ModelRef, file_model_ref, hf_model_ref
 from torch import Tensor
 
 logger = get_logger(__name__)
@@ -131,6 +132,30 @@ class TimmModel(nn.Module):
         # under the public name `classifier` so the state_dict round-trips as
         # `classifier.*` through marainer's Lightning checkpoint loading.
         self.classifier: Optional[nn.Module] = None
+
+    @property
+    def model_refs(self) -> List[ModelRef]:
+        """The weight artifacts this model loads — see :mod:`marainer.uri`.
+
+        ``timm.get_pretrained_cfg`` resolves a bare architecture name to the exact Hub repo
+        INCLUDING its weight tag (``efficientvit_b0`` -> ``timm/efficientvit_b0.r224_in1k``) from
+        timm's static registry — no build, no download, and ``None`` for a name it does not know —
+        so the run record names the weights that were actually fetched rather than the shorthand
+        the config wrote. That is what keeps this cheap enough to satisfy the lazy-construction
+        rule: asking never touches the network.
+
+        ``pretrained=False`` with no checkpoint reports NOTHING: the weights are random and the
+        architecture is configuration, already recorded as such.
+        """
+        refs: List[ModelRef] = []
+        if self.pretrained and self.model_name:
+            cfg = timm.get_pretrained_cfg(self.model_name)
+            hub_id = getattr(cfg, "hf_hub_id", None) if cfg is not None else None
+            if hub_id:
+                refs.append(hf_model_ref(hub_id))
+        if self.checkpoint_path:
+            refs.append(file_model_ref(self.checkpoint_path))
+        return refs
 
     def solidify(self) -> nn.Module:
         """Build the timm backbone on first call (cached in ``self.classifier``) and return it.

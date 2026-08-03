@@ -259,3 +259,24 @@ def test_no_tracker_write_is_sequenced_after_the_run_ends(stem: str) -> None:
         f"{stem} logs the class-names artifact at line {order['save_class_names']}, after the "
         f"training call at line {end_of_training} — by then the tracking callback has ended the run."
     )
+
+
+@pytest.mark.parametrize("stem", ["fastai_classifier", "huggingface_classifier"])
+def test_the_forking_backends_warm_their_splits_in_the_parent(stem: str) -> None:
+    """These two run their DataLoader workers under `fork`, so a lazy first read must not be theirs.
+
+    `import fastai` sets the multiprocessing start method to `fork` (measured; a clean interpreter
+    leaves it unset, i.e. spawn on macOS), and transformers' Trainer inherits whatever is set. A
+    worker that is the FIRST to touch a HuggingFace source then builds it inside a forked child,
+    where `load_dataset` -> `hf_hub_download` -> `httpx.Client()` -> `urllib.request.getproxies`
+    -> `_scproxy` reaches CoreFoundation, which is not fork-safe: SIGSEGV, no Python traceback,
+    surfacing only as `DataLoader worker exited unexpectedly`.
+
+    Spawning instead is NOT the fix — measured: a model on MPS cannot be shared to a spawned
+    worker (`_share_filename_: only available on CPU`). Warming in the parent is, so it is pinned
+    here rather than left to whoever next edits `_initialize_fit`.
+    """
+    assert "ensure_materialized" in called_names(module_source(stem)), (
+        f"{stem} forks its DataLoader workers but never warms its splits in the parent — call "
+        "recordstream.ensure_materialized() beside ensure_record_dataset() in _initialize_fit()."
+    )

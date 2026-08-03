@@ -22,10 +22,11 @@ config wiring ``transformers`` directly:
 string you would pass to ``from_pretrained``.
 """
 
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from confluid import configurable
 from loggair import get_logger
+from marainer.uri import ModelRef, hf_model_ref
 
 logger = get_logger(__name__)
 
@@ -62,6 +63,16 @@ class HuggingFaceModel:
         self.pretrained = pretrained
         self.trust_remote_code = trust_remote_code
         self._model: Optional[Any] = None
+
+    @property
+    def model_refs(self) -> List[ModelRef]:
+        """The weight artifacts this model loads — see :mod:`marainer.uri`.
+
+        ``model_name`` IS a Hub repository id, so the reference is the id itself; nothing has to
+        be resolved and nothing is fetched to answer. ``pretrained=False`` builds the same
+        architecture with fresh weights and therefore loads no artifact at all.
+        """
+        return [hf_model_ref(self.model_name)] if self.pretrained and self.model_name else []
 
     def solidify(self) -> Any:
         """Build (once) and return the live ``transformers`` model.

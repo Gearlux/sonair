@@ -28,6 +28,7 @@ from typing import Any, List, Optional, Tuple
 
 from confluid import configurable
 from loggair import get_logger
+from marainer.uri import ModelRef, file_model_ref
 
 # `sonair._tensorflow` pins KERAS_BACKEND=tensorflow BEFORE importing keras; importing `tf`
 # through it keeps that ordering in one place. See `sonair/tensorflow_classifier.py`.
@@ -75,6 +76,16 @@ class TensorFlowModel(tf.Module):
         self.trainable = trainable
         self.tags = tags
         self._model: Optional[Any] = None
+
+    @property
+    def model_refs(self) -> List[ModelRef]:
+        """The weight artifacts this model loads — see :mod:`marainer.uri`.
+
+        The SavedModel directory IS the model, and its role is ``pretrained`` rather than
+        ``checkpoint``: the distinction the roles draw is whether the weights came from outside
+        the run, and a SavedModel wired into a config did — whoever exported it, this run did not.
+        """
+        return [file_model_ref(self.saved_model, role="pretrained")] if self.saved_model else []
 
     def solidify(self) -> Any:
         """Load (once) and return the live SavedModel object.

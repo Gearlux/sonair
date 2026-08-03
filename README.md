@@ -831,3 +831,25 @@ Run-node results panel automatically.
 | `keras` | Keras 3 — the API both `[keras]` and `[tensorflow]` wire to. |
 | `tensorflow` | The engine under `[tensorflow]`, and what makes SavedModel export possible. |
 | `fastai` | The `Learner` and the `*Flat` losses (`[fastai]`). |
+
+## What the run record says about the model
+
+Every model wrapper here names the weight artifacts it loads, so a run's manifest points at them
+instead of leaving a reader to work out which registry resolves a bare architecture name. Nothing
+has to be called for it — the tracking layer walks the configured graph and records what it finds:
+
+```yaml
+models:
+- {kind: hf, name: timm/efficientvit_b0.r224_in1k, role: pretrained, slot: model,
+   url: 'https://huggingface.co/timm/efficientvit_b0.r224_in1k'}
+- {kind: file, name: /w/runs/epoch=3.ckpt, role: checkpoint, slot: model, url: null}
+```
+
+**One wrapper may report several**, each with the `role` it played: `pretrained` for weights that
+came from outside the run, `checkpoint` for weights a previous run wrote. A model trained from
+scratch loaded no artifact and records nothing — the architecture it used is configuration, and is
+already in the manifest's `params`.
+
+Reading the identity is free and never builds the model: the properties consult stored
+configuration only. Adding one to your own wrapper is a single `model_refs` property — see
+[marainer's `uri` module](https://github.com/Gearlux/marainer).

@@ -79,6 +79,7 @@ from recordstream import (
     class_names,
     classification_output,
     collate_records,
+    ensure_materialized,
     ensure_record_dataset,
     first_value,
     is_class_id,
@@ -300,11 +301,18 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
             raise TypeError(f"FastaiClassifier needs a torch nn.Module, got {type(self.model).__name__}.")
 
     def _initialize_fit(self) -> None:
-        self.train_set = ensure_record_dataset(self.train_set)
+        # Every split is READ once here, in the parent. `ensure_record_dataset` normalizes the
+        # TYPE; this normalizes the STATE, and it is load-bearing for this backend specifically:
+        # `import fastai` sets the multiprocessing start method to `fork`, so a DataLoader worker
+        # that is the FIRST to touch a lazy source builds it inside a forked child — and a
+        # HuggingFace source reaching the Hub there segfaults in CoreFoundation, which is not
+        # fork-safe. Warming in the parent makes the child inherit a source that needs nothing.
+        # See `recordstream.ensure_materialized`.
+        self.train_set = ensure_materialized(ensure_record_dataset(self.train_set))
         if self.val_set is not None:
-            self.val_set = ensure_record_dataset(self.val_set)
+            self.val_set = ensure_materialized(ensure_record_dataset(self.val_set))
         if self.test_set is not None:
-            self.test_set = ensure_record_dataset(self.test_set)
+            self.test_set = ensure_materialized(ensure_record_dataset(self.test_set))
 
         first = first_value(self.train_set, self.target_key)
         self.multilabel = isinstance(first, (list, tuple, set))

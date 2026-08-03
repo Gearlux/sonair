@@ -25,16 +25,23 @@ This module holds the ZOO WRAPPER only. The other kind of Keras model — the sh
 :mod:`sonair.convnet.spec`, which wraps nothing — is :class:`sonair.convnet.keras_convnet.KerasConvNet`.
 """
 
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
+from urllib.parse import quote, urlencode
 
 from confluid import configurable
 from loggair import get_logger
+from marainer.uri import ModelRef
 
 from sonair._keras import keras, keras_backend
 
 logger = get_logger(__name__)
 
-__all__ = ["KerasModel"]
+#: Scheme naming the ``keras.applications`` zoo in a model reference. Its weights come from the
+#: library's own release assets rather than a public repository, so there is a registry to name
+#: but no URL to open — see :attr:`KerasModel.model_refs`.
+KERAS_URI_PREFIX = "keras://applications/"
+
+__all__ = ["KERAS_URI_PREFIX", "KerasModel"]
 
 
 @configurable(task="classification", role="model", lazy=True, framework="keras")
@@ -77,6 +84,18 @@ class KerasModel(keras.Model):
         self.pooling = pooling
         self.dropout = dropout
         self._model: Optional[Any] = None
+
+    @property
+    def model_refs(self) -> List[ModelRef]:
+        """The weight artifacts this model loads — see :mod:`marainer.uri`.
+
+        ``keras.applications`` weights have no public repository URL to point at — the library
+        downloads them from its own release assets — so the reference names the registry and the
+        entry within it, and reports no browsable link rather than inventing one.
+        """
+        if not (self.pretrained and self.model_name):
+            return []
+        return [ModelRef(uri=f"{KERAS_URI_PREFIX}{quote(self.model_name)}?{urlencode({'weights': 'imagenet'})}")]
 
     def solidify(self) -> Any:
         """Build (once) and return the live ``keras.Model``.

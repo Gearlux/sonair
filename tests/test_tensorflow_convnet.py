@@ -15,6 +15,7 @@ Needs a Keras bound to the TensorFlow engine. A full `pytest` run binds torch fi
 """
 
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,36 @@ def test_the_module_imports_tf_through_the_pinning_shim() -> None:
 
     assert "from sonair._tensorflow import tf" in source
     assert "\nimport tensorflow" not in source, "must not import tensorflow directly"
+
+
+def test_no_tensorflow_module_reaches_back_into_keras_through_a_tf_alias() -> None:  # noqa: D401
+    """`tf.initializers` / `tf.losses` / `tf.metrics` / `tf.keras` are ALL Keras since TF 2.16.
+
+    `tf.initializers.GlorotUniform` *is* `keras.initializers.GlorotUniform` — the same object, not
+    a wrapper — so in a process where Keras is bound to the TORCH engine (this workspace's
+    default) it returns a **torch tensor** and `tf.Variable` dies converting an MPS tensor to
+    numpy. The module then fails only when another test has already imported keras, so it passes
+    alone and fails in a full run.
+
+    Scanned as SOURCE across every raw-TensorFlow module rather than asserted about one, because
+    the mistake is a natural one to make in the next such module too — and this test runs on a
+    machine with no TensorFlow at all, which is where a fresh module is most likely written.
+    """
+    root = Path(__file__).resolve().parents[1] / "sonair"
+    aliases = ("tf.initializers", "tf.losses", "tf.metrics", "tf.optimizers", "tf.keras.")
+    offenders = {}
+    for path in sorted(root.rglob("*.py")):
+        code = "\n".join(line for line in path.read_text().splitlines() if not line.lstrip().startswith("#"))
+        # Strip docstrings: these very aliases are NAMED in the explanations above and below.
+        code = re.sub(r'"""(?:.|\n)*?"""', "", code)
+        hits = [alias for alias in aliases if alias in code]
+        if hits:
+            offenders[path.relative_to(root).as_posix()] = hits
+    assert not offenders, (
+        f"these reach Keras through a `tf.` alias: {offenders}. Since TF 2.16 `tf.keras` IS "
+        "Keras 3, so on a torch-bound engine they return torch tensors. Write the primitive out "
+        "(see `_glorot_uniform`) or reach for `keras` explicitly and mean it."
+    )
 
 
 def test_the_class_is_exported() -> None:

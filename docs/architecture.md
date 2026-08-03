@@ -1056,3 +1056,50 @@ class TensorFlowClassifier(ProgressReporting):        # was: (KerasClassifier)
 and do not restore the subclass relationship on the way. A backend that genuinely
 specializes another (calling `super()`, widening nothing, narrowing nothing) may still
 subclass it; none currently does.
+
+---
+
+## 10. A raw-TensorFlow module may not touch `tf.initializers` (2026-08-03)
+
+**Context.** `TensorFlowConvNet` is the shared conv spec written in raw `tf.nn` ops — that is its
+whole reason to exist beside `KerasConvNet`, which is the *Keras* entry and runs on whichever
+engine Keras is bound to. It built its weights with `tf.initializers.GlorotUniform`, which looks
+like TensorFlow and is not.
+
+**Decision.** Compute Glorot-uniform weights from `tf.random.stateless_uniform` locally, and treat
+every `tf.keras` / `tf.initializers` / `tf.losses` / `tf.metrics` / `tf.optimizers` reach-through
+as a Keras import in disguise.
+
+**Consequences.** Since TF 2.16, `tf.keras` **is** Keras 3, so `tf.initializers.GlorotUniform` is
+`keras.initializers.GlorotUniform` — `is`-identical, measured, not a wrapper. In a process where
+Keras is already bound to the **torch** engine (this workspace's default, since
+`recordstream.keras` picks the first engine installed and torch wins) it returns a **torch
+tensor**, and `tf.Variable` then dies converting an MPS tensor to numpy.
+
+The failure is invisible until both engines share one interpreter: the same file passes alone and
+fails after any Keras test has run. That is why it was found in the *segmentation* project's twin
+of this module, whose suite exercises both in one session — and why the guard here is a SOURCE
+scan across the package that runs even on a machine with no TensorFlow installed, since those are
+exactly the machines where the next such module gets written.
+
+`stateless_uniform` is also the better primitive on its own terms: the stateful `tf.random.uniform`
+reads a GLOBAL seed another library can move, so a `seed:` knob would not actually reproduce.
+
+**Example.**
+
+```python
+def _glorot_uniform(shape, seed):
+    receptive_field = 1
+    for dim in shape[:-2]:
+        receptive_field *= int(dim)
+    if len(shape) == 2:                       # a Dense kernel (in, out) — no receptive field
+        fan_in, fan_out = int(shape[0]), int(shape[1])
+    else:                                     # a conv kernel (..., in, out)
+        fan_in, fan_out = int(shape[-2]) * receptive_field, int(shape[-1]) * receptive_field
+    limit = (6.0 / float(fan_in + fan_out)) ** 0.5
+    return tf.random.stateless_uniform(shape, seed=(seed, 0), minval=-limit, maxval=limit)
+```
+
+**What you may change.** The initializer, if the spec's comparability is preserved — the parameter
+COUNT is what `spec.trainable_parameter_count` pins, not the distribution. What you may not do is
+reach back into `tf.initializers` for brevity.

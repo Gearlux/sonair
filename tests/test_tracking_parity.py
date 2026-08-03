@@ -59,12 +59,12 @@ def called_names(source: str) -> Set[str]:
 
 
 @pytest.mark.parametrize("stem", BACKENDS)
-def test_every_backend_hands_marainer_the_runnable(stem: str) -> None:
+def test_every_backend_hands_matrainer_the_runnable(stem: str) -> None:
     """`runnable=self`, never a params dict the backend transcribes for itself."""
     entries = calls_with_runnable_self(module_source(stem))
     assert entries, (
         f"{stem} does not pass `runnable=self` to any tracking entry point. "
-        "Hand marainer the object so the hyperparameters come from its one derivation "
+        "Hand matrainer the object so the hyperparameters come from its one derivation "
         "(provenance.config_params), not from a dict this backend writes by hand."
     )
     assert entries <= {"log_run_context", "TrackingCallback", "keras_tracking_callback"}, entries
@@ -104,7 +104,7 @@ def test_every_backend_finishes_its_manifest(stem: str) -> None:
 
 
 def test_the_terminal_call_is_the_one_that_ends_the_run() -> None:
-    """No backend calls ``Tracker.finalize`` itself, and none should — marainer does it.
+    """No backend calls ``Tracker.finalize`` itself, and none should — matrainer does it.
 
     The gap this pins was found by a real MLflow sweep on 2026-08-02: eleven of thirteen
     FINISHED runs showed ``RUNNING`` with no end time, because nothing anywhere called
@@ -120,7 +120,7 @@ def test_the_terminal_call_is_the_one_that_ends_the_run() -> None:
 
     assert not offenders, (
         f"{sorted(offenders)} call Tracker.finalize directly. Ending the run belongs to "
-        "marainer's capture_log_file, which every backend already reaches — a local call would "
+        "matrainer's capture_log_file, which every backend already reaches — a local call would "
         "let a backend's terminal status disagree with its manifest's."
     )
 
@@ -155,7 +155,7 @@ def test_every_backend_forwards_metrics_to_trackers(stem: str) -> None:
 
     Four of the eight recorded the config and never called `log_metrics`, so an MLflow run
     showed the hyperparameters and an empty chart. The three routes are all legitimate: the
-    loop calls `log_metrics` itself, a marainer callback forwards `on_epoch_end`, or the
+    loop calls `log_metrics` itself, a matrainer callback forwards `on_epoch_end`, or the
     framework's own history is replayed after the fit.
     """
     source = module_source(stem)

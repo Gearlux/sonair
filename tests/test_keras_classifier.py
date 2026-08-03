@@ -2,7 +2,7 @@
 
 The claim these pin is the reason sonair exists: swapping the training engine swaps the
 runnable and the model wrapper, and nothing else. So most of these assert that a Keras run
-reaches the SAME recordstream/marainer surfaces the Lightning run does — the same record
+reaches the SAME recordstream/matrainer surfaces the Lightning run does — the same record
 stream, the same label map, the same class-name vocabulary, the same predictions sink — rather
 than re-testing Keras itself.
 """

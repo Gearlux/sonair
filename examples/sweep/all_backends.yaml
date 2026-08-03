@@ -63,7 +63,7 @@ include: ../train_efficientvit_b0_mnist.yaml
 
 mlflow: !scope:tracker=mlflow
   trackers:
-    - !class:marainer.MlflowTracker
+    - !class:matrainer.MlflowTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
       # The workspace's own server (`aisland mlflow start`). Unset it and MLflow falls back to
@@ -75,28 +75,28 @@ mlflow: !scope:tracker=mlflow
 
 tensorboard: !scope:tracker=tensorboard
   trackers:
-    - !class:marainer.TensorBoardTracker
+    - !class:matrainer.TensorBoardTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
       save_dir: ./sweep_logs/tensorboard
 
 csv: !scope:tracker=csv
   trackers:
-    - !class:marainer.CsvTracker
+    - !class:matrainer.CsvTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
       save_dir: ./sweep_logs/csv
 
 aim: !scope:tracker=aim
   trackers:
-    - !class:marainer.AimTracker
+    - !class:matrainer.AimTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
       save_dir: ./sweep_logs/aim
 
 clearml: !scope:tracker=clearml
   trackers:
-    - !class:marainer.ClearMLTracker
+    - !class:matrainer.ClearMLTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
       # No server and no credentials — the runs land on disk for `clearml-data`/the UI to import.
@@ -104,7 +104,7 @@ clearml: !scope:tracker=clearml
 
 wandb: !scope:tracker=wandb
   trackers:
-    - !class:marainer.WandbTracker
+    - !class:matrainer.WandbTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
       save_dir: ./sweep_logs/wandb

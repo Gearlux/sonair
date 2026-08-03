@@ -1,7 +1,7 @@
 """The per-split metric slots: which backend serves which, and that all of them share ONE rule.
 
 ``metrics:`` is what every split measures; ``<split>_metrics:`` is what that split measures on
-top. The RULE itself lives in ``marainer.metric_slots`` and is pinned by marainer's own suite —
+top. The RULE itself lives in ``matrainer.metric_slots`` and is pinned by matrainer's own suite —
 what belongs here is the fleet: which slots each engine can actually serve, and that no backend
 re-derives the combination inline.
 

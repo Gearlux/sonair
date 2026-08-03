@@ -12,7 +12,7 @@ ONE standard `pytorch_lightning.LightningModule` with its own
 (`fit` / `evaluate` / `test` / `predict`). Its standard
 `preds = self(batch_tensor(batch, self.input_key)); loss = self.loss_fn(preds, _batch_target(batch, self.target_key))`
 flow — reading the primary input and target-`Label` fields off the batched typed
-record — a plain dict of typed values — fits classification natively. Marainer is now used only for OPTIONAL experiment
+record — a plain dict of typed values — fits classification natively. Matrainer is now used only for OPTIONAL experiment
 tracking plus a couple of torch utilities.
 
 The first-class model is **TimmModel**, a generic wrapper that
@@ -673,7 +673,7 @@ sidecar and the `computed_metrics` output stay scalar-only.
 
 Set `plot_metrics: true` to *also* send each matrix as a matplotlib heatmap through
 `Tracker.log_figure` — glanceable, and the only readable form once there are many classes. It is
-off by default because it makes matplotlib (`marainer[plot]`) a cost of every eval epoch, where
+off by default because it makes matplotlib (`matrainer[plot]`) a cost of every eval epoch, where
 the table costs nothing and works in a plain log. See
 [`examples/train_efficientvit_b0_mnist.yaml`](examples/train_efficientvit_b0_mnist.yaml) for the
 wiring in context — and note that a backend on another engine must override both keys, since
@@ -762,7 +762,7 @@ from YAML if your model really does emit class ids.
 | `SigmoidFocalLoss` | Thin `nn.Module` wrapper over `torchvision.ops.sigmoid_focal_loss` (a function, which confluid's `register` can't tag) — a pickable `task="classification", role="loss"` configurable with `alpha` / `gamma` / `reduction` knobs. Expects **float** targets the same shape as the logits (e.g. one-hot `[N, C]`), like the `BCEWithLogitsLoss` family. Defaults `reduction="mean"` (a scalar loss), not torchvision's `"none"`. The Keras side needs no such shim — `BinaryFocalCrossentropy` is already a class. |
 | `torch.nn.BCEWithLogitsLoss` | The default **multi-label** loss (also registered, `role="loss"`). Consumes float multi-hot targets `[N, C]` shaped like the logits. |
 | `recordstream.collate_records` | The generic DataLoader collate the classifier wires in (no bespoke sonair collate). Stacks the already-tensorized input under `input_key` (default `image`) to `[N, 3, H, W]` and leaves the other keys as per-record lists; the model boundary reads it back with `recordstream.batch_tensor` / `batch_metadata` and stacks the `Label` target under `target_key` (default `class`) into an `[N]` int64 tensor — or builds an `[N, C]` float multi-hot from a `MultiLabel`. |
-| `load_lightning_checkpoint` | `marainer.torch` helper that strips Lightning's `"model."` prefix when loading a `.ckpt` saved by `sonair.LightningClassifier`. |
+| `load_lightning_checkpoint` | `matrainer.torch` helper that strips Lightning's `"model."` prefix when loading a `.ckpt` saved by `sonair.LightningClassifier`. |
 
 Most torchmetrics classification metrics accept logits directly and emit a
 scalar — they wire into `val_metrics` straight from YAML, no adapter needed.
@@ -774,14 +774,14 @@ family that matches the data; name one explicitly to override. The Keras
 equivalents — and the one knob they need against a logits head — are in
 [Losses and metrics](#losses-and-metrics) above.
 
-## Optional tracking via marainer
+## Optional tracking via matrainer
 
 `LightningClassifier` is a standard `pytorch_lightning.LightningModule` that builds
 its own `pytorch_lightning.Trainer` from the `lightning` slot / ergonomic knobs. It
-uses marainer ONLY for OPTIONAL experiment tracking: when `trackers` are wired it
-attaches a `marainer.lightning.TrackingCallback` (git/config/log-file provenance),
+uses matrainer ONLY for OPTIONAL experiment tracking: when `trackers` are wired it
+attaches a `matrainer.lightning.TrackingCallback` (git/config/log-file provenance),
 and `log_system_metrics: true` activates framework-free system-metric logging.
-Removing marainer would take only a few line changes. There is no separate `logger:`
+Removing matrainer would take only a few line changes. There is no separate `logger:`
 knob of `pytorch_lightning.loggers.*` — the trackers ARE this run's metric sinks, adapted
 to Lightning's logger interface, so one key drives every backend.
 
@@ -792,16 +792,16 @@ the run trains, the tracker records, and nothing appears in the UI you are watch
 
 ```yaml
 trackers:
-  - !class:marainer.TensorBoardTracker      # a local directory, no service
+  - !class:matrainer.TensorBoardTracker      # a local directory, no service
     save_dir: ./lightning_logs
 
-  - !class:marainer.AimTracker              # a local repository the UI serves
+  - !class:matrainer.AimTracker              # a local repository the UI serves
     save_dir: $AIM_REPO
 
-  - !class:marainer.MlflowTracker           # a URL
+  - !class:matrainer.MlflowTracker           # a URL
     tracking_uri: http://localhost:5005
 
-  - !class:marainer.ClearMLTracker          # nothing here at all — see below
+  - !class:matrainer.ClearMLTracker          # nothing here at all — see below
     experiment_name: mnist_classification
 ```
 
@@ -841,7 +841,7 @@ Run-node results panel automatically.
 
 | Package | Purpose |
 |---------|---------|
-| `marainer` | Optional experiment tracking (`load_lightning_checkpoint` / `load_lightning_checkpoint`). |
+| `matrainer` | Optional experiment tracking (`load_lightning_checkpoint` / `load_lightning_checkpoint`). |
 | `confluid` | YAML-driven dependency injection (`@configurable`, `!class:`, `!ref:`). |
 | `recordstream` | Record / Stream pipeline plumbing. |
 | `loggair` | Structured logging. |
@@ -871,4 +871,4 @@ already in the manifest's `params`.
 
 Reading the identity is free and never builds the model: the properties consult stored
 configuration only. Adding one to your own wrapper is a single `model_refs` property — see
-[marainer's `uri` module](https://github.com/Gearlux/marainer).
+[matrainer's `uri` module](https://github.com/Gearlux/matrainer).

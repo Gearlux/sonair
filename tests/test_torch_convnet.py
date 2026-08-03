@@ -88,7 +88,7 @@ def test_batchnorm_running_stats_are_buffers_not_parameters() -> None:
 
 def test_the_network_is_a_public_submodule_so_checkpoints_address_it() -> None:
     """`net`, not `_net` — the same reason `TimmModel` uses `classifier`: a state_dict saved
-    through marainer's Lightning wrapper round-trips to `net.*` keys."""
+    through matrainer's Lightning wrapper round-trips to `net.*` keys."""
     model = TorchConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
     model.solidify()
 

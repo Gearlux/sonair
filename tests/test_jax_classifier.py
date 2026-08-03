@@ -2,7 +2,7 @@
 """``JaxClassifier`` — the jitted optax loop, and ``FlaxConvNet``.
 
 Two claims worth pinning. The first is the usual one: everything shared (labels, class names,
-the batch shape, the prediction contract, the artifacts) comes from recordstream and marainer
+the batch shape, the prediction contract, the artifacts) comes from recordstream and matrainer
 rather than being reimplemented for JAX. The second is specific to this backend — it owns its
 loop, so the things a `fit()` would have done for it (the per-epoch reshuffle, building the
 optimizer once) have to be done here, and forgetting them is invisible rather than loud.

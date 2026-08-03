@@ -9,7 +9,7 @@ crash with::
     ImportError: cannot import name 'LiquifyApp' from 'liquifai'
     (unknown location)
 
-The chain: parent imports ``sonair.cli`` via marainer's plugin loader →
+The chain: parent imports ``sonair.cli`` via matrainer's plugin loader →
 the module-level ``sys.path.insert(0, ".")`` pollutes the parent's
 sys.path → ``multiprocessing.spawn.get_preparation_data`` copies that
 polluted sys.path to each worker → the worker's PathFinder finds

@@ -4,7 +4,7 @@
 This backend hands the whole training program to somebody else, so the claim worth pinning is
 about the SEAM rather than the loop: the batch mapping `Trainer` is handed, the knob
 translation into `TrainingArguments`, and that everything shared (labels, class names, the
-prediction contract, the artifacts) still comes from recordstream and marainer rather than
+prediction contract, the artifacts) still comes from recordstream and matrainer rather than
 being reimplemented here.
 
 Skipped when transformers is not installed — it is a selectable backend

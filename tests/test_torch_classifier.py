@@ -25,7 +25,7 @@ pytest.importorskip("torch", reason="needs sonair[torch]")
 # `importorskip` above is what keeps the file collectable on an install without the extra.
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
-from marainer import CsvTracker  # noqa: E402
+from matrainer import CsvTracker  # noqa: E402
 from recordstream import Stream  # noqa: E402
 from recordstream.items import Image, Label  # noqa: E402
 
@@ -126,10 +126,10 @@ def test_it_needs_no_training_framework() -> None:
     for framework in ("pytorch_lightning", "keras", "fastai", "transformers"):
         offenders = {m for m in imported if m == framework or m.startswith(f"{framework}.")}
         assert not offenders, f"the bare-torch backend must not import {framework}: {offenders}"
-    # marainer's metric helpers are reached at their Lightning-FREE home; the `marainer.lightning`
+    # matrainer's metric helpers are reached at their Lightning-FREE home; the `matrainer.lightning`
     # package runs `require("pytorch_lightning")` on import, which would defeat the extra.
-    assert "marainer.torch" in imported
-    assert not {m for m in imported if m.startswith("marainer.lightning")}
+    assert "matrainer.torch" in imported
+    assert not {m for m in imported if m.startswith("matrainer.lightning")}
 
 
 def test_it_declares_the_torch_framework_axis() -> None:
@@ -158,7 +158,7 @@ def test_zero_arg_construction_does_no_work() -> None:
 def test_the_device_knob_reaches_the_resolver(choice: str) -> None:
     """The `device` ctor knob is what `initialize()` places the run on.
 
-    WHAT `auto` resolves to is marainer's (`tests/test_device.py` there pins the
+    WHAT `auto` resolves to is matrainer's (`tests/test_device.py` there pins the
     CUDA -> MPS -> CPU order with the probes patched); what this backend owns is that the
     knob is honoured at all rather than a device being guessed per call site.
     """
@@ -542,9 +542,9 @@ def test_provenance_derives_the_hyperparameters_from_the_runnable(monkeypatch: p
 
     It used to spell six keys by hand while the Lightning backend walked the object graph,
     so the two gave different answers to "what were the hyperparameters?". Both now hand the
-    runnable to marainer, which owns the one derivation.
+    runnable to matrainer, which owns the one derivation.
     """
-    from marainer.tracking import provenance
+    from matrainer.tracking import provenance
 
     seen: Dict[str, Any] = {}
 

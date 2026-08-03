@@ -3,9 +3,9 @@
 A self-contained ``pytorch_lightning.LightningModule`` — its own ``training_step`` /
 ``validation_step`` / ``test_step`` / ``predict_step`` / ``configure_optimizers``, and a
 ``run()`` that builds the loaders + ``pl.Trainer`` and calls ``fit`` / ``test`` / ``predict``
-per the ``task`` knob. It reads like a textbook Lightning example; marainer is used ONLY for
+per the ``task`` knob. It reads like a textbook Lightning example; matrainer is used ONLY for
 optional experiment tracking (git / config / params / system metrics / log file) and a couple
-of small utilities (``ensure_record_dataset``, ``build_metric_collection``). Remove marainer and
+of small utilities (``ensure_record_dataset``, ``build_metric_collection``). Remove matrainer and
 this class still trains — you lose the rich tracking, not the training.
 
 Classification specifics it owns: deriving ``num_classes`` (from a concrete model head, an
@@ -36,8 +36,8 @@ import torch.nn as nn
 from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from confluid.registry import resolve_class
 from loggair import get_logger
-from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
-from marainer.lightning import (
+from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.lightning import (
     TrackerLogger,
     TrackingCallback,
     activate_for_lightning,
@@ -46,10 +46,10 @@ from marainer.lightning import (
     checkpoint_dir,
     scalar_metrics,
 )
-from marainer.metric_slots import merge_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.tracking.base import Tracker, as_tracker_list
-from marainer.tracking.render import render_matrix_as_figure, render_matrix_as_table
+from matrainer.metric_slots import merge_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.tracking.base import Tracker, as_tracker_list
+from matrainer.tracking.render import render_matrix_as_figure, render_matrix_as_table
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -120,7 +120,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         num_classes: Output class count; omit to resolve from the model or the dataset.
         task: Entry point :meth:`run` dispatches to — ``"fit"`` / ``"evaluate"`` / ``"test"`` / ``"predict"``.
         max_epochs / batch_size / num_workers: ergonomic flat-config knobs.
-        trackers: marainer trackers — one or a list. They ARE this run's metric sinks:
+        trackers: matrainer trackers — one or a list. They ARE this run's metric sinks:
             each is adapted to Lightning's logger interface, so there is no separate
             `logger:` slot of `pytorch_lightning.loggers`.
         experiment_name / run_name: tracking identity.
@@ -137,7 +137,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             live prefixed ``MetricCollection`` after.
         plot_metrics: ALSO send each non-scalar metric to the trackers as a matplotlib
             heatmap, not only as a table. Off by default: it makes matplotlib
-            (``marainer[plot]``) a cost of every eval epoch, where the table costs nothing.
+            (``matrainer[plot]``) a cost of every eval epoch, where the table costs nothing.
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``optimizer``, ``train/val/test_loader``,
     ``lightning``, ``loss_fn``, ``predictions_sink``, ``metrics_sidecar_path``,
@@ -350,7 +350,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
 
         Which computed values ARE confusion matrices is recordstream's rule
         (:func:`~recordstream.ops.image.confusion_matrices_payload` — square 2-D, by SHAPE not
-        by metric name), and the renderers are marainer's; this method only decides WHEN and
+        by metric name), and the renderers are matrainer's; this method only decides WHEN and
         WHERE — the log always, plus every wired tracker's text channel, which is what puts the
         matrix in MLflow / TensorBoard / Aim / ClearML beside the scalars, plus its figure
         channel when :attr:`plot_metrics` asks for one.
@@ -453,7 +453,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         return cast(List[Tracker], self.trackers)
 
     def _build_trainer(self) -> L.Trainer:
-        """Flow the ``pl.Trainer`` and attach the OPTIONAL marainer tracking (a few lines; removable).
+        """Flow the ``pl.Trainer`` and attach the OPTIONAL matrainer tracking (a few lines; removable).
 
         The trackers ARE the Trainer's loggers: each is flowed (it may still be a deferred
         ``Fluid``) and adapted through ``TrackerLogger``, so Lightning's per-step metrics land
@@ -466,7 +466,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         # keeps every knob it set and only gains the loggers.
         trainer = cast(L.Trainer, flow(self.lightning, logger=adapters or False))
         if trackers:
-            # `runnable=self` rather than a params dict: marainer derives the hyperparameters
+            # `runnable=self` rather than a params dict: matrainer derives the hyperparameters
             # from the flowed object graph AND dumps the resolved config, so this backend and
             # the torch one cannot answer "what were the hyperparameters?" differently.
             cb = TrackingCallback(trackers, runnable=self)
@@ -635,7 +635,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
     def _build_split_metrics(self, spec: Any, prefix: str) -> MetricCollection:
         """One split's live, prefixed collection — its own spec merged over the shared one.
 
-        The combination rule is :func:`~marainer.metric_slots.merge_metric_specs`, shared with
+        The combination rule is :func:`~matrainer.metric_slots.merge_metric_specs`, shared with
         every other backend so a config moving between them cannot change shape; what is torch's
         alone is the rest of this line — sizing the templates and prefixing the collection.
         """
@@ -734,7 +734,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
             cast(PredictionsSink, self.predictions_sink).write(item, m)
 
     def _write_metrics_sidecar(self, metrics: Any) -> None:
-        """Hand the run's final scalars to marainer, which owns where run artifacts land."""
+        """Hand the run's final scalars to matrainer, which owns where run artifacts land."""
         if not isinstance(metrics, MetricCollection):
             return
         try:

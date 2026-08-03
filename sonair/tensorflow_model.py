@@ -28,7 +28,7 @@ from typing import Any, List, Optional, Tuple
 
 from confluid import configurable
 from loggair import get_logger
-from marainer.uri import ModelRef, file_model_ref
+from matrainer.uri import ModelRef, file_model_ref
 
 # `sonair._tensorflow` pins KERAS_BACKEND=tensorflow BEFORE importing keras; importing `tf`
 # through it keeps that ordering in one place. See `sonair/tensorflow_classifier.py`.
@@ -79,7 +79,7 @@ class TensorFlowModel(tf.Module):
 
     @property
     def model_refs(self) -> List[ModelRef]:
-        """The weight artifacts this model loads — see :mod:`marainer.uri`.
+        """The weight artifacts this model loads — see :mod:`matrainer.uri`.
 
         The SavedModel directory IS the model, and its role is ``pretrained`` rather than
         ``checkpoint``: the distinction the roles draw is whether the weights came from outside

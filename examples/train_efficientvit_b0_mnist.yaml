@@ -170,7 +170,7 @@ metrics:
 val_metrics:
   confusion: !lazy:torchmetrics.classification.MulticlassConfusionMatrix
 
-# Where the run's output goes — ONE key for every backend, because a marainer tracker is
+# Where the run's output goes — ONE key for every backend, because a matrainer tracker is
 # engine-neutral (the Lightning backend adapts it to a `pytorch_lightning` logger, the others
 # call it directly). Swap `TensorBoardTracker` for `MlflowTracker` / `CsvTracker` / `AimTracker`
 # and nothing else in this file changes.
@@ -181,7 +181,7 @@ val_metrics:
 # for TensorBoard is the Text tab with a per-epoch step slider. It is rendered into the log too,
 # so a run with no trackers wired still shows it.
 trackers:
-  - !class:marainer.TensorBoardTracker
+  - !class:matrainer.TensorBoardTracker
     experiment_name: mnist_classification
     run_name: efficientvit_b0_mnist
     save_dir: ./lightning_logs
@@ -190,17 +190,17 @@ trackers:
 # a wrong guess here fails silently — the run trains, the tracker records, nothing appears in
 # the UI you are watching, and no log line says why:
 #
-#   - !class:marainer.AimTracker         # aisland aim start
+#   - !class:matrainer.AimTracker         # aisland aim start
 #       experiment_name: mnist_classification
 #       save_dir: $AIM_REPO              # published to the workspace .env by the service
 #
-#   - !class:marainer.ClearMLTracker     # aisland clearml start
+#   - !class:matrainer.ClearMLTracker     # aisland clearml start
 #       experiment_name: mnist_classification
 #       # NO host key at all — the ClearML SDK reads CLEARML_API_HOST / _WEB_HOST /
 #       # _FILES_HOST and its credentials from the environment itself. `offline: true`
 #       # records to local disk instead and needs no server and no credentials.
 #
-#   - !class:marainer.MlflowTracker      # aisland mlflow start
+#   - !class:matrainer.MlflowTracker      # aisland mlflow start
 #       experiment_name: mnist_classification
 #       tracking_uri: http://localhost:5005   # a LITERAL: this service publishes no var
 #
@@ -252,7 +252,7 @@ lightning: !scope:framework=lightning
 # `pytorch_lightning.Trainer` for a hand-written loop and NOTHING else changes. Same
 # `TimmModel` (inherited from the top-level `model:` — which is why that key lives
 # there and not inside `runnable:`), same `preprocess` chain, same `torch.nn` loss set,
-# same metrics, same artifacts — and the same `trackers:`, which is a marainer object and
+# same metrics, same artifacts — and the same `trackers:`, which is a matrainer object and
 # so belongs to no engine. This block overrides ONE key, which is as small as a backend
 # swap gets.
 #

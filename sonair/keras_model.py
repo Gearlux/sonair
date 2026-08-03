@@ -30,7 +30,7 @@ from urllib.parse import quote, urlencode
 
 from confluid import configurable
 from loggair import get_logger
-from marainer.uri import ModelRef
+from matrainer.uri import ModelRef
 
 from sonair._keras import keras, keras_backend
 
@@ -87,7 +87,7 @@ class KerasModel(keras.Model):
 
     @property
     def model_refs(self) -> List[ModelRef]:
-        """The weight artifacts this model loads — see :mod:`marainer.uri`.
+        """The weight artifacts this model loads — see :mod:`matrainer.uri`.
 
         ``keras.applications`` weights have no public repository URL to point at — the library
         downloads them from its own release assets — so the reference names the registry and the

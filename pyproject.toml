@@ -16,9 +16,9 @@ dependencies = [
     #   pip install 'sonair[keras]'              Keras 3 (runs on torch / tensorflow / jax)
     #   pip install 'sonair[lightning,keras]'    both
     #
-    # marainer is core because it is a TRACKING library, not a framework: its own torch and
+    # matrainer is core because it is a TRACKING library, not a framework: its own torch and
     # framework helpers sit behind ITS extras, which the backend extras below select.
-    "marainer>=0.1.0",
+    "matrainer>=0.1.0",
     # 0.3.0 is the floor for the `framework=` discovery tag, passed at registration
     # time in sonair/torch_classification.py + sonair/keras_classification.py —
     # against 0.2.0 every registration raises TypeError at import.
@@ -46,20 +46,20 @@ lightning = [
     "torchmetrics",
     "pytorch-lightning",
     "timm>=1.0.0",          # the model zoo TimmModel wraps
-    # marainer's pl-side tracking helpers + the tracker backends this backend's configs wire.
-    "marainer[lightning,mlflow,tensorboard]>=0.1.0",
+    # matrainer's pl-side tracking helpers + the tracker backends this backend's configs wire.
+    "matrainer[lightning,mlflow,tensorboard]>=0.1.0",
 ]
 # The `lightning` extra MINUS pytorch-lightning — a hand-written training loop and nothing
-# under it. `marainer[torch]` rather than `[lightning]` is the whole point: the metric helpers
-# (`build_metric_collection` / `scalar_metrics`) moved to `marainer.torch` on 2026-08-01 for
-# exactly this backend, because importing them from `marainer.lightning` ran that package's
+# under it. `matrainer[torch]` rather than `[lightning]` is the whole point: the metric helpers
+# (`build_metric_collection` / `scalar_metrics`) moved to `matrainer.torch` on 2026-08-01 for
+# exactly this backend, because importing them from `matrainer.lightning` ran that package's
 # `require("pytorch_lightning")` and made a deliberately Lightning-free backend need Lightning.
 torch = [
     "torch",
     "torchmetrics",
     "timm>=1.0.0",          # the model zoo `TimmModel` wraps — shared with the lightning backend
     "recordstream[torch]>=0.1.0",
-    "marainer[torch,mlflow,tensorboard]>=0.1.0",
+    "matrainer[torch,mlflow,tensorboard]>=0.1.0",
 ]
 # Keras 3 is an API, not an engine — it needs ONE compute backend underneath (torch/TF/jax), and
 # `recordstream.keras` (which `sonair/_keras.py` imports through) selects whichever is installed.
@@ -72,15 +72,15 @@ keras = [
     # The PyDataset batching adapter (`recordstream.keras.RecordSequence`) + the KERAS_BACKEND
     # ordering this backend's keras imports depend on.
     "recordstream[keras]>=0.1.0",
-    # Tracking for a Keras run. Deliberately marainer[keras], NOT marainer[tensorflow]: the
+    # Tracking for a Keras run. Deliberately matrainer[keras], NOT matrainer[tensorflow]: the
     # callback needs the Keras API, not the TensorFlow engine.
-    "marainer[keras]>=0.1.0",
+    "matrainer[keras]>=0.1.0",
 ]
 tensorflow = [
     "keras>=3.0",           # Keras 3 IS tf.keras in TF >= 2.16
     "tensorflow>=2.16",     # ...this extra's engine
     "recordstream[keras]>=0.1.0",
-    "marainer[keras]>=0.1.0",
+    "matrainer[keras]>=0.1.0",
 ]
 # fastai is a LAYER ON TORCH, not an engine of its own — its losses are `nn.Module`s and its
 # `Learner` consumes plain `torch.utils.data.DataLoader`s. So this extra names torch's stack
@@ -106,9 +106,9 @@ fastai = [
     "torch",
     "timm>=1.0.0",          # the model zoo `TimmModel` wraps — shared with the lightning backend
     "recordstream[torch]>=0.1.0",
-    # marainer.torch carries the Lightning-checkpoint loader `TimmModel` reads; the tracker
+    # matrainer.torch carries the Lightning-checkpoint loader `TimmModel` reads; the tracker
     # backends a fastai config wires are the same ones every other backend uses.
-    "marainer[torch,mlflow,tensorboard]>=0.1.0",
+    "matrainer[torch,mlflow,tensorboard]>=0.1.0",
 ]
 jax = [
     "jax>=0.4",

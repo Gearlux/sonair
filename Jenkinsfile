@@ -37,7 +37,7 @@ pipeline {
                 sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/liquifai.git@main"
                 sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/recordstream.git@main"
                 sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/torpaido.git@main"
-                sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/marainer.git@main"
+                sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/matrainer.git@main"
                 sh "${VENV_BIN}/uv pip install -e .[dev,lightning,keras]"
                 // Notebook-only extras (matplotlib, jupyter kernels, etc.) live
                 // in the optional `[notebook]` extra when the project ships

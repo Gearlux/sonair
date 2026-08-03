@@ -378,7 +378,7 @@ batch_size: 64
 num_workers: 4
 max_epochs: 7
 trackers:
-  - !class:marainer.CsvTracker
+  - !class:matrainer.CsvTracker
     experiment_name: bcast
     save_dir: ./_sonair_test_logs
 """
@@ -437,15 +437,15 @@ def test_the_constructor_does_not_touch_the_trackers_it_was_given() -> None:
     """
     from confluid.fluid import Class
 
-    marker = Class("marainer.CsvTracker")
+    marker = Class("matrainer.CsvTracker")
     trainer = LightningClassifier(model=_TinyClassifier(), trackers=marker)
     assert trainer.trackers is marker  # untouched, not wrapped, not built
 
 
 def test_the_trackers_become_the_trainers_loggers() -> None:
     """There is no `logger:` slot any more — the trackers ARE the metric sinks."""
-    from marainer import CsvTracker
-    from marainer.lightning import TrackerLogger
+    from matrainer import CsvTracker
+    from matrainer.lightning import TrackerLogger
 
     tracker = CsvTracker(experiment_name="e", run_name="r", save_dir="./_sonair_test_logs")
     trainer = LightningClassifier(model=_TinyClassifier(), trackers=[tracker])
@@ -461,7 +461,7 @@ def test_flowing_twice_does_not_rebuild_a_deferred_tracker() -> None:
     from confluid.fluid import Class
 
     trainer = LightningClassifier(
-        model=_TinyClassifier(), trackers=[Class("marainer.CsvTracker", save_dir="./_sonair_test_logs")]
+        model=_TinyClassifier(), trackers=[Class("matrainer.CsvTracker", save_dir="./_sonair_test_logs")]
     )
     first = trainer._live_trackers()
     second = trainer._live_trackers()
@@ -561,7 +561,7 @@ def test_string_targets_fit_encode_and_expose_map() -> None:
     assert trainer.label_map.class_names == ["bird", "cat", "dog"]
     assert trainer.num_classes == 3
     # The train set is now a Stream whose targets are encoded class-id ints, and it exposes
-    # class_names so marainer persists class_names.json.
+    # class_names so matrainer persists class_names.json.
     from typing import Sized
 
     from recordstream import iter_key
@@ -887,9 +887,9 @@ def test_log_dict_receives_the_scalars_only() -> None:
 
 
 def test_the_confusion_matrix_is_rendered_at_validation_epoch_end(monkeypatch: pytest.MonkeyPatch) -> None:
-    """It is reported instead — as a table, through marainer's renderer.
+    """It is reported instead — as a table, through matrainer's renderer.
 
-    Patched on `sonair.lightning_classifier`, not on `marainer.tracking.render`: an imported
+    Patched on `sonair.lightning_classifier`, not on `matrainer.tracking.render`: an imported
     name is a BINDING in the importing module, so patching the definition site would not be seen.
     """
     from sonair import lightning_classifier as mod
@@ -1143,7 +1143,7 @@ def test_declares_trained_model_output() -> None:
 
 
 def test_inherits_computed_metrics_and_label_names_outputs() -> None:
-    """The base marainer outputs surface for the classification trainer via output_specs' MRO walk."""
+    """The base matrainer outputs surface for the classification trainer via output_specs' MRO walk."""
     from confluid import output_specs
 
     names = {s["name"] for s in output_specs(LightningClassifier)}
@@ -1216,14 +1216,14 @@ def test_run_dispatches_to_the_entry_point_declaring_the_task(task: str) -> None
 
 
 def test_the_tracking_callback_gets_the_runnable_not_a_params_dict() -> None:
-    """Both backends hand marainer the OBJECT, so neither transcribes its own params.
+    """Both backends hand matrainer the OBJECT, so neither transcribes its own params.
 
     This class used to walk `get_hierarchy_from_instance` in a private `_config_params` while
     the bare-torch backend hand-wrote six keys — two answers to the same question. The
-    derivation now lives in marainer and both pass `runnable=self`.
+    derivation now lives in matrainer and both pass `runnable=self`.
     """
-    from marainer import CsvTracker
-    from marainer.lightning import TrackingCallback
+    from matrainer import CsvTracker
+    from matrainer.lightning import TrackingCallback
 
     trainer = LightningClassifier(model=nn.Identity(), max_epochs=1)
     trainer.trackers = [CsvTracker()]
@@ -1238,5 +1238,5 @@ def test_the_tracking_callback_gets_the_runnable_not_a_params_dict() -> None:
 
 
 def test_no_local_hyperparameter_derivation_survives() -> None:
-    """A private re-derivation here would silently diverge from marainer's again."""
+    """A private re-derivation here would silently diverge from matrainer's again."""
     assert not hasattr(LightningClassifier, "_config_params")

@@ -37,7 +37,7 @@ logs/
 # `save_dir` / `filename` / `fname` / `checkpoint_dir` / `export_dir` before
 # adding a backend, and add its path here in the same change.
 lightning_logs/
-# The marainer tracker default: `save_dir` is declared ONCE on the `Tracker` ABC as
+# The matrainer tracker default: `save_dir` is declared ONCE on the `Tracker` ABC as
 # "./runs", so every backend (csv / tensorboard / mlflow / aim / clearml / wandb) lands
 # here when a config omits it — and wandb nests its own directory inside, so this one
 # entry covers all of them. A tracker pointed at an explicit `save_dir` (the example

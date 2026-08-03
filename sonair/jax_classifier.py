@@ -47,11 +47,11 @@ import optax
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from flax import nnx
 from loggair import get_logger
-from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
-from marainer.metric_slots import merge_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.tracking.base import Tracker, as_tracker_list
-from marainer.tracking.provenance import capture_log_file, log_run_context
+from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.metric_slots import merge_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.tracking.base import Tracker, as_tracker_list
+from matrainer.tracking.provenance import capture_log_file, log_run_context
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -124,7 +124,7 @@ class JaxClassifier(ProgressReporting):
         task: Which entry point ``run()`` dispatches to.
         max_epochs: Training epochs.
         batch_size: Rows per batch.
-        trackers: marainer trackers — one or a list. This run's ONLY output wiring:
+        trackers: matrainer trackers — one or a list. This run's ONLY output wiring:
             metrics, provenance and the run manifest all go to them.
         callbacks: Callables invoked as ``callback(epoch, logs)`` after each epoch —
             JAX ships no callback protocol, so this is the plainest thing that works.
@@ -380,7 +380,7 @@ class JaxClassifier(ProgressReporting):
         """The metric list for one eval split — its own slot merged over the shared ``metrics``.
 
         The combination rule is the workspace-wide one
-        (:func:`~marainer.metric_slots.merge_metric_specs`), so a config moving between backends
+        (:func:`~matrainer.metric_slots.merge_metric_specs`), so a config moving between backends
         keeps its shape. Only ``val`` and ``test`` have a slot: this loop computes metrics on the
         eval pass only, so a train-only metric would have nowhere to go.
         """
@@ -415,8 +415,8 @@ class JaxClassifier(ProgressReporting):
         logger.info(f"sonair jax training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("JaxClassifier.fit() requires a 'train_set'.")
-        # Provenance through marainer's plain FUNCTIONS — `runnable=self` so the
-        # hyperparameters and the resolved config come from marainer's ONE derivation
+        # Provenance through matrainer's plain FUNCTIONS — `runnable=self` so the
+        # hyperparameters and the resolved config come from matrainer's ONE derivation
         # rather than a dict this backend transcribes for itself.
         trackers = self._live_trackers()
         manifest = log_run_context(trackers, runnable=self)
@@ -453,7 +453,7 @@ class JaxClassifier(ProgressReporting):
         save_class_names(self._class_names, self._artifact_dir(), trackers)
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
         # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
-        # manifest exists: left unfinished it stays `running`, and marainer's atexit hook then
+        # manifest exists: left unfinished it stays `running`, and matrainer's atexit hook then
         # calls a successful run `interrupted`.
         capture_log_file(trackers, manifest=manifest, status="success")
 

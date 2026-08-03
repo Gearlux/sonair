@@ -14,8 +14,8 @@ The wrapper exists for three reasons:
    for YAML wiring while keeping a sensible default that matches the
    spectrogram-classification baseline (``efficientvit_b0`` + ImageNet).
 2. **Checkpoint loading**: ``checkpoint_path`` strips Lightning's ``"model."``
-   prefix via :func:`marainer.checkpoint.load_lightning_checkpoint`, so a
-   marainer-trained model resumes / evaluates cleanly without forcing the
+   prefix via :func:`matrainer.checkpoint.load_lightning_checkpoint`, so a
+   matrainer-trained model resumes / evaluates cleanly without forcing the
    caller to know about Lightning's wrapping.
 3. **Generic across timm's zoo**: ``model_name`` accepts any of timm's
    ~1000 backbones — efficientvit, resnet, vit, swin, convnext, mobilenetv3,
@@ -42,8 +42,8 @@ import torch
 import torch.nn as nn
 from confluid import configurable
 from loggair import get_logger
-from marainer.torch import load_lightning_checkpoint
-from marainer.uri import ModelRef, file_model_ref, hf_model_ref
+from matrainer.torch import load_lightning_checkpoint
+from matrainer.uri import ModelRef, file_model_ref, hf_model_ref
 from torch import Tensor
 
 logger = get_logger(__name__)
@@ -51,7 +51,7 @@ logger = get_logger(__name__)
 
 @configurable(task="classification", role="model", lazy=True, framework="torch")
 class TimmModel(nn.Module):
-    """timm-backed image-classification model wrapped for the Marainer Trainer flow.
+    """timm-backed image-classification model wrapped for the Matrainer Trainer flow.
 
     ``forward(images) -> logits`` only — classification models compute loss
     outside the model, so the Trainer's standard ``loss_fn(preds, target)``
@@ -79,7 +79,7 @@ class TimmModel(nn.Module):
             ``model_name`` raises. ``efficientvit_b0`` is the spectrogram baseline.
         num_classes: Output class count. timm replaces the original head with a
             fresh linear layer of this size. **Required to build** — ``0`` (the
-            default) means unset. In a marainer training run **omit** it in the
+            default) means unset. In a matrainer training run **omit** it in the
             config: the classification trainer derives the count from the dataset
             (``recordstream.num_classes``, which walks the targets) and injects it via
             ``flow(model, num_classes=…)``. Set it explicitly to override the derived value.
@@ -130,12 +130,12 @@ class TimmModel(nn.Module):
         self.checkpoint_strict: bool = False
         # Lazy cache for the timm backbone — built once by solidify(). Registered
         # under the public name `classifier` so the state_dict round-trips as
-        # `classifier.*` through marainer's Lightning checkpoint loading.
+        # `classifier.*` through matrainer's Lightning checkpoint loading.
         self.classifier: Optional[nn.Module] = None
 
     @property
     def model_refs(self) -> List[ModelRef]:
-        """The weight artifacts this model loads — see :mod:`marainer.uri`.
+        """The weight artifacts this model loads — see :mod:`matrainer.uri`.
 
         ``timm.get_pretrained_cfg`` resolves a bare architecture name to the exact Hub repo
         INCLUDING its weight tag (``efficientvit_b0`` -> ``timm/efficientvit_b0.r224_in1k``) from
@@ -168,9 +168,9 @@ class TimmModel(nn.Module):
         the cached backbone on later calls.
 
         The backbone is stored as the public submodule ``self.classifier`` (NOT a private
-        ``_classifier``) so a state_dict saved through marainer's Lightning wrapper — which
+        ``_classifier``) so a state_dict saved through matrainer's Lightning wrapper — which
         adds a leading ``model.`` prefix that
-        :func:`~marainer.checkpoint.load_lightning_checkpoint` strips — round-trips to
+        :func:`~matrainer.checkpoint.load_lightning_checkpoint` strips — round-trips to
         ``classifier.<layer>`` keys, matching this wrapper's layout.
         """
         if self.classifier is None:

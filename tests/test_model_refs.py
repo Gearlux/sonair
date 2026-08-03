@@ -1,4 +1,4 @@
-"""Each model wrapper names the weight artifacts it loads (``marainer.uri``).
+"""Each model wrapper names the weight artifacts it loads (``matrainer.uri``).
 
 The shared invariant across every wrapper here, and the one worth guarding: **asking never
 builds**. These properties read stored configuration, so a run's provenance can be recorded from
@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from marainer.uri import model_refs
+from matrainer.uri import model_refs
 
 from sonair import HuggingFaceModel, TimmModel
 

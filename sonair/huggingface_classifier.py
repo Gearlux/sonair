@@ -43,11 +43,11 @@ import numpy as np
 import torch
 from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from loggair import get_logger
-from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
-from marainer.metric_slots import merge_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.tracking.base import Tracker, as_tracker_list
-from marainer.tracking.provenance import capture_log_file, log_run_context
+from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.metric_slots import merge_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.tracking.base import Tracker, as_tracker_list
+from matrainer.tracking.provenance import capture_log_file, log_run_context
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -142,7 +142,7 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         max_epochs: Training epochs (``TrainingArguments.num_train_epochs``).
         batch_size: Rows per batch (``per_device_train_batch_size``).
         num_workers: DataLoader worker processes (``dataloader_num_workers``).
-        trackers: marainer trackers — one or a list. This run's ONLY output wiring:
+        trackers: matrainer trackers — one or a list. This run's ONLY output wiring:
             metrics, provenance and the run manifest all go to them.
         callbacks: ``transformers.TrainerCallback`` instances, handed to the ``Trainer``.
         experiment_name: Run identity, recorded in artifacts and tracking.
@@ -481,8 +481,8 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         logger.info(f"sonair huggingface training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("HuggingFaceClassifier.fit() requires a 'train_set'.")
-        # Provenance through marainer's plain FUNCTIONS — `runnable=self` so the
-        # hyperparameters and the resolved config come from marainer's ONE derivation
+        # Provenance through matrainer's plain FUNCTIONS — `runnable=self` so the
+        # hyperparameters and the resolved config come from matrainer's ONE derivation
         # rather than a dict this backend transcribes for itself.
         trackers = self._live_trackers()
         manifest = log_run_context(trackers, runnable=self)
@@ -496,7 +496,7 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         save_class_names(self._class_names, self._artifact_dir(), trackers)
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
         # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
-        # manifest exists: left unfinished it stays `running`, and marainer's atexit hook then
+        # manifest exists: left unfinished it stays `running`, and matrainer's atexit hook then
         # calls a successful run `interrupted`.
         capture_log_file(trackers, manifest=manifest, status="success")
 

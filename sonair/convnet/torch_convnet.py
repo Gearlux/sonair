@@ -100,7 +100,7 @@ class TorchConvNet(nn.Module):
         self.dropout = dropout
         self.seed = seed
         # Public submodule name, NOT `_net`, for the reason `TimmModel` uses `classifier`: a
-        # state_dict saved through marainer's Lightning wrapper round-trips as `net.*`, and a
+        # state_dict saved through matrainer's Lightning wrapper round-trips as `net.*`, and a
         # leading underscore reads as "private" for something checkpoints address by name.
         self.net: Optional[nn.Module] = None
 

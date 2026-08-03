@@ -18,8 +18,8 @@ What that costs in code is the interesting part, because almost none of it is du
   not torch-typed — a torch return would have forced a second implementation here.
 * **Labels** come from recordstream too — ``LabelMap`` fits and encodes, ``class_names`` reads
   the vocabulary back off the encoded stream.
-* **Run artifacts** come from marainer — ``save_class_names`` / ``write_metrics_sidecar``.
-* **Tracking** is marainer's ``keras_tracking_callback``.
+* **Run artifacts** come from matrainer — ``save_class_names`` / ``write_metrics_sidecar``.
+* **Tracking** is matrainer's ``keras_tracking_callback``.
 
 So what is actually written here is: a batch-shaping function, ``compile()`` + ``fit()``, and the
 task dispatch. That ratio is the demo.
@@ -43,10 +43,10 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Union
 import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
-from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
-from marainer.metric_slots import union_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.tracking.base import Tracker, as_tracker_list
+from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.metric_slots import union_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.tracking.base import Tracker, as_tracker_list
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -104,7 +104,7 @@ class KerasClassifier(ProgressReporting):
         task: Which entry point ``run()`` dispatches to.
         max_epochs: Training epochs.
         batch_size: Rows per batch.
-        trackers: marainer trackers — one or a list. This run's ONLY output wiring:
+        trackers: matrainer trackers — one or a list. This run's ONLY output wiring:
             metrics, provenance and the run manifest all go to them.
         callbacks: ``keras.callbacks.Callback`` instances (``ModelCheckpoint``,
             ``EarlyStopping`` …). A file-writing one gets its parent directory created,
@@ -329,7 +329,7 @@ class KerasClassifier(ProgressReporting):
         Widening is the honest failure here: a metric that appears where it was not asked for is
         noise a reader can ignore, where DROPPING it would be a wired metric that silently
         reports nothing. The backends whose loop this project owns (bare torch, Lightning,
-        TensorFlow) narrow properly — see :func:`~marainer.metric_slots.merge_metric_specs`.
+        TensorFlow) narrow properly — see :func:`~matrainer.metric_slots.merge_metric_specs`.
         """
         return union_metric_specs(self.metrics, self.train_metrics, self.val_metrics, self.test_metrics) or []
 
@@ -371,7 +371,7 @@ class KerasClassifier(ProgressReporting):
         return x, np.asarray(batch_values(batch, self.target_key), dtype="int64")
 
     def _callbacks(self) -> List[Any]:
-        """Wired Keras callbacks plus OPTIONAL marainer tracking (a few lines; removable)."""
+        """Wired Keras callbacks plus OPTIONAL matrainer tracking (a few lines; removable)."""
         callbacks = [flow(cb) for cb in (self.callbacks or [])]
         for callback in callbacks:
             # Keras's file-writing callbacks (`CSVLogger`, `ModelCheckpoint`) open their path
@@ -384,9 +384,9 @@ class KerasClassifier(ProgressReporting):
                 Path(target).expanduser().parent.mkdir(parents=True, exist_ok=True)
         trackers = self._live_trackers()
         if trackers:
-            from marainer.keras import keras_tracking_callback
+            from matrainer.keras import keras_tracking_callback
 
-            # `runnable=self` rather than a params dict: marainer derives the hyperparameters
+            # `runnable=self` rather than a params dict: matrainer derives the hyperparameters
             # from the flowed object graph AND dumps the resolved config, so no backend
             # transcribes its own configuration into a second, diverging answer.
             callbacks.append(keras_tracking_callback(trackers, runnable=self))

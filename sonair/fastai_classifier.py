@@ -24,7 +24,7 @@ So the interesting number here is not how little was written but how little was 
   take ``CrossEntropyLossFlat`` just as well (it is a callable over torch tensors wrapping a
   ``torch.nn.CrossEntropyLoss``, not a class of its own).
 * **Labels, class names, artifacts, the prediction contract** come from recordstream and
-  marainer exactly as for every other backend.
+  matrainer exactly as for every other backend.
 
 **Metrics are named as STRINGS here, and that is a fastai fact, not a sonair shortcut.** Nearly
 every fastai classification metric is a plain *function* (``accuracy``, ``error_rate``,
@@ -64,11 +64,11 @@ from fastai.data.core import DataLoaders
 from fastai.learner import Learner
 from fastai.losses import BCEWithLogitsLossFlat, CrossEntropyLossFlat
 from loggair import get_logger
-from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
-from marainer.metric_slots import merge_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.tracking.base import Tracker, as_tracker_list
-from marainer.tracking.provenance import capture_log_file, log_run_context
+from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.metric_slots import merge_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.tracking.base import Tracker, as_tracker_list
+from matrainer.tracking.provenance import capture_log_file, log_run_context
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -129,7 +129,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         max_epochs: Training epochs.
         batch_size: Rows per batch.
         num_workers: DataLoader worker processes.
-        trackers: marainer trackers — one or a list. This run's ONLY output wiring:
+        trackers: matrainer trackers — one or a list. This run's ONLY output wiring:
             metrics, provenance and the run manifest all go to them.
         callbacks: ``fastai.callback.core.Callback`` instances (``CSVLogger``,
             ``SaveModelCallback`` …), appended to the ``Learner``'s own set.
@@ -476,8 +476,8 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         logger.info(f"sonair fastai training: {self.experiment_name} ({self.run_name})")
         if self.train_set is None:
             raise ValueError("FastaiClassifier.fit() requires a 'train_set'.")
-        # Provenance through marainer's plain FUNCTIONS — `runnable=self` so the
-        # hyperparameters and the resolved config come from marainer's ONE derivation
+        # Provenance through matrainer's plain FUNCTIONS — `runnable=self` so the
+        # hyperparameters and the resolved config come from matrainer's ONE derivation
         # rather than a dict this backend transcribes for itself.
         trackers = self._live_trackers()
         manifest = log_run_context(trackers, runnable=self)
@@ -492,7 +492,7 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         save_class_names(self._class_names, self._artifact_dir(), trackers)
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
         # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
-        # manifest exists: left unfinished it stays `running`, and marainer's atexit hook then
+        # manifest exists: left unfinished it stays `running`, and matrainer's atexit hook then
         # calls a successful run `interrupted`.
         capture_log_file(trackers, manifest=manifest, status="success")
 
@@ -679,7 +679,7 @@ def _log_recorded_epochs(learner: Learner, trackers: Sequence[Tracker]) -> None:
 
     fastai's ``Recorder`` already holds the whole history (``recorder.values`` is one row per
     epoch), so replaying it after the fit gives the same curve a per-epoch callback would,
-    without inserting a marainer callback into fastai's callback chain — one fewer thing that
+    without inserting a matrainer callback into fastai's callback chain — one fewer thing that
     can reorder or swallow. ``_recorded_metrics`` reads the last row of this same list, so the
     two cannot disagree about what the run scored.
     """

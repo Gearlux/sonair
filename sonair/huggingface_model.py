@@ -26,7 +26,7 @@ from typing import Any, List, Optional
 
 from confluid import configurable
 from loggair import get_logger
-from marainer.uri import ModelRef, hf_model_ref
+from matrainer.uri import ModelRef, hf_model_ref
 
 logger = get_logger(__name__)
 
@@ -66,7 +66,7 @@ class HuggingFaceModel:
 
     @property
     def model_refs(self) -> List[ModelRef]:
-        """The weight artifacts this model loads — see :mod:`marainer.uri`.
+        """The weight artifacts this model loads — see :mod:`matrainer.uri`.
 
         ``model_name`` IS a Hub repository id, so the reference is the id itself; nothing has to
         be resolved and nothing is fetched to answer. ``pretrained=False`` builds the same

@@ -169,7 +169,7 @@ def _tabulate(header: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
         from tabulate import tabulate
 
         return str(tabulate(rows, headers=header, tablefmt="github"))
-    except ImportError:  # pragma: no cover - tabulate rides in with marainer[lightning]
+    except ImportError:  # pragma: no cover - tabulate rides in with matrainer[lightning]
         widths = [max(len(str(r[i])) for r in [header, *rows]) for i in range(len(header))]
         lines = ["  ".join(str(c).ljust(w) for c, w in zip(row, widths)) for row in [header, *rows]]
         return "\n".join(lines)

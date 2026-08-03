@@ -42,7 +42,7 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/liquifai.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
-        uv pip install --system --no-deps git+https://github.com/Gearlux/marainer.git@main
+        uv pip install --system --no-deps git+https://github.com/Gearlux/matrainer.git@main
         uv pip install --system -e ".[dev,lightning,keras]"
     - name: Run Isort
       run: isort --check-only .
@@ -83,7 +83,7 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/liquifai.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
-        uv pip install --system --no-deps git+https://github.com/Gearlux/marainer.git@main
+        uv pip install --system --no-deps git+https://github.com/Gearlux/matrainer.git@main
         uv pip install --system -e ".[dev,lightning,keras]"
     - name: Run Tests
       run: |
@@ -129,7 +129,7 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/liquifai.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
-        uv pip install --system --no-deps git+https://github.com/Gearlux/marainer.git@main
+        uv pip install --system --no-deps git+https://github.com/Gearlux/matrainer.git@main
         uv pip install --system -e ".[dev,lightning,keras]"
     - name: Run Examples
       run: |
@@ -179,7 +179,7 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/liquifai.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
-        uv pip install --system --no-deps git+https://github.com/Gearlux/marainer.git@main
+        uv pip install --system --no-deps git+https://github.com/Gearlux/matrainer.git@main
         uv pip install --system -e ".[dev,lightning,keras]"
         # Notebook-only dependencies live in the optional `[notebook]` extra
         # when a project ships notebooks; absence is not an error.

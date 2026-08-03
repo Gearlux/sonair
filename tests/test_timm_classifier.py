@@ -165,7 +165,7 @@ def test_checkpoint_round_trip_via_init(tmp_path: Path) -> None:
 def test_checkpoint_strips_lightning_model_prefix(tmp_path: Path) -> None:
     """A Lightning-style ``state_dict`` with ``model.`` keys loads cleanly.
 
-    This is the contract the Marainer Trainer relies on — Lightning wraps the
+    This is the contract the Matrainer Trainer relies on — Lightning wraps the
     inner model as ``self.model = ...``, and on save every key gets a
     ``"model."`` prefix. Our checkpoint loader must strip exactly one such
     prefix and leave keys like ``classifier.stem.0.weight`` matching the

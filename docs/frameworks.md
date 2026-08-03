@@ -304,7 +304,7 @@ loop this project owns narrow properly, a Keras `compile()` takes one metric lis
 for the whole run and so computes the union. See the per-split table in the
 README.) The same applies
 to any key whose value is a framework object (`loss`, `optimizer`). Tracking is
-NOT among them: a marainer tracker is engine-neutral, so `trackers:` is shared by
+NOT among them: a matrainer tracker is engine-neutral, so `trackers:` is shared by
 every block rather than overridden per framework.
 `tests/test_cli_frameworks.py::test_no_framework_inherits_a_metric_set_its_engine_cannot_consume`
 pins it at the config level, so it fails wherever the mistake is made rather

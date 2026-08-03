@@ -22,7 +22,7 @@ question: ``pip install 'sonair[torch]'`` brings torch, timm and torchmetrics an
 (``[N, 3, H, W]`` via ``collate_records``) and the run artifacts are the SAME objects — a
 ``!scope:framework=torch`` block overrides the runnable and nothing else. What differs is the
 loop and what a loop implies: there is no ``Trainer``, so there is no ``logger:`` slot of
-framework loggers (tracking goes through marainer ``trackers:``, which every backend has), no
+framework loggers (tracking goes through matrainer ``trackers:``, which every backend has), no
 callback protocol, and no distributed strategy. Multi-GPU is deliberately out of scope — that is
 precisely what Lightning is for, and pretending otherwise here would be a worse ``Trainer``.
 
@@ -52,13 +52,13 @@ import torch.nn as nn
 from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from confluid.registry import resolve_class
 from loggair import get_logger
-from marainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
-from marainer.metric_slots import merge_metric_specs
-from marainer.run_names import generate_run_name, run_prefix
-from marainer.torch import Device, build_metric_collection, resolve_device, scalar_metrics
-from marainer.tracking.base import Tracker, as_tracker_list
-from marainer.tracking.provenance import capture_log_file
-from marainer.tracking.render import render_matrix_as_figure, render_matrix_as_table
+from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.metric_slots import merge_metric_specs
+from matrainer.run_names import generate_run_name, run_prefix
+from matrainer.torch import Device, build_metric_collection, resolve_device, scalar_metrics
+from matrainer.tracking.base import Tracker, as_tracker_list
+from matrainer.tracking.provenance import capture_log_file
+from matrainer.tracking.render import render_matrix_as_figure, render_matrix_as_table
 from recordstream import (
     ClassificationOutput,
     LabelMap,
@@ -96,7 +96,7 @@ ClassifierTask = Literal["fit", "evaluate", "test", "predict"]
 MetricsSpec = Optional[Union[Dict[str, Union[Metric, LazyClass[Metric]]], MetricCollection]]
 
 #: Re-exported so ``TorchClassifier``'s ``device`` knob can be read from this module the way
-#: every other name in its signature can. It is marainer's (``marainer.torch.device``): a
+#: every other name in its signature can. It is matrainer's (``matrainer.torch.device``): a
 #: ``Trainer`` picks an accelerator for you, a hand-written loop has to pick one itself, and
 #: every such loop picks identically — so the choice is a torch-platform helper, not this
 #: backend's private function.
@@ -131,7 +131,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
             live prefixed ``MetricCollection`` after.
         plot_metrics: ALSO send each non-scalar metric to the trackers as a matplotlib
             heatmap, not only as a table. Off by default: it makes matplotlib
-            (``marainer[plot]``) a cost of every eval epoch, where the table costs nothing.
+            (``matrainer[plot]``) a cost of every eval epoch, where the table costs nothing.
         device: Where to run — see :data:`Device`.
         checkpoint_dir: Directory for ``model.pt`` (a plain ``state_dict``) and the run's
             ``class_names.json``. ``None`` writes no weights, which is what a smoke run wants.
@@ -385,7 +385,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
     def _build_split_metrics(self, spec: Any, prefix: str) -> MetricCollection:
         """One split's live, prefixed collection — its own spec merged over the shared one.
 
-        The combination rule is :func:`~marainer.metric_slots.merge_metric_specs`, shared with
+        The combination rule is :func:`~matrainer.metric_slots.merge_metric_specs`, shared with
         every other backend so a config moving between them cannot change shape; what is torch's
         alone is the rest of this line — sizing the templates and prefixing the collection.
         """
@@ -519,7 +519,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         matrix) has no place there and would otherwise vanish silently, so it takes the
         other route — rendered into the log and pushed to each tracker's `log_text`, which
         is the channel that exists for exactly this. recordstream decides which computed
-        values ARE confusion matrices (square 2-D, by SHAPE not by metric name), marainer
+        values ARE confusion matrices (square 2-D, by SHAPE not by metric name), matrainer
         renders the table.
         """
         if collection is None:
@@ -577,7 +577,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         if loaders["test"] is not None:
             self._computed_metrics.update(self._score(cast(DataLoader[Any], loaders["test"])))
         # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
-        # manifest exists: left unfinished it stays `running`, and marainer's atexit hook then
+        # manifest exists: left unfinished it stays `running`, and matrainer's atexit hook then
         # calls a successful run `interrupted`.
         capture_log_file(trackers, manifest=manifest, status="success")
 
@@ -665,12 +665,12 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         return cast(List[Tracker], self.trackers)
 
     def _log_run_context(self, trackers: List[Tracker]) -> Any:
-        """Provenance through marainer's plain FUNCTIONS — hookup style (1).
+        """Provenance through matrainer's plain FUNCTIONS — hookup style (1).
 
         There is no callback protocol to hang a ``TrackingCallback`` on, which is exactly the
-        case marainer's function-level API exists for.
+        case matrainer's function-level API exists for.
 
-        ``runnable=self`` rather than a hand-written params dict: marainer derives the
+        ``runnable=self`` rather than a hand-written params dict: matrainer derives the
         hyperparameters from the flowed object graph and dumps the resolved config, so this
         backend and the Lightning one cannot answer "what were the hyperparameters?"
         differently. The six keys this used to spell out are a subset of what it now records.
@@ -678,7 +678,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         """
         if not trackers:
             return None
-        from marainer.tracking.provenance import log_run_context
+        from matrainer.tracking.provenance import log_run_context
 
         return log_run_context(trackers, {"device": str(self._device)}, runnable=self)
 

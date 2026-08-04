@@ -48,6 +48,8 @@ import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
 from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.metric_functions import accumulate_confusion, macro_f1, zero_confusion
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -109,8 +111,13 @@ def _accuracy_multi(logits: Any, labels: Any) -> Any:
     return mx.mean((logits > 0.0).astype(labels.dtype) == labels)
 
 
-#: Metric names this backend resolves. Plain functions, so nothing for confluid to tag.
+#: Metric names this backend resolves PER BATCH. Plain functions, so nothing for confluid to tag.
 _METRICS: Dict[str, Callable[..., Any]] = {"accuracy": _accuracy, "accuracy_multi": _accuracy_multi}
+
+#: Metric names resolved from the split's CONFUSION MATRIX instead, because averaging them over
+#: batches gives a systematically different number — the JAX backend's twin of this table carries
+#: the measurement, and ``matrainer.metric_functions`` the arithmetic. Single-label only.
+_CONFUSION_METRICS: Dict[str, Callable[[Any], float]] = {"f1_macro": macro_f1}
 
 
 @configurable(task="classification", role="trainer", framework="mlx")
@@ -141,10 +148,15 @@ class MlxClassifier(ProgressReporting):
             ready-made optimizer instance.
         loss: An ``mlx.nn.losses`` name or a callable over ``(logits, labels)``. ``None`` picks
             by target shape, like every other backend's sentinel.
-        metrics: Metric names (``"accuracy"``, ``"accuracy_multi"``) or callables. ``None``
-            picks by target shape.
-        val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is
-            no ``train_metrics``: the training pass computes the loss and nothing else.
+        metrics: Metric names (``"accuracy"``, ``"accuracy_multi"``, ``"f1_macro"``) or
+            callables. ``None`` picks by target shape.
+        train_metrics / val_metrics / test_metrics: That split's OWN metrics, merged over
+            ``metrics``. The training pass scores its metrics from the logits the gradient step
+            already computed, so ``train_metrics`` costs no second forward pass.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. This loop already writes the canonical
+            ``<split>/<name>``, so the default translates nothing; wiring ``target:`` is what
+            makes it record in another engine's spelling.
     """
 
     def __init__(
@@ -168,8 +180,10 @@ class MlxClassifier(ProgressReporting):
         optimizer: MlxOptimizer = "Adam",
         loss: Optional[MlxLoss] = None,
         metrics: Optional[Sequence[MlxMetric]] = None,
+        train_metrics: Optional[Sequence[MlxMetric]] = None,
         val_metrics: Optional[Sequence[MlxMetric]] = None,
         test_metrics: Optional[Sequence[MlxMetric]] = None,
+        metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
         super().__init__()
         # `nn.Module`, not `Lazy[nn.Module]`: the deferred-ness is declared once, on the ctor
@@ -202,10 +216,11 @@ class MlxClassifier(ProgressReporting):
         # once `initialize()` has peeked the data.
         self.loss: Optional[MlxLoss] = loss
         self.metrics: Optional[Sequence[MlxMetric]] = metrics
-        # Per-split ADDITIONS, merged over `metrics` by the shared rule. There is no
-        # `train_metrics` here and that is a property of this loop, not an omission: the
-        # training pass computes the LOSS and nothing else, so a train-only metric would
-        # have nowhere to be computed.
+        # Per-split ADDITIONS, merged over `metrics` by the shared rule. `train_metrics` is
+        # served here — the loop is ours, so the training pass scores the logits its gradient
+        # step already produced (`nn.value_and_grad` returns them as an aux output), never a
+        # second forward pass, which would cost a pass AND measure the network in eval mode.
+        self.train_metrics: Optional[Sequence[MlxMetric]] = train_metrics
         self.val_metrics: Optional[Sequence[MlxMetric]] = val_metrics
         self.test_metrics: Optional[Sequence[MlxMetric]] = test_metrics
         self.multilabel: bool = False
@@ -215,6 +230,9 @@ class MlxClassifier(ProgressReporting):
         # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
         # and flows it at run time.
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self._class_names: Optional[List[str]] = None
         self._computed_metrics: Dict[str, float] = {}
 
@@ -337,23 +355,63 @@ class MlxClassifier(ProgressReporting):
 
     # ---- the loop ----------------------------------------------------------- #
     def _loss_and_grad(self) -> Any:
-        """The step: a loss over ``(model, x, y)``, differentiated by ``nn.value_and_grad``."""
+        """The step: a loss over ``(model, x, y)``, differentiated by ``nn.value_and_grad``.
+
+        ``compute`` returns ``(loss, logits)`` rather than the bare loss — MLX differentiates
+        the FIRST element of a returned tuple and hands the rest back untouched (verified), so
+        the training metrics are scored from the very tensor the gradient was taken through.
+        """
         loss_fn = _as_loss(self.loss, multilabel=self.multilabel)
 
         def compute(model: Any, x: Any, y: Any) -> Any:
-            return mx.mean(loss_fn(model(x), y))
+            logits = model(x)
+            return mx.mean(loss_fn(logits, y)), logits
 
         return nn.value_and_grad(self.model, compute)
 
     def _split_metrics(self, split: str) -> Sequence[MlxMetric]:
-        """The metric list for one eval split — its own slot merged over the shared ``metrics``.
+        """The metric list for one split — its own slot merged over the shared ``metrics``.
 
         The combination rule is the workspace-wide one
         (:func:`~matrainer.metric_slots.merge_metric_specs`), so a config moving between backends
-        keeps its shape. Only ``val`` and ``test`` have a slot: this loop computes metrics on the
-        eval pass only, so a train-only metric would have nowhere to go.
+        keeps its shape. All three splits have a slot: this loop is ours, so the training pass
+        can score the logits its gradient step already produced.
         """
         return merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or []
+
+    def _partition_metrics(self, split: str) -> Any:
+        """One split's metrics, split into the per-batch ones and the confusion-matrix ones.
+
+        Partitioned by NAME before resolution, so only a NAMED metric can be confusion-based —
+        nothing here can know what a user-supplied callable would want accumulated.
+        """
+        batchwise: List[MlxMetric] = []
+        confusion: Dict[str, Callable[[Any], float]] = {}
+        for metric in self._split_metrics(split):
+            name = flow(metric)
+            if isinstance(name, str) and name in _CONFUSION_METRICS:
+                confusion[name] = _CONFUSION_METRICS[name]
+            else:
+                batchwise.append(metric)
+        return batchwise, confusion
+
+    def _split_confusion(self, confusion: Dict[str, Callable[[Any], float]]) -> Optional[np.ndarray]:
+        """A zeroed accumulator when this split wants one, else ``None``.
+
+        A multi-label run gets ``None`` even with a confusion metric wired: a row with two true
+        labels has no single cell to land in, so the metric is DROPPED with a warning rather
+        than approximated into a number that means something else.
+        """
+        if not confusion or self.multilabel:
+            if confusion and self.multilabel:
+                logger.warning(
+                    f"MlxClassifier: {', '.join(sorted(confusion))} needs single-label targets and this run is "
+                    f"multi-label — the metric is not reported. Use `accuracy_multi` for a multi-hot target."
+                )
+            return None
+        if not self.num_classes:
+            raise RuntimeError("MlxClassifier: a confusion-matrix metric needs num_classes.")
+        return zero_confusion(self.num_classes)
 
     def _metric_values(self, logits: Any, labels: Any, metrics: Sequence[MlxMetric]) -> Dict[str, float]:
         out: Dict[str, float] = {}
@@ -365,7 +423,8 @@ class MlxClassifier(ProgressReporting):
     def _evaluate(self, sequence: RecordSequence, split: str = "val") -> Dict[str, float]:
         """One pass in EVAL mode, returning ``{"loss": …, **metrics}``."""
         loss_fn = _as_loss(self.loss, multilabel=self.multilabel)
-        metrics = self._split_metrics(split)
+        batchwise, confusion = self._partition_metrics(split)
+        matrix = self._split_confusion(confusion)
         total, batches = 0.0, 0
         sums: Dict[str, float] = {}
         # MLX carries train/eval as module STATE, so the mode is set ONCE here rather than
@@ -381,11 +440,14 @@ class MlxClassifier(ProgressReporting):
             mx.eval(loss, logits)  # lazy arrays: nothing has been computed until here
             total += float(loss)
             batches += 1
-            for key, value in self._metric_values(logits, ya, metrics).items():
+            for key, value in self._metric_values(logits, ya, batchwise).items():
                 sums[key] = sums.get(key, 0.0) + value
+            if matrix is not None:
+                accumulate_confusion(matrix, np.asarray(logits), np.asarray(ya))
         if not batches:
             return {"loss": float("nan")}
-        return {"loss": total / batches, **{k: v / batches for k, v in sums.items()}}
+        reduced = {} if matrix is None else {name: fn(matrix) for name, fn in confusion.items()}
+        return {"loss": total / batches, **{k: v / batches for k, v in sums.items()}, **reduced}
 
     # ---- the four entry points ---------------------------------------------- #
     @entrypoint("fit", role="trainer", primary=True)
@@ -397,6 +459,7 @@ class MlxClassifier(ProgressReporting):
         # hyperparameters and the resolved config come from matrainer's ONE derivation
         # rather than a dict this backend transcribes for itself.
         trackers = self._live_trackers()
+        names = as_metric_names(self.metric_names)
         manifest = log_run_context(trackers, runnable=self)
         network = self.model
         optimizer = _as_optimizer(self.optimizer, self.learning_rate)
@@ -404,23 +467,44 @@ class MlxClassifier(ProgressReporting):
         train_seq = self._sequence(self.train_set, shuffle=True)
         val_seq = self._sequence(self.val_set) if self.val_set is not None else None
 
+        # Resolved ONCE, outside the epoch loop: the partition depends only on the config, while
+        # the accumulator is zeroed per epoch.
+        train_batchwise, train_confusion = self._partition_metrics("train")
+
         logs: Dict[str, float] = {}
         for epoch in range(self.max_epochs):
             network.train(True)
             total, batches = 0.0, 0
+            sums: Dict[str, float] = {}
+            matrix = self._split_confusion(train_confusion)
             for index in range(len(train_seq)):
                 x, y = train_seq[index]
-                loss, grads = step(network, mx.array(x), mx.array(y))
+                ya = mx.array(y)
+                (loss, logits), grads = step(network, mx.array(x), ya)
                 optimizer.update(network, grads)
                 # MLX is LAZY: without this the graph grows every step until memory runs out,
                 # and nothing warns — the run just gets slower and then dies. One eval per step,
-                # over the parameters AND the optimizer state, is what forces the work.
-                mx.eval(network.parameters(), optimizer.state, loss)
+                # over the parameters AND the optimizer state, is what forces the work. The
+                # logits join it because the training metrics below read them.
+                mx.eval(network.parameters(), optimizer.state, loss, logits)
                 total += float(loss)
                 batches += 1
-            logs = {"loss": total / batches if batches else float("nan")}
+                # Measured on the network AS IT TRAINED (dropout and batch norm in train mode),
+                # so a gap against the validation numbers is expected rather than a defect.
+                for key, value in self._metric_values(logits, ya, train_batchwise).items():
+                    sums[key] = sums.get(key, 0.0) + value
+                if matrix is not None:
+                    accumulate_confusion(matrix, np.asarray(logits), np.asarray(ya))
+            # Named `<split>/<name>` here rather than translated later: this loop is ours, so
+            # there is no engine convention to preserve — and the dict goes to the `callbacks`
+            # below as well, which would otherwise see different names from the trackers.
+            logs = {"train/loss": total / batches if batches else float("nan")}
+            if batches:
+                logs.update({f"train/{k}": v / batches for k, v in sums.items()})
+                if matrix is not None:
+                    logs.update({f"train/{name}": fn(matrix) for name, fn in train_confusion.items()})
             if val_seq is not None:
-                logs.update({f"val_{k}": v for k, v in self._evaluate(val_seq).items()})
+                logs.update({f"val/{k}": v for k, v in self._evaluate(val_seq).items()})
             # A `fit()` would have done this; a hand-written loop must. Forgetting it is
             # INVISIBLE — training silently runs on one fixed row order forever.
             train_seq.on_epoch_end()
@@ -429,10 +513,10 @@ class MlxClassifier(ProgressReporting):
             # Trackers are the other per-epoch consumer. A `fit()` forwards its logs to every
             # attached logger; a hand-written loop reaches them the same way it reaches callbacks.
             for tracker in trackers:
-                tracker.log_metrics(logs, step=epoch)
+                tracker.log_metrics(names(logs), step=epoch)
             logger.info(f"epoch {epoch + 1}/{self.max_epochs}: " + ", ".join(f"{k}={v:.4f}" for k, v in logs.items()))
 
-        self._computed_metrics = logs
+        self._computed_metrics = names(logs)
         logger.info("Training complete.")
         save_class_names(self._class_names, self._artifact_dir(), trackers)
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
@@ -449,7 +533,8 @@ class MlxClassifier(ProgressReporting):
     def test(self) -> None:
         if self.test_set is None:
             raise ValueError("MlxClassifier.test() requires a 'test_set'.")
-        self._computed_metrics = self._evaluate(self._sequence(self.test_set), "test")
+        scored = self._evaluate(self._sequence(self.test_set), "test")
+        self._computed_metrics = as_metric_names(self.metric_names)({f"test/{k}": v for k, v in scored.items()})
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 
@@ -571,13 +656,19 @@ def _as_loss(value: Optional[MlxLoss], multilabel: bool = False) -> Callable[...
 
 
 def _as_metric(value: MlxMetric) -> Callable[..., Any]:
-    """A metric from a callable or its NAME (``"accuracy"`` / ``"accuracy_multi"``)."""
+    """A PER-BATCH metric from a callable or its NAME (``"accuracy"`` / ``"accuracy_multi"``).
+
+    A confusion-matrix name (``"f1_macro"``) never arrives here — ``_partition_metrics`` removes
+    those first — but it is listed in the error, so a typo next to a supported name does not
+    read as "this backend has no such metric".
+    """
     built = flow(value)
     if callable(built):
         return cast(Callable[..., Any], built)
     metric = _METRICS.get(str(built))
     if metric is None:
-        raise ValueError(f"Unknown metric {built!r}. Known names: {', '.join(sorted(_METRICS))}.")
+        known = sorted({*_METRICS, *_CONFUSION_METRICS})
+        raise ValueError(f"Unknown metric {built!r}. Known names: {', '.join(known)}.")
     return metric
 
 

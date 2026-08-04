@@ -19,6 +19,7 @@ pytest.importorskip("fastai", reason="the fastai backend needs sonair[fastai]")
 
 import torch  # noqa: E402 - after the skip, so a fastai-less install never imports it for this file
 from confluid import Fluid, LazyClass, flow, lazy_param_names  # noqa: E402
+from matrainer.metric_names import MetricNames  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
 from sonair.fastai_classifier import FastaiClassifier, _as_metric, _as_opt_func, _named_values  # noqa: E402
@@ -373,19 +374,43 @@ def test_an_unknown_optimizer_name_says_where_names_come_from() -> None:
 # ---------------------------------------------------------------------------
 
 
+class _Recorder:
+    metric_names = ["epoch", "train_loss", "valid_loss", "accuracy", "time"]
+
+
+class _RecordingLearner:
+    recorder = _Recorder()
+
+
 def test_recorder_values_are_matched_to_names_from_the_END() -> None:
     """``validate()`` returns one fewer value than a training epoch (no ``train_loss``), so
     matching from the front would label the validation loss "train_loss"."""
+    learner = _RecordingLearner()
 
-    class _Recorder:
-        metric_names = ["epoch", "train_loss", "valid_loss", "accuracy", "time"]
+    assert _named_values(learner, [0.5, 0.4, 0.9], MetricNames()) == {
+        "train/loss": 0.5,
+        "val/loss": 0.4,
+        "val/accuracy": 0.9,
+    }
+    assert _named_values(learner, [0.4, 0.9], MetricNames()) == {"val/loss": 0.4, "val/accuracy": 0.9}
 
-    class _Learner:
-        recorder = _Recorder()
 
-    learner = _Learner()
-    assert _named_values(learner, [0.5, 0.4, 0.9]) == {"train_loss": 0.5, "valid_loss": 0.4, "accuracy": 0.9}
-    assert _named_values(learner, [0.4, 0.9]) == {"valid_loss": 0.4, "accuracy": 0.9}
+def test_an_unprefixed_recorder_column_is_a_VALIDATION_metric() -> None:
+    """fastai computes its metrics on the validation pass and prefixes none of them.
+
+    Read as a training metric — which is what a bare key means under every other engine — a
+    sweep would report this backend's val accuracy in the train column.
+    """
+    named = _named_values(_RecordingLearner(), [0.5, 0.4, 0.9], MetricNames())
+
+    assert "val/accuracy" in named and "train/accuracy" not in named
+
+
+def test_the_names_the_run_records_can_be_moved_to_ANOTHER_engines_spelling() -> None:
+    """The `metric_names:` knob, exercised through the function that applies it here."""
+    named = _named_values(_RecordingLearner(), [0.5, 0.4, 0.9], MetricNames(target="keras"))
+
+    assert named == {"loss": 0.5, "val_loss": 0.4, "val_accuracy": 0.9}
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +429,7 @@ def test_fit_trains_and_reports_the_last_epochs_metrics() -> None:
     )
     clf.run()
 
-    assert {"train_loss", "valid_loss", "accuracy"} <= set(clf.computed_metrics)
+    assert {"train/loss", "val/loss", "val/accuracy"} <= set(clf.computed_metrics)
     assert clf._learner is not None and len(clf._learner.recorder.values) == 2
 
 
@@ -420,7 +445,7 @@ def test_fit_without_one_cycle_uses_the_flat_schedule() -> None:
     )
     clf.run()
 
-    assert "train_loss" in clf.computed_metrics
+    assert "train/loss" in clf.computed_metrics
 
 
 def test_no_val_set_falls_back_to_the_training_data() -> None:
@@ -450,7 +475,7 @@ def test_evaluate_scores_the_test_set() -> None:
     clf = FastaiClassifier(model=_Tiny(), test_set=_stream(_records(8)), task="test", batch_size=4)
     clf.run()
 
-    assert "valid_loss" in clf.computed_metrics
+    assert "val/loss" in clf.computed_metrics
 
 
 def test_evaluate_reads_num_classes_off_the_LIVE_model() -> None:
@@ -552,3 +577,75 @@ def test_trained_model_is_the_live_module_after_a_run() -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# --------------------------------------------------------------------------- #
+# Metrics: the `f1_macro` alias, and the training columns
+# --------------------------------------------------------------------------- #
+def test_f1_macro_names_a_CONFIGURED_F1Score_not_the_factory() -> None:
+    """`fastai.metrics` publishes `F1Score` as a FACTORY, so a bare name resolves to the wrong
+    thing: `getattr(fastai.metrics, "F1Score")` hands the Learner the factory itself, which is
+    accepted without complaint and then reported under fastai's own `f1_score` column with the
+    default `average="binary"` — which on a multi-class problem raises inside scikit-learn.
+
+    The alias resolves to a BUILT metric, renamed to the column every other backend writes.
+    """
+    metric = _as_metric("f1_macro")
+
+    assert metric.name == "f1_macro", "the column a cross-framework comparison lines up on"
+    assert not isinstance(metric, type) and callable(metric)
+    assert _as_metric("f1_micro").name == "f1_micro"
+    assert _as_metric("f1_weighted").name == "f1_weighted"
+
+
+def test_the_unknown_metric_error_names_the_aliases_too() -> None:
+    """`f1_macro` is not a `fastai.metrics` attribute, so the message has to say where it IS."""
+    with pytest.raises(ValueError, match="f1_macro"):
+        _as_metric("no_such_metric")
+
+
+def test_a_fit_reports_the_metrics_on_the_TRAINING_pass_too() -> None:
+    """`Recorder.train_metrics` — accumulated over the training batches, not a second pass.
+
+    The old claim was that a `Learner` "computes its metrics on the validation pass only". That
+    is its DEFAULT, not a constraint: `Recorder.__init__` takes `train_metrics=False`, and with
+    it on the columns become `train_loss, train_<m>…, valid_loss, valid_<m>…` — exactly the
+    shape `matrainer.metric_names`' fastai vocabulary already reads, which is why turning it on
+    needed no translation change.
+    """
+    clf = FastaiClassifier(
+        model=_Tiny(),
+        train_set=_stream(_records(12)),
+        val_set=_stream(_records(8)),
+        num_classes=3,
+        max_epochs=1,
+        batch_size=4,
+        metrics=["accuracy", "f1_macro"],
+    )
+    clf.run()
+
+    assert {"train/accuracy", "train/f1_macro"} <= set(clf.computed_metrics)
+    assert {"val/accuracy", "val/f1_macro"} <= set(clf.computed_metrics)
+    assert clf._learner is not None and clf._learner.recorder.train_metrics is True
+
+
+def test_the_fit_path_UNIONS_train_and_val_while_the_test_path_narrows() -> None:
+    """A fitting `Learner` reports ONE list on both passes, so the two cannot be told apart.
+
+    `Recorder._train_mets` and `_valid_mets` are the same `self.metrics` with different
+    prefixes, so a val-only metric IS computed on training as well — the same widening
+    `keras.Model.compile()` forces, and the same trade: noise a reader skips beats a wired
+    metric that silently reports nothing. The TEST path builds its own Learner and runs one
+    pass, so it keeps the narrowing merge.
+    """
+    clf = FastaiClassifier(
+        model=_NO_MODEL,
+        num_classes=3,
+        metrics=["accuracy"],
+        train_metrics=["error_rate"],
+        val_metrics=["f1_macro"],
+        test_metrics=["top_k_accuracy"],
+    )
+
+    assert set(clf._learner_metrics("val")) == {"accuracy", "error_rate", "f1_macro"}
+    assert set(clf._learner_metrics("test")) == {"accuracy", "top_k_accuracy"}

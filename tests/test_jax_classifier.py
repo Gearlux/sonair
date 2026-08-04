@@ -235,7 +235,7 @@ def test_fit_trains_and_reports(tmp_path: Path) -> None:
     clf.metrics_sidecar_path = str(tmp_path / "metrics.json")
     clf.run()
 
-    assert "loss" in clf.computed_metrics and "val_accuracy" in clf.computed_metrics
+    assert "train/loss" in clf.computed_metrics and "val/accuracy" in clf.computed_metrics
     assert (tmp_path / "metrics.json").exists()
     assert clf.num_classes == 3
 
@@ -274,7 +274,7 @@ def test_jit_is_a_knob_and_both_paths_agree() -> None:
     jitted.run()
     eager.run()
 
-    assert jitted.computed_metrics["loss"] == pytest.approx(eager.computed_metrics["loss"], rel=1e-4)
+    assert jitted.computed_metrics["train/loss"] == pytest.approx(eager.computed_metrics["train/loss"], rel=1e-4)
 
 
 def test_string_targets_are_encoded_through_a_fitted_label_map() -> None:
@@ -340,3 +340,86 @@ def test_it_registers_no_loss_module() -> None:
 
     assert FRAMEWORKS["jax"].registrations is None
     assert importlib.util.find_spec("sonair.jax_classification") is None
+
+
+# --------------------------------------------------------------------------- #
+# Metrics: the training pass, and the confusion-matrix ones
+# --------------------------------------------------------------------------- #
+def test_the_training_pass_reports_its_own_metrics(tmp_path: Path) -> None:
+    """`train_metrics` is served here because the loop is ours — no second forward pass.
+
+    The old comment said the training pass "computes the LOSS and nothing else", which described
+    this loop rather than JAX: the step now returns its logits as an `nnx.value_and_grad` aux
+    output, so scoring them costs one reduction per batch.
+    """
+    clf = _classifier(
+        train_set=Stream(source=_records(12)),
+        val_set=Stream(source=_records(8)),
+        metrics=["accuracy"],
+        train_metrics=["f1_macro"],
+    )
+    clf.run()
+
+    assert "train/accuracy" in clf.computed_metrics, "the shared set reaches the training split"
+    assert "train/f1_macro" in clf.computed_metrics, "and so does the train-only addition"
+    assert "val/accuracy" in clf.computed_metrics
+    assert "val/f1_macro" not in clf.computed_metrics, "a train-only metric stays out of val"
+
+
+def test_f1_macro_does_not_depend_on_the_batch_SIZE() -> None:
+    """The property that distinguishes accumulation from averaging, with no arithmetic restated.
+
+    A confusion matrix summed over the split gives one answer whatever the batching; a mean of
+    per-batch F1s does not, and is biased downward the smaller the batches (a class absent from
+    a batch scores 0 for it). So evaluating the SAME model on the SAME rows at two batch sizes
+    agreeing is the whole claim — `matrainer.metric_functions`' suite pins how far apart the two
+    would be.
+
+    `accuracy` rides along as the control: it is still averaged per batch, and with 12 rows
+    splitting evenly at both sizes it agrees too — so a failure here is about F1, not batching.
+    """
+    records = _records(12)
+    scores = []
+    for batch_size in (3, 12):
+        # An eval-only run over a PINNED model: same weights, same rows, only the batching
+        # differs — which is what makes the two numbers comparable at all.
+        clf = _classifier(
+            model=LazyClass(FlaxConvNet, input_shape=INPUT, num_classes=3, seed=0),
+            test_set=Stream(source=records),
+            batch_size=batch_size,
+            metrics=["accuracy", "f1_macro"],
+        )
+        clf.task = "test"
+        clf.run()
+        scores.append(clf.computed_metrics)
+
+    assert scores[0]["test/f1_macro"] == pytest.approx(scores[1]["test/f1_macro"], abs=1e-6)
+    assert scores[0]["test/accuracy"] == pytest.approx(scores[1]["test/accuracy"], abs=1e-6)
+
+
+def test_a_confusion_metric_is_dropped_on_a_multilabel_run() -> None:
+    """A row with two true labels has no single cell to land in, so the metric is not reported.
+
+    Dropping beats approximating: a number under the name `f1_macro` that was computed some
+    other way is worse than a gap, because nothing downstream can tell.
+    """
+    records = [
+        {"image": Image(np.zeros(INPUT, "float32"), layout="HWC"), "class": MultiLabel([i % 3, (i + 1) % 3])}
+        for i in range(8)
+    ]
+    clf = _classifier(
+        train_set=Stream(source=records),
+        val_set=Stream(source=records),
+        num_classes=3,
+        metrics=["accuracy_multi", "f1_macro"],
+    )
+    clf.run()
+
+    assert "val/accuracy_multi" in clf.computed_metrics
+    assert "val/f1_macro" not in clf.computed_metrics
+
+
+def test_the_unknown_metric_error_names_the_confusion_ones_too() -> None:
+    """`f1_macro` never reaches `_as_metric`, but omitting it would read as "unsupported"."""
+    with pytest.raises(ValueError, match="f1_macro"):
+        _as_metric("no_such_metric")

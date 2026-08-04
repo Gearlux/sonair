@@ -224,7 +224,7 @@ def test_a_wired_val_set_is_scored_every_epoch() -> None:
     clf.run()
 
     assert len(clf._history["val/loss"]) == 2
-    assert "val/accuracy_top1" in clf.computed_metrics
+    assert "val/accuracy" in clf.computed_metrics
 
 
 def test_metrics_are_reset_between_epochs() -> None:
@@ -446,7 +446,7 @@ def test_test_scores_a_wired_model_and_writes_the_sidecar(tmp_path: Path) -> Non
     clf.metrics_sidecar_path = str(sidecar)
     clf.run()
 
-    assert "test/loss" in clf.computed_metrics and "test/accuracy_top1" in clf.computed_metrics
+    assert "test/loss" in clf.computed_metrics and "test/accuracy" in clf.computed_metrics
     assert sidecar.exists()
 
 

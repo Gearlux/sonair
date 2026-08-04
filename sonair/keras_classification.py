@@ -101,7 +101,9 @@ Verified end to end with ``sonair train --framework keras`` (MNIST, the first bl
 descends and both metrics report.
 """
 
-from confluid import register
+from typing import Any, Literal, Optional
+
+from confluid import configurable, register
 
 from sonair._keras import keras
 
@@ -215,6 +217,73 @@ for _metric_cls in _CLASSIFICATION_METRICS:
     register(_metric_cls, task="classification", role="metric", framework="keras")
 
 
+#: How ``F1Score`` reduces its per-class scores. Closed, because the set is fixed and short —
+#: a picker reads the allowed values straight off the annotation instead of restating them.
+F1Average = Literal["macro", "micro", "weighted"]
+
+
+@configurable(task="classification", role="metric", framework="keras")
+class SparseF1Score(keras.metrics.F1Score):
+    """``keras.metrics.F1Score`` for INT-ID targets — the one metric shim this module needs.
+
+    Every other metric here is an upstream class registered as-is, which is the rule. This one
+    is a subclass because of a shape mismatch that no configuration can close: ``F1Score``
+    compares two ``[N, C]`` tensors, while a single-label run in this project produces int64
+    class ids ``[N]`` (see ``KerasClassifier._to_arrays``). Wired against sparse targets
+    upstream's own class dies on the first batch — the same
+    *"size of tensor a (32) must match tensor b (320)"* the module docstring records for
+    ``Precision`` — so there is no version of "just register it" that works.
+
+    It one-hots ``y_true`` and delegates; it computes NO F1 arithmetic of its own, which is what
+    keeps it a transport shim rather than the reimplementation the loss/metric mandate forbids
+    (the precedent is ``sonair.torch_classification.SigmoidFocalLoss``, wrapping a torchvision
+    FUNCTION for the same "cannot be registered as it stands" reason).
+
+    ``y_pred`` may be raw logits: the inherited ``threshold=None`` argmaxes, and argmax is
+    invariant under softmax — the same property that makes ``SparseCategoricalAccuracy`` safe on
+    this project's bare-``Dense`` head. An explicit ``threshold`` must be a probability in
+    ``(0, 1]``, so leave it unset on a logits head.
+
+    Args:
+        average: How the per-class F1s are reduced. ``macro`` is the unweighted mean — the
+            reduction the torch backends' ``MulticlassF1Score(average="macro")`` computes, so
+            the two engines' numbers are comparable.
+        threshold: Score ``y_pred`` above this value as a positive prediction instead of
+            argmaxing. Leave unset for a logits head (see above).
+        name: The metric's name in every tracker, and therefore the COLUMN a cross-framework
+            comparison lines up on. Defaults to ``f1_<average>``, so the workspace-canonical
+            ``f1_macro`` needs nothing written; derived rather than a literal ``"f1_macro"``
+            so a run with ``average="micro"`` cannot record it under the macro name.
+        dtype: The accumulator dtype, as upstream.
+
+    Typical wiring (YAML), beside the accuracy every backend reports::
+
+        metrics:
+          - !class:keras.metrics.SparseCategoricalAccuracy { name: accuracy }
+          - !class:sonair.SparseF1Score
+    """
+
+    def __init__(
+        self,
+        average: F1Average = "macro",
+        threshold: Optional[float] = None,
+        name: Optional[str] = None,
+        dtype: Optional[str] = None,
+    ) -> None:
+        super().__init__(average=average, threshold=threshold, name=name or f"f1_{average}", dtype=dtype)
+
+    def update_state(self, y_true: Any, y_pred: Any, sample_weight: Optional[Any] = None) -> Any:
+        """One-hot the int-id targets to ``y_pred``'s width, then accumulate as upstream does.
+
+        The width comes from ``y_pred`` rather than a constructor knob on purpose: the head
+        already declares it, and a second declaration is one that can disagree with the model.
+        ``keras.ops`` throughout, so this runs on whichever engine ``KERAS_BACKEND`` names.
+        """
+        ids = keras.ops.cast(keras.ops.reshape(y_true, [-1]), "int32")
+        one_hot = keras.ops.one_hot(ids, keras.ops.shape(y_pred)[-1], dtype=y_pred.dtype)
+        return super().update_state(one_hot, y_pred, sample_weight)
+
+
 # Every registered loss / metric is named in ``__all__`` so StreamStudio's ``__all__``-gated
 # discovery pass surfaces each as a node. Keep this list in sync with ``_CLASSIFICATION_LOSSES`` /
 # ``_CLASSIFICATION_METRICS`` above (a literal, not a comprehension, so static analysers can read
@@ -243,6 +312,9 @@ __all__ = [
     "SparseCategoricalAccuracy",
     "SparseTopKCategoricalAccuracy",
     "TopKCategoricalAccuracy",
+    # the one shim (see SparseF1Score) — sonair's own class, hence @configurable rather than
+    # `register`, but exported for the same discovery pass as every registration above.
+    "SparseF1Score",
     "TrueNegatives",
     "TruePositives",
     # metrics (keras.metrics) — role="metric", the loss namesakes (see above)

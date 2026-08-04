@@ -46,6 +46,7 @@ from matrainer.lightning import (
     checkpoint_dir,
     scalar_metrics,
 )
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -138,6 +139,11 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         plot_metrics: ALSO send each non-scalar metric to the trackers as a matplotlib
             heatmap, not only as a table. Off by default: it makes matplotlib
             (``matrainer[plot]``) a cost of every eval epoch, where the table costs nothing.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. The ``self.log`` calls below already
+            write the canonical ``<split>/<name>``, so the default translates nothing; it is
+            handed to each ``TrackerLogger``, where a wired ``target:`` records the same run in
+            another engine's spelling.
 
     Post-construction slots (YAML / broadcasting): ``val_set``, ``optimizer``, ``train/val/test_loader``,
     ``lightning``, ``loss_fn``, ``predictions_sink``, ``metrics_sidecar_path``,
@@ -166,6 +172,7 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         val_metrics: MetricsSpec = None,
         test_metrics: MetricsSpec = None,
         plot_metrics: bool = False,
+        metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
         super().__init__()
         self.model: Lazy[nn.Module] = model
@@ -233,6 +240,9 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
         # and flows it at run time.
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `_build_trainer` builds it where the loggers are adapted.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self.log_system_metrics: bool = True
         self._class_names: Optional[List[str]] = None
 
@@ -273,16 +283,38 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         y = self._targets(batch)
         preds = self(x)
         loss: torch.Tensor = cast(nn.Module, self.loss_fn)(preds, y)
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=x.shape[0])
+        # TWO calls, one series each, and that is what keeps the name canonical: Lightning
+        # appends `_step` / `_epoch` when ONE name carries both, so a single
+        # `on_step=True, on_epoch=True` call recorded `train/loss_epoch` — a name no other
+        # backend writes, in the column a sweep compares. The per-step series is still worth
+        # having (nothing else shows the loss moving WITHIN an epoch) and keeps the progress
+        # bar's live number, so it gets its own explicit name instead.
+        self.log("train/loss", loss, on_step=False, on_epoch=True, batch_size=x.shape[0])
+        self.log("train/loss_step", loss, on_step=True, on_epoch=False, prog_bar=True, batch_size=x.shape[0])
         if isinstance(self.train_metrics, MetricCollection):
-            # The per-BATCH values, SCALARS only — `log_dict` cannot carry the rest (see
-            # `_report_epoch_metrics`), and a per-step confusion matrix says nothing anyway.
-            self.log_dict(scalar_metrics(self.train_metrics(preds, y)), on_step=True, on_epoch=False)
+            # UPDATE only — the reduction happens once in `on_train_epoch_end`, exactly as it
+            # does for the eval splits. This used to log the per-BATCH values with
+            # `on_step=True`, which was wrong in two ways that only show up in a comparison:
+            #
+            #  * Lightning's `log_every_n_steps` (50 by default) DROPS a per-step series
+            #    shorter than the interval, so a run of 32 steps recorded no training metric at
+            #    all — measured: a 1-epoch sweep run wrote `train/loss` and nothing else.
+            #  * What survived was ONE BATCH's value, not the epoch's. A 3-epoch run reported
+            #    `train/accuracy = 1.0000` for this backend beside the bare-torch loop's
+            #    epoch-aggregated 0.9904 on the SAME config — the two columns of a
+            #    cross-framework table were not measuring the same thing.
+            self.train_metrics.update(preds, y)
         return loss
 
-    def on_train_epoch_end(self) -> None:
+    def on_train_epoch_start(self) -> None:
+        # Reset at epoch START, matching the eval splits: the LAST epoch's state has to survive
+        # the run, because `_write_metrics_sidecar` and the `computed_metrics` @output both
+        # `compute()` after `trainer.fit()` has already returned.
         if isinstance(self.train_metrics, MetricCollection):
             self.train_metrics.reset()
+
+    def on_train_epoch_end(self) -> None:
+        self._report_epoch_metrics(self.train_metrics)
 
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
         self._resolve_task_defaults()  # no-op once resolved; keeps a directly-called step working
@@ -461,7 +493,8 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
         ``logger:`` slot — one wiring, one place a run's output goes.
         """
         trackers = self._live_trackers()
-        adapters = [TrackerLogger(t) for t in trackers]
+        names = as_metric_names(self.metric_names)
+        adapters = [TrackerLogger(t, metric_names=names) for t in trackers]
         # A runtime kwarg wins over the stored one, so an explicitly wired `lightning:` block
         # keeps every knob it set and only gains the loggers.
         trainer = cast(L.Trainer, flow(self.lightning, logger=adapters or False))
@@ -627,7 +660,11 @@ class LightningClassifier(TorchRunner, ProgressReporting, L.LightningModule):
                 }
                 if self.multilabel
                 else {
-                    "accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1),
+                    # `accuracy`, not `accuracy_top1`: every other backend's accuracy metric is
+                    # named by its own engine (`fn.__name__`, a keras metric's `name=`) and none
+                    # of them can say `_top1`, so a sweep across engines would report one
+                    # quantity in two columns. `top_k=1` is in the template, where it belongs.
+                    "accuracy": LazyClass[Metric](MulticlassAccuracy, top_k=1),
                     "f1_macro": LazyClass[Metric](MulticlassF1Score, average="macro"),
                 }
             )

@@ -169,6 +169,41 @@ def test_every_backend_forwards_metrics_to_trackers(stem: str) -> None:
     )
 
 
+@pytest.mark.parametrize("stem", BACKENDS)
+def test_every_backend_takes_the_metric_naming_knob(stem: str) -> None:
+    """One `metric_names:` key must reach ALL EIGHT, or a sweep's columns stop lining up.
+
+    The failure it prevents was measured across a real eight-backend sweep: each engine names
+    the same quantity its own way (`val_loss` under Keras, `valid_loss` under fastai,
+    `eval_loss` under a `transformers.Trainer`, `val/loss` under torch), and nothing renamed
+    them on the way out — every tracker writes the key it is handed. One backend left out of
+    this puts its curves in columns of their own.
+
+    Read from the ANNOTATION for the reason the rest of this file reads source: no venv has
+    every engine, so an import-based sweep would skip exactly where a copy-pasted omission lands.
+    """
+    for node in ast.walk(ast.parse(module_source(stem))):
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__":
+            annotations = {arg.arg: ast.unparse(arg.annotation) for arg in node.args.args if arg.annotation is not None}
+            assert "metric_names" in annotations, f"{stem} cannot be told how to name what it records"
+            assert "Lazy[MetricNames]" in annotations["metric_names"], (
+                f"{stem}: the slot must be `Optional[Lazy[MetricNames]]` — wired from YAML it "
+                f"arrives as a deferred marker (got {annotations['metric_names']})"
+            )
+
+
+@pytest.mark.parametrize("stem", BACKENDS)
+def test_every_backend_applies_the_naming_it_was_given(stem: str) -> None:
+    """Declaring the slot is half of it — the metrics it reports have to go THROUGH it."""
+    source = module_source(stem)
+    names = called_names(source)
+
+    assert "as_metric_names" in names, (
+        f"{stem} declares `metric_names` but never applies it: call "
+        "`as_metric_names(self.metric_names)` where metrics reach a tracker or the sidecar."
+    )
+
+
 CALLBACK_BACKENDS = [
     "keras_classifier",
     "tensorflow_classifier",

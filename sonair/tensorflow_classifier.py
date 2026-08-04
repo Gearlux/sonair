@@ -60,6 +60,7 @@ import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
 from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -160,6 +161,12 @@ class TensorFlowClassifier(ProgressReporting):
         train_metrics / val_metrics / test_metrics: That split's OWN metrics, merged over
             ``metrics`` — how a metric is added to one split only. This backend narrows properly:
             each traced step closes over its own split's metric objects.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. This loop follows Keras' spelling
+            (``loss`` / ``val_loss``); the default translates that to the canonical
+            ``train/loss`` / ``val/loss`` on the way to the trackers and the sidecar. What the
+            ``CallbackList`` receives is untouched, since a wired ``EarlyStopping`` monitors
+            Keras' name.
         export_dir: Write a ``tf.saved_model`` directory here after a successful ``fit``.
             ``None`` (the default) exports nothing.
         jit_compile: Trace the train/eval steps with XLA. A real speedup on fixed shapes and a
@@ -190,6 +197,7 @@ class TensorFlowClassifier(ProgressReporting):
         train_metrics: Optional[Sequence[KerasMetric]] = None,
         val_metrics: Optional[Sequence[KerasMetric]] = None,
         test_metrics: Optional[Sequence[KerasMetric]] = None,
+        metric_names: Optional[Lazy[MetricNames]] = None,
         export_dir: Optional[str] = None,
         jit_compile: bool = False,
         prefetch: bool = True,
@@ -236,6 +244,9 @@ class TensorFlowClassifier(ProgressReporting):
         # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
         # and flows it at run time.
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self.export_dir = export_dir
         self.jit_compile = jit_compile
         self.prefetch = prefetch
@@ -378,10 +389,13 @@ class TensorFlowClassifier(ProgressReporting):
                 else keras.losses.SparseCategoricalCrossentropy(from_logits=True)
             )
         if self.metrics is None:
+            # `name="accuracy"` for the reason the Keras backend states: the class's own default
+            # name (`sparse_categorical_accuracy`) is a spelling no other engine can produce, so
+            # the same measurement would occupy its own column in a cross-engine comparison.
             self.metrics = (
-                [keras.metrics.BinaryAccuracy(threshold=0.0)]
+                [keras.metrics.BinaryAccuracy(threshold=0.0, name="accuracy")]
                 if self.multilabel
-                else [keras.metrics.SparseCategoricalAccuracy()]
+                else [keras.metrics.SparseCategoricalAccuracy(name="accuracy")]
             )
 
     def _compile(self) -> None:
@@ -556,7 +570,9 @@ class TensorFlowClassifier(ProgressReporting):
             # `runnable=self` rather than a params dict: matrainer derives the hyperparameters
             # from the flowed object graph AND dumps the resolved config, so no backend
             # transcribes its own configuration into a second, diverging answer.
-            callbacks.append(keras_tracking_callback(trackers, runnable=self))
+            callbacks.append(
+                keras_tracking_callback(trackers, runnable=self, metric_names=as_metric_names(self.metric_names))
+            )
         return callbacks
 
     # ---- the four entry points ---------------------------------------------- #
@@ -603,8 +619,13 @@ class TensorFlowClassifier(ProgressReporting):
             logger.info(f"epoch {epoch + 1}/{self.max_epochs}: " + ", ".join(f"{k}={v:.4f}" for k, v in logs.items()))
         callbacks.on_train_end(logs)
 
+        # The HISTORY keeps this loop's Keras-shaped names — it is what the `CallbackList` was
+        # driven with. What LEAVES the run (sidecar, `computed_metrics`) is translated, so it
+        # can be read beside another engine's.
         self._history = {k: list(v) for k, v in history.items()}
-        self._computed_metrics = {k: v[-1] for k, v in history.items()}
+        self._computed_metrics = as_metric_names(self.metric_names)(
+            {k: v[-1] for k, v in history.items()}, source="keras"
+        )
         logger.info("Training complete.")
         # Both write LOCAL files and touch no tracker, so they are safe after the run has ended.
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
@@ -620,7 +641,11 @@ class TensorFlowClassifier(ProgressReporting):
         if self.test_set is None:
             raise ValueError("TensorFlowClassifier.test() requires a 'test_set'.")
         dataset, _ = self._dataset(self.test_set)
-        self._computed_metrics = self._run_epoch(dataset, self._eval_step_fn("test"), split="test")
+        # `split="test"`: `_run_epoch` returns UNPREFIXED keys whichever split it walked, so the
+        # caller states which one this was.
+        self._computed_metrics = as_metric_names(self.metric_names)(
+            self._run_epoch(dataset, self._eval_step_fn("test"), split="test"), source="keras", split="test"
+        )
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 
@@ -810,7 +835,14 @@ def _as_metric(value: Any, multilabel: bool) -> Any:
     if isinstance(built, keras.metrics.Metric):
         return built
     if isinstance(built, str) and built in ("accuracy", "acc"):
-        return keras.metrics.BinaryAccuracy(threshold=0.0) if multilabel else keras.metrics.SparseCategoricalAccuracy()
+        # Named after what the caller WROTE, not after the class picked for them — the same
+        # choice `_resolve_task_defaults` makes, so a config writing the alias and one leaving
+        # the slot unset record the metric under one name.
+        return (
+            keras.metrics.BinaryAccuracy(threshold=0.0, name="accuracy")
+            if multilabel
+            else keras.metrics.SparseCategoricalAccuracy(name="accuracy")
+        )
     resolved = keras.metrics.get(built)
     if isinstance(resolved, keras.metrics.Metric):
         return resolved

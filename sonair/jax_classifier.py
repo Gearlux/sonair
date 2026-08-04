@@ -48,6 +48,8 @@ from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from flax import nnx
 from loggair import get_logger
 from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.metric_functions import accumulate_confusion, macro_f1, zero_confusion
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -105,9 +107,18 @@ def _accuracy_multi(logits: Any, labels: Any) -> Any:
     return jnp.mean((logits > 0.0).astype(labels.dtype) == labels)
 
 
-#: Metric names this backend resolves. Plain functions, so there is nothing for confluid to
-#: tag — see the module docstring.
+#: Metric names this backend resolves PER BATCH. Plain functions, so there is nothing for
+#: confluid to tag — see the module docstring.
 _METRICS: Dict[str, Callable[..., Any]] = {"accuracy": _accuracy, "accuracy_multi": _accuracy_multi}
+
+#: Metric names this backend resolves from the split's CONFUSION MATRIX rather than per batch,
+#: because averaging them over batches gives a different — and systematically worse — number
+#: than computing them once (``matrainer.metric_functions`` quantifies it: three to five points
+#: of macro-F1 on 10 classes at batch 32). A name in here is accumulated across the whole pass
+#: and reduced at the end; a name in ``_METRICS`` is scored per batch and averaged. Single-label
+#: only: a confusion matrix has no meaning for a multi-hot target, and ``_split_confusion``
+#: refuses one rather than reporting a number nobody can interpret.
+_CONFUSION_METRICS: Dict[str, Callable[[Any], float]] = {"f1_macro": macro_f1}
 
 
 @configurable(task="classification", role="trainer", framework="jax")
@@ -138,10 +149,16 @@ class JaxClassifier(ProgressReporting):
             callable returning a ``GradientTransformation``.
         loss: An ``optax`` loss name or callable over ``(logits, labels)``. ``None`` picks by
             target shape, like every other backend's sentinel.
-        metrics: Metric names (``"accuracy"``, ``"accuracy_multi"``) or callables. ``None``
-            picks by target shape.
-        val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is
-            no ``train_metrics``: the training pass computes the loss and nothing else.
+        metrics: Metric names (``"accuracy"``, ``"accuracy_multi"``, ``"f1_macro"``) or
+            callables. ``None`` picks by target shape.
+        train_metrics / val_metrics / test_metrics: That split's OWN metrics, merged over
+            ``metrics``. The training pass scores its metrics from the logits the gradient step
+            already computed, so ``train_metrics`` costs one extra reduction per batch and no
+            second forward pass.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. This loop already writes the canonical
+            ``<split>/<name>``, so the default translates nothing; wiring ``target:`` is what
+            makes it record in another engine's spelling.
         jit: Trace the step functions with ``nnx.jit``. On by default — that IS the JAX story.
             Turn it off to read a Python traceback from inside a step.
     """
@@ -167,8 +184,10 @@ class JaxClassifier(ProgressReporting):
         optimizer: JaxOptimizer = "adam",
         loss: Optional[JaxLoss] = None,
         metrics: Optional[Sequence[JaxMetric]] = None,
+        train_metrics: Optional[Sequence[JaxMetric]] = None,
         val_metrics: Optional[Sequence[JaxMetric]] = None,
         test_metrics: Optional[Sequence[JaxMetric]] = None,
+        metric_names: Optional[Lazy[MetricNames]] = None,
         jit: bool = True,
     ) -> None:
         super().__init__()
@@ -201,10 +220,12 @@ class JaxClassifier(ProgressReporting):
         # from a user's explicit choice.
         self.loss: Optional[JaxLoss] = loss
         self.metrics: Optional[Sequence[JaxMetric]] = metrics
-        # Per-split ADDITIONS, merged over `metrics` by the shared rule. There is no
-        # `train_metrics` here and that is a property of this loop, not an omission: the
-        # training pass computes the LOSS and nothing else, so a train-only metric would
-        # have nowhere to be computed.
+        # Per-split ADDITIONS, merged over `metrics` by the shared rule. `train_metrics` is
+        # served here — the loop is ours, so it can score the training pass from the logits
+        # `train_step` already produced; what it must NOT do is a second forward pass, which
+        # is why the step returns them as an aux output rather than being run again in eval
+        # mode (that would also measure a different network — dropout and batch norm differ).
+        self.train_metrics: Optional[Sequence[JaxMetric]] = train_metrics
         self.val_metrics: Optional[Sequence[JaxMetric]] = val_metrics
         self.test_metrics: Optional[Sequence[JaxMetric]] = test_metrics
         self.jit = jit
@@ -215,6 +236,9 @@ class JaxClassifier(ProgressReporting):
         # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
         # and flows it at run time.
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self._class_names: Optional[List[str]] = None
         self._computed_metrics: Dict[str, float] = {}
         self._optimizer_state: Optional[Any] = None
@@ -362,11 +386,16 @@ class JaxClassifier(ProgressReporting):
 
         def train_step(model: Any, optimizer: Any, x: Any, y: Any) -> Any:
             def forward(m: Any) -> Any:
-                return loss_fn(m(x, training=True), y)
+                # `has_aux`: the logits come back BESIDE the loss so the training metrics are
+                # scored from the very tensor the gradient was taken through. Re-running the
+                # model to get them would cost a second forward pass AND measure a different
+                # network, since `training=True` leaves dropout and batch norm in train mode.
+                logits = m(x, training=True)
+                return loss_fn(logits, y), logits
 
-            loss, grads = nnx.value_and_grad(forward)(model)
+            (loss, logits), grads = nnx.value_and_grad(forward, has_aux=True)(model)
             optimizer.update(model, grads)
-            return loss
+            return loss, logits
 
         def eval_step(model: Any, x: Any, y: Any) -> Any:
             logits = model(x, training=False)
@@ -377,14 +406,49 @@ class JaxClassifier(ProgressReporting):
         return train_step, eval_step
 
     def _split_metrics(self, split: str) -> Sequence[JaxMetric]:
-        """The metric list for one eval split — its own slot merged over the shared ``metrics``.
+        """The metric list for one split — its own slot merged over the shared ``metrics``.
 
         The combination rule is the workspace-wide one
         (:func:`~matrainer.metric_slots.merge_metric_specs`), so a config moving between backends
-        keeps its shape. Only ``val`` and ``test`` have a slot: this loop computes metrics on the
-        eval pass only, so a train-only metric would have nowhere to go.
+        keeps its shape. All three splits have a slot: this loop is ours, so the training pass
+        can score the logits its gradient step already produced.
         """
         return merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or []
+
+    def _partition_metrics(self, split: str) -> Any:
+        """One split's metrics, split into the per-batch ones and the confusion-matrix ones.
+
+        Partitioned by NAME before resolution, which is why only a named metric can be
+        confusion-based: a user-supplied callable is scored per batch, since nothing here can
+        know what it would want accumulated.
+        """
+        batchwise: List[JaxMetric] = []
+        confusion: Dict[str, Callable[[Any], float]] = {}
+        for metric in self._split_metrics(split):
+            name = flow(metric)
+            if isinstance(name, str) and name in _CONFUSION_METRICS:
+                confusion[name] = _CONFUSION_METRICS[name]
+            else:
+                batchwise.append(metric)
+        return batchwise, confusion
+
+    def _split_confusion(self, confusion: Dict[str, Callable[[Any], float]]) -> Optional[np.ndarray]:
+        """A zeroed accumulator when this split wants one, else ``None``.
+
+        Multi-label runs get ``None`` even when a confusion metric was wired: a row with two
+        true labels has no single cell to land in. The metric is DROPPED rather than
+        approximated — a number under a name that means something else is worse than a gap.
+        """
+        if not confusion or self.multilabel:
+            if confusion and self.multilabel:
+                logger.warning(
+                    f"JaxClassifier: {', '.join(sorted(confusion))} needs single-label targets and this run is "
+                    f"multi-label — the metric is not reported. Use `accuracy_multi` for a multi-hot target."
+                )
+            return None
+        if not self.num_classes:
+            raise RuntimeError("JaxClassifier: a confusion-matrix metric needs num_classes.")
+        return zero_confusion(self.num_classes)
 
     def _metric_values(self, logits: Any, labels: Any, metrics: Sequence[JaxMetric]) -> Dict[str, float]:
         out: Dict[str, float] = {}
@@ -395,7 +459,8 @@ class JaxClassifier(ProgressReporting):
 
     def _run_epoch(self, sequence: RecordSequence, step: Any, model: Any, split: str = "val") -> Dict[str, float]:
         """One pass over ``sequence`` in EVAL mode, returning ``{"loss": …, **metrics}``."""
-        metrics = self._split_metrics(split)
+        batchwise, confusion = self._partition_metrics(split)
+        matrix = self._split_confusion(confusion)
         total, batches = 0.0, 0
         sums: Dict[str, float] = {}
         for index in range(len(sequence)):
@@ -403,11 +468,14 @@ class JaxClassifier(ProgressReporting):
             loss, logits = step(model, jnp.asarray(x), jnp.asarray(y))
             total += float(loss)
             batches += 1
-            for key, value in self._metric_values(logits, jnp.asarray(y), metrics).items():
+            for key, value in self._metric_values(logits, jnp.asarray(y), batchwise).items():
                 sums[key] = sums.get(key, 0.0) + value
+            if matrix is not None:
+                accumulate_confusion(matrix, np.asarray(logits), np.asarray(y))
         if not batches:
             return {"loss": float("nan")}
-        return {"loss": total / batches, **{k: v / batches for k, v in sums.items()}}
+        reduced = {} if matrix is None else {name: fn(matrix) for name, fn in confusion.items()}
+        return {"loss": total / batches, **{k: v / batches for k, v in sums.items()}, **reduced}
 
     # ---- the four entry points ---------------------------------------------- #
     @entrypoint("fit", role="trainer", primary=True)
@@ -419,6 +487,7 @@ class JaxClassifier(ProgressReporting):
         # hyperparameters and the resolved config come from matrainer's ONE derivation
         # rather than a dict this backend transcribes for itself.
         trackers = self._live_trackers()
+        names = as_metric_names(self.metric_names)
         manifest = log_run_context(trackers, runnable=self)
         model = self.model
         optimizer = nnx.Optimizer(model, _as_optimizer(self.optimizer, self.learning_rate), wrt=nnx.Param)
@@ -426,16 +495,38 @@ class JaxClassifier(ProgressReporting):
         train_seq = self._sequence(self.train_set, shuffle=True)
         val_seq = self._sequence(self.val_set) if self.val_set is not None else None
 
+        # Resolved ONCE, outside the epoch loop: the partition depends only on the config, and
+        # the accumulator has to be zeroed per epoch rather than per batch.
+        train_batchwise, train_confusion = self._partition_metrics("train")
+
         logs: Dict[str, float] = {}
         for epoch in range(self.max_epochs):
             total, batches = 0.0, 0
+            sums: Dict[str, float] = {}
+            matrix = self._split_confusion(train_confusion)
             for index in range(len(train_seq)):
                 x, y = train_seq[index]
-                total += float(train_step(model, optimizer, jnp.asarray(x), jnp.asarray(y)))
+                loss, logits = train_step(model, optimizer, jnp.asarray(x), jnp.asarray(y))
+                total += float(loss)
                 batches += 1
-            logs = {"loss": total / batches if batches else float("nan")}
+                # The training metrics measure the network AS IT TRAINED — these logits come
+                # from the `training=True` forward the gradient was taken through, so a
+                # dropout/batch-norm gap against the validation numbers is expected rather
+                # than a defect (see the bare-torch backend's BatchNorm note in AGENTS.md).
+                for key, value in self._metric_values(logits, jnp.asarray(y), train_batchwise).items():
+                    sums[key] = sums.get(key, 0.0) + value
+                if matrix is not None:
+                    accumulate_confusion(matrix, np.asarray(logits), np.asarray(y))
+            # Named `<split>/<name>` here rather than translated later: this loop is ours, so
+            # there is no engine convention to preserve — and the dict goes to the `callbacks`
+            # below as well, which would otherwise see different names from the trackers.
+            logs = {"train/loss": total / batches if batches else float("nan")}
+            if batches:
+                logs.update({f"train/{k}": v / batches for k, v in sums.items()})
+                if matrix is not None:
+                    logs.update({f"train/{name}": fn(matrix) for name, fn in train_confusion.items()})
             if val_seq is not None:
-                logs.update({f"val_{k}": v for k, v in self._run_epoch(val_seq, eval_step, model).items()})
+                logs.update({f"val/{k}": v for k, v in self._run_epoch(val_seq, eval_step, model).items()})
             # A `fit()` would have done this for us; a hand-written loop has to. Forgetting it
             # is INVISIBLE — training just runs on one fixed row order forever.
             train_seq.on_epoch_end()
@@ -444,10 +535,10 @@ class JaxClassifier(ProgressReporting):
             # Trackers are the other per-epoch consumer. A `fit()` forwards its logs to every
             # attached logger; a hand-written loop reaches them the same way it reaches callbacks.
             for tracker in trackers:
-                tracker.log_metrics(logs, step=epoch)
+                tracker.log_metrics(names(logs), step=epoch)
             logger.info(f"epoch {epoch + 1}/{self.max_epochs}: " + ", ".join(f"{k}={v:.4f}" for k, v in logs.items()))
 
-        self._computed_metrics = logs
+        self._computed_metrics = names(logs)
         self._optimizer_state = optimizer
         logger.info("Training complete.")
         save_class_names(self._class_names, self._artifact_dir(), trackers)
@@ -466,7 +557,8 @@ class JaxClassifier(ProgressReporting):
         if self.test_set is None:
             raise ValueError("JaxClassifier.test() requires a 'test_set'.")
         _, eval_step = self._make_steps()
-        self._computed_metrics = self._run_epoch(self._sequence(self.test_set), eval_step, self.model, "test")
+        scored = self._run_epoch(self._sequence(self.test_set), eval_step, self.model, "test")
+        self._computed_metrics = as_metric_names(self.metric_names)({f"test/{k}": v for k, v in scored.items()})
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 
@@ -580,13 +672,19 @@ def _as_loss(value: Optional[JaxLoss]) -> Callable[..., Any]:
 
 
 def _as_metric(value: JaxMetric) -> Callable[..., Any]:
-    """A metric from a callable or its NAME (``"accuracy"`` / ``"accuracy_multi"``)."""
+    """A PER-BATCH metric from a callable or its NAME (``"accuracy"`` / ``"accuracy_multi"``).
+
+    A confusion-matrix name (``"f1_macro"``) never reaches here — ``_partition_metrics`` takes
+    those out first — but it is listed in the error, because "unknown metric" for a name the
+    backend does support would send the reader looking in the wrong place.
+    """
     built = flow(value)
     if callable(built):
         return cast(Callable[..., Any], built)
     metric = _METRICS.get(str(built))
     if metric is None:
-        raise ValueError(f"Unknown metric {built!r}. Known names: {', '.join(sorted(_METRICS))}.")
+        known = sorted({*_METRICS, *_CONFUSION_METRICS})
+        raise ValueError(f"Unknown metric {built!r}. Known names: {', '.join(known)}.")
     return metric
 
 

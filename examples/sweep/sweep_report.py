@@ -8,7 +8,8 @@ queries against a tracking backend rather than process orchestration:
   N is one past the highest already recorded. Derived from the tracker rather than a local
   counter file so that a wiped tracker restarts at 1 and a second checkout does not collide.
 * ``report`` — one row per run: what it was called, whether it finished, how long it took, and
-  every metric it recorded.
+  what it scored. Bookkeeping columns are folded away by default and ``--all`` shows them; see
+  :data:`BOOKKEEPING`.
 
 Only the backends that can actually be READ from here are implemented. A tracker is a write
 surface first; some have no local query path at all (an offline ClearML task is a directory
@@ -19,6 +20,7 @@ Usage::
 
     python examples/sweep/sweep_report.py next-experiment mlflow Sun_Aug_2_2026
     python examples/sweep/sweep_report.py report mlflow Sun_Aug_2_2026_1
+    python examples/sweep/sweep_report.py report mlflow Sun_Aug_2_2026_1 --all
 """
 
 from __future__ import annotations
@@ -38,6 +40,61 @@ MLFLOW_URI = "http://127.0.0.1:5005"
 
 #: Trackers this module can read back. The rest are write-only from here — see the docstring.
 QUERYABLE = ("mlflow", "csv")
+
+#: Base names that are a run's BOOKKEEPING rather than its result. `transformers.Trainer` records
+#: its timings, throughput and FLOP count in the same `log_history` as the loss, and Lightning and
+#: HF both log `epoch` — all worth keeping in the tracker, all noise in a table whose job is to
+#: compare thirteen runs on the same three numbers. Hidden here, never dropped: `--all` shows them
+#: and the footer always says how many were folded away.
+#:
+#: A curated list is the right shape HERE and the wrong shape one layer down: the display decides
+#: what a reader wants first, while the name translation must not decide that a recorded value is
+#: uninteresting. Add a name when a backend starts reporting another one.
+BOOKKEEPING = (
+    "epoch",
+    "step",
+    "runtime",
+    "samples_per_second",
+    "steps_per_second",
+    "total_flos",
+    "grad_norm",
+    "learning_rate",
+)
+
+
+#: Lightning's suffix for a series it logs per BATCH beside the same quantity per epoch. It
+#: appends `_step` / `_epoch` only when ONE name carries both, which is why the classifier logs
+#: `train/loss` and `train/loss_step` as two explicit names — `train/loss_epoch` would be a name
+#: no other backend writes, in the column a sweep compares (`docs/architecture.md` record 11).
+WITHIN_EPOCH_SUFFIX = "_step"
+
+
+def is_bookkeeping(key: str) -> bool:
+    """True for a metric key whose BASE name is bookkeeping — `train/runtime`, `epoch`, …"""
+    return key.rpartition("/")[2] in BOOKKEEPING
+
+
+def is_within_epoch_series(key: str) -> bool:
+    """True for a per-BATCH series of a quantity the table already shows per epoch.
+
+    `train/loss_step` is a real result, not bookkeeping — which is why it gets its own rule
+    rather than a line in `BOOKKEEPING`, whose footer would then call a metric something it is
+    not. It is folded for a different reason: it measures the same quantity as `train/loss` on a
+    finer axis a one-row-per-run table cannot show, and only the backend whose engine emits the
+    suffix fills it, so it is the one column thirteen runs leave twelve-thirteenths blank.
+    """
+    base = key.rpartition("/")[2]
+    return base.endswith(WITHIN_EPOCH_SUFFIX) and base != WITHIN_EPOCH_SUFFIX
+
+
+def is_folded(key: str) -> bool:
+    """True for a column the comparison table hides by default — either reason above.
+
+    ONE predicate at the call site, so a third reason is a third function here and no change
+    there. Hidden is never dropped: `--all` shows everything and the footer always says what
+    went and how to get it back.
+    """
+    return is_bookkeeping(key) or is_within_epoch_series(key)
 
 
 # ---------------------------------------------------------------------------
@@ -135,17 +192,32 @@ def _collect_csv(experiment: str) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
-def render(rows: Sequence[Dict[str, Any]], experiment: str, tracker: str, note: Optional[str]) -> str:
+def render(
+    rows: Sequence[Dict[str, Any]],
+    experiment: str,
+    tracker: str,
+    note: Optional[str],
+    show_all: bool = False,
+) -> str:
     if note:
         return f"{note}\n"
     if not rows:
         return f"no runs recorded under {tracker} experiment '{experiment}'\n"
 
-    # Every metric any run reported, with the comparable ones first: the backends genuinely
-    # disagree on naming (`val/accuracy_top1` under torch, `val_accuracy` under Keras), so the
-    # report shows the union rather than a hand-picked list that would be blank for half of them.
+    # Every metric any run reported, VALIDATION first — that is the column a reader compares
+    # backends on, and `val/accuracy` / `val/f1_macro` / `val/loss` now mean the same thing in
+    # every row (each backend translates out of its engine's own spelling; see
+    # `all_backends.yaml`). Still the UNION rather than a hand-picked list, and that is a
+    # property of the REPORT rather than of the config it happens to be pointed at: a metric one
+    # backend computes and the others do not earns its own column with the rest of the rows
+    # blank, which is the honest rendering — the alternative is a table that silently drops
+    # whatever does not fit its widest complete row. The sweep config keeps to metrics every
+    # engine can produce, so today nothing is ragged; point this at your own experiment and it
+    # will be.
     keys = sorted({k for row in rows for k in row["metrics"]})
-    keys = [k for k in keys if "acc" in k.lower()] + [k for k in keys if "acc" not in k.lower()]
+    hidden = [] if show_all else [k for k in keys if is_folded(k)]
+    keys = [k for k in keys if k not in hidden]
+    keys = [k for k in keys if k.startswith("val/")] + [k for k in keys if not k.startswith("val/")]
 
     header = ["run", "status", "sec", *keys]
     table = [
@@ -157,7 +229,25 @@ def render(rows: Sequence[Dict[str, Any]], experiment: str, tracker: str, note: 
         ]
         for row in rows
     ]
-    return _tabulate(header, table) + f"\n{len(rows)} runs in {tracker} experiment '{experiment}'\n"
+    # What was folded away is SAID, never silently dropped — a reader who wants the timings has
+    # to be able to see that they are there and how to get them.
+    footer = f"\n{len(rows)} runs in {tracker} experiment '{experiment}'\n"
+    if hidden:
+        # The REASON is named, not just the count: "bookkeeping" alone would mislabel
+        # `train/loss_step`, which is a genuine result folded for a different reason.
+        reasons = ", ".join(
+            reason
+            for reason, holds in (
+                ("bookkeeping", any(is_bookkeeping(k) for k in hidden)),
+                ("within-epoch series", any(is_within_epoch_series(k) for k in hidden)),
+            )
+            if holds
+        )
+        footer += (
+            f"{len(hidden)} columns hidden — {reasons} ({', '.join(hidden)}) — see them with:\n"
+            f"  python examples/sweep/sweep_report.py report {tracker} {experiment} --all\n"
+        )
+    return _tabulate(header, table) + footer
 
 
 def _fmt(value: Optional[float]) -> str:
@@ -185,7 +275,7 @@ def main(argv: Sequence[str]) -> int:
         return 0
     if command == "report":
         rows, note = collect(tracker, argv[2])
-        print(render(rows, argv[2], tracker, note))
+        print(render(rows, argv[2], tracker, note, show_all="--all" in argv[3:]))
         return 0
     if command == "json":  # for a caller that wants the rows rather than the table
         rows, _ = collect(tracker, argv[2])

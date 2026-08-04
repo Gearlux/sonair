@@ -286,19 +286,80 @@ choice: Keras 3 binds its compute engine at import, so `keras` and `tensorflow` 
 interpreter. A backend that fails does not abort the others; its log is named in the summary.
 
 The experiment is named `<Day>_<Mon>_<D>_<YYYY>_<N>`, N counted from the tracker itself, so a
-wiped tracker restarts at 1. At the end the script prints one row per run — every metric any
-backend recorded, since they genuinely disagree on naming (`val/accuracy_top1` under torch,
-`val_accuracy` under Keras):
+wiped tracker restarts at 1. At the end the script prints one row per run, validation columns
+first — one column per quantity, because every backend records the same three names:
 
 ```
-| run               | status   |   sec |   val/accuracy_top1 |   val_accuracy |   val/loss |
-|-------------------|----------|-------|---------------------|----------------|------------|
-| lightning_zoo     | FINISHED |    74 |              0.9727 |                |     0.1744 |
-| lightning_convnet | FINISHED |    73 |              0.2857 |                |     2.1602 |
+| run               | status   |   sec |   val/accuracy |   val/f1_macro |   val/loss |   train/accuracy |   train/f1_macro |   train/loss |
+|-------------------|----------|-------|----------------|----------------|------------|------------------|------------------|--------------|
+| keras_zoo         | FINISHED |     9 |         0.69   |         0.6612 |     0.9272 |           0.722  |           0.7186 |       0.7906 |
+| lightning_zoo     | FINISHED |    71 |         0.2411 |         0.1498 |     2.3028 |           0.6948 |           0.6959 |       1.1786 |
+```
+
+That agreement is made, not given, and in two separate places. **The names**: each engine spells
+those quantities its own way (`val_loss` under Keras, `valid_loss` under fastai, `eval_loss` under
+a `transformers.Trainer`) and every tracker records the key it is handed, so each backend
+translates out of its engine's vocabulary on the way to the tracker — see
+[Naming what a run records](#naming-what-a-run-records). **The quantities**: the config asks every
+backend for accuracy *and* macro-F1, in whichever vocabulary that engine takes — which for three
+of them needed something the engine does not ship (see
+[Macro-F1 on every backend](#macro-f1-on-every-backend)). The config asks for nothing an engine
+cannot produce, which is the discipline a comparison needs — wire an engine-specific metric when
+you want to look at *that* backend, and the report will give it its own column with the other
+twelve rows blank, because it shows the union rather than a hand-picked list.
+
+The two `train/` columns are blank for `huggingface` alone, and that is deliberate — see the slot
+table under [Per-split metrics](#per-split-metrics).
+
+Two kinds of column are folded away by default, for two different reasons:
+
+- **bookkeeping** — `epoch`, and the timings, throughput and FLOP count a `transformers.Trainer`
+  records in the same log as its loss. Not results.
+- **within-epoch series** — `train/loss_step`, the per-*batch* series Lightning emits beside the
+  same quantity per epoch. That one *is* a result, and it stays in the tracker where its axis
+  means something; a one-row-per-run table cannot show a finer axis, and only the backend whose
+  engine writes the `_step` suffix fills it.
+
+Both stay in the tracker, and neither is dropped silently — the footer names what went, which
+reason, and the command that brings it back:
+
+```bash
+python examples/sweep/sweep_report.py report csv Tue_Aug_4_2026_1 --all
 ```
 
 MLflow and CSV can be read back from here; the others are write surfaces from this machine and
 the report says where to open them instead.
+
+#### Which backends use the GPU
+
+Worth knowing before reading the seconds column, because two of the thirteen runs are on the CPU
+and it is not a configuration you can change. Measured on Apple silicon (macOS, Metal):
+
+| Backend | Device | How it gets there |
+|---|---|---|
+| lightning, torch, fastai, huggingface | **MPS** | torch picks it — `GPU available: True (mps), used: True` |
+| mlx | **GPU** | `Device(gpu, 0)`, unified memory |
+| keras | **MPS** | via its torch engine: `recordstream.keras` defaults `KERAS_BACKEND` to the first backend *installed*, and torch wins on a machine that also has `sonair[lightning]` |
+| tensorflow | **CPU** | `tf.config.list_physical_devices()` reports CPU only |
+| jax | **CPU** | `jax.devices()` reports `[CpuDevice(id=0)]` |
+
+Note what the `keras` row means for the comparison: `--framework keras` and
+`--framework tensorflow` differ by more than the loop — one is Keras-on-torch-on-MPS and the
+other is TensorFlow on the CPU. Pin it with `KERAS_BACKEND=tensorflow` if you want them on the
+same engine (see [Choosing the Keras compute backend](#choosing-the-keras-compute-backend)).
+
+The two CPU rows are not fixable with the current versions, and both Apple plugins were tried:
+
+- **`tensorflow-metal` 1.2.0 breaks `import tensorflow` outright** against TensorFlow 2.21. Its
+  `libmetal_plugin.dylib` needs `@rpath/_pywrap_tensorflow_internal.so`, but TF 2.21 ships that
+  file with install name
+  `bazel-out/darwin_arm64-opt/bin/tensorflow/python/lib__pywrap_tensorflow_12_shared_object.dylib`
+  — the name it links against no longer exists, so **every** TensorFlow run fails at import once
+  the plugin is installed. Do not add it as a dependency.
+- **`jax-metal` 0.1.1** (last released 2024-10) registers — `jax.devices()` reports
+  `[METAL(id=0)]` — and then dies on the first real computation with
+  `UNKNOWN: unknown attribute code: 22 … in bytecode version 6 produced by StableHLO_v1.14.0`.
+  Its StableHLO deserializer predates JAX 0.11's.
 
 ### What a backend swap actually costs
 
@@ -626,15 +687,20 @@ metric to one split does not mean restating the others beside it:
 
 ```yaml
 metrics:                       # every split
-  accuracy_top1: !lazy:torchmetrics.classification.MulticlassAccuracy { top_k: 1 }
+  accuracy: !lazy:torchmetrics.classification.MulticlassAccuracy { top_k: 1 }
   f1_macro: !lazy:torchmetrics.classification.MulticlassF1Score { average: macro }
 
 val_metrics:                   # validation ALSO gets this
   confusion: !lazy:torchmetrics.classification.MulticlassConfusionMatrix
 ```
 
+The KEY is what every tracker records, so prefer the word the other backends can also produce:
+`accuracy`, not `accuracy_top1` — fastai names its metrics from the function's `__name__` and
+Keras from a metric's `name=`, and neither can say `_top1`, so a different word here puts one
+quantity in two columns of the same comparison. `top_k: 1` says which accuracy it is.
+
 A same-named entry shadows, so a split can override one template rather than add to it
-(`val_metrics: {accuracy_top1: !lazy:…MulticlassAccuracy {top_k: 2}}`). Merging needs both to be
+(`val_metrics: {accuracy: !lazy:…MulticlassAccuracy {top_k: 2}}`). Merging needs both to be
 mappings — a ready-made `MetricCollection` in a split slot *replaces*, since there is no key-wise
 way to combine it.
 
@@ -643,14 +709,77 @@ omission:
 
 | Backend | Slots | Why |
 |---|---|---|
-| lightning, torch, tensorflow | `train` · `val` · `test` | the loop is this project's, so each split gets its own metric objects |
-| fastai, huggingface, jax, mlx | `val` · `test` | the engine's metric hook *is* its evaluation hook — a fastai `Learner` validates, a `transformers.Trainer` calls `compute_metrics` on eval, and the JAX / MLX training passes compute the loss and nothing else |
-| keras | all three, **as their union** | `compile()` owns one metric list and reports it on train *and* validation, so a metric asked for on one split appears on the others |
+| lightning, torch, tensorflow, jax, mlx | `train` · `val` · `test`, each separate | the loop is this project's, so each split gets its own metric objects — and the training pass scores the logits its own gradient step already produced, so `train_metrics` costs no second forward pass |
+| keras, fastai | all three, **as their union** | the engine reports ONE list on both passes: `compile()` owns a single metric list, and a fitting `Learner`'s `Recorder` prefixes the same `metrics` `train_`/`valid_`. fastai's `test` path still narrows — it builds its own Learner |
+| huggingface | `val` · `test` | `compute_metrics` is a `transformers.Trainer`'s *evaluation* hook, so training metrics would cost a second forward pass over the whole train split every epoch |
 
-Keras widening rather than dropping is deliberate: a metric computed where it was not asked for
-is noise you can ignore, where a wired metric that silently reports nothing is a bug you cannot
-see. `tests/test_metric_slots.py` pins the table in both directions — a backend must declare the
-slots it serves, and must *not* offer one its engine cannot compute.
+Widening rather than dropping is deliberate: a metric computed where it was not asked for is
+noise you can ignore, where a wired metric that silently reports nothing is a bug you cannot see.
+`tests/test_metric_slots.py` pins the table in both directions — a backend must declare the slots
+it serves, and must *not* offer one its engine cannot compute.
+
+A training metric measures the network **as it trained** — dropout on, batch norm using batch
+statistics — so a gap against the validation number is expected rather than a defect, and is
+largest early in a run. Nothing here re-runs the model in eval mode to close it: that would cost
+a pass and measure a different network.
+
+### Macro-F1 on every backend
+
+Accuracy is the one metric all eight engines ship under a name they can all produce. Macro-F1 is
+not, so the sweep config asks each engine for it in that engine's own vocabulary:
+
+| Backend | What you write | What it is |
+|---|---|---|
+| lightning, torch, fastai *(torch models)* | `f1_macro: !lazy:torchmetrics.classification.MulticlassF1Score { average: macro }` | upstream torchmetrics, keyed `f1_macro` |
+| keras, tensorflow | `- !class:sonair.SparseF1Score` | `keras.metrics.F1Score` for **int-id** targets — see below |
+| fastai | `metrics: [accuracy, f1_macro]` | the alias for `F1Score(average="macro")`, renamed to `f1_macro` |
+| jax, mlx, huggingface | `metrics: [accuracy, f1_macro]` | a named metric these loops accumulate |
+
+Two of those rows are the whole reason this section exists.
+
+**`SparseF1Score`** is the one loss/metric class sonair owns; everything else in
+`keras_classification.py` is an upstream class registered as-is. Keras's `F1Score` compares two
+`[N, C]` tensors, while a single-label run here produces int64 class ids `[N]` — wired as it
+stands it dies on the first batch with the same *"size of tensor a (32) must match tensor b
+(320)"* that `Precision` gives (see [Wiring a Keras loss or metric](#wiring-a-keras-loss-or-metric)).
+The shim one-hots `y_true` and delegates; it computes no F1 of its own. Raw logits are fine — the
+inherited `threshold=None` argmaxes — and the name defaults to `f1_<average>`, so
+`average: micro` cannot be recorded under the macro name:
+
+```yaml
+metrics:
+  - !class:keras.metrics.SparseCategoricalAccuracy { name: accuracy }
+  - !class:sonair.SparseF1Score            # -> "f1_macro"
+  - !class:sonair.SparseF1Score { average: micro }   # -> "f1_micro"
+```
+
+**fastai's `f1_macro` is an alias, not a `fastai.metrics` name.** That module publishes `F1Score`
+as a *factory*, so `metrics: [F1Score]` hands the `Learner` the factory itself — accepted without
+complaint, then reported under fastai's own `f1_score` column with the default
+`average="binary"`, which on a multi-class problem raises inside scikit-learn. `f1_macro` /
+`f1_micro` / `f1_weighted` name the built-and-renamed metric instead.
+
+#### Why a hand-written loop accumulates instead of averaging
+
+The backends that own their training loop — `jax`, `mlx`, and `huggingface` on its eval hook —
+do **not** score macro-F1 per batch and average it. Averaging reads three to five points low,
+always downward, because a class absent from a batch scores 0 for that batch and drags the mean:
+
+| | true macro-F1 | batch-averaged |
+| --- | --- | --- |
+| accuracy ≈ 0.9, 10 classes, batch 32 | 0.9182 | 0.8849 |
+| accuracy ≈ 0.3, 10 classes, batch 32 | 0.3486 | 0.3032 |
+
+In a cross-framework comparison that is a systematic penalty on exactly the backends that own
+their loop. So a metric named in that backend's confusion set is accumulated over the whole split
+into one `C×C` matrix and reduced once (`matrainer.metric_functions`), which is what `torchmetrics`
+does internally — the numbers are comparable because both are the same computation. Everything
+else stays per-batch, and the split is by **name**, so only a named metric can be
+confusion-accumulated: a callable you supply is scored per batch, since nothing can know what it
+would want accumulated.
+
+On a **multi-label** run a confusion metric is dropped with a warning rather than approximated — a
+multi-hot row has no single cell to land in. Use `accuracy_multi` there.
 
 ### Metrics that are not a single number (a confusion matrix)
 
@@ -820,6 +949,35 @@ credentials straight from the environment (`offline: true` records to local disk
 and needs no server and no credentials).
 
 `examples/train_efficientvit_b0_mnist.yaml` carries all four as commented alternatives.
+
+### Naming what a run records
+
+Every tracker records the key it is handed, verbatim — and eight engines call the same three
+quantities eight ways: Keras writes `loss` / `val_loss`, fastai `train_loss` / `valid_loss` plus
+**unprefixed validation** metrics, a `transformers.Trainer` `train_*` / `eval_*`. So each backend
+translates out of its engine's vocabulary on the way to the trackers and the metrics sidecar, and
+every one of them records:
+
+| | |
+|---|---|
+| `train/loss` `val/loss` `test/loss` | the loss on that split |
+| `train/<metric>` `val/<metric>` | whatever the metric slots wired, under the name they gave it |
+| `epoch` | an axis, never prefixed |
+
+Nothing needs to be set for that. The knob is for when you want otherwise —
+`metric_names:` broadcasts into every backend at once:
+
+```yaml
+metric_names: !class:matrainer.MetricNames
+  target: keras                              # record the run in Keras spelling (`val_loss`, …)
+  renames: {top_k_accuracy: accuracy_top5}   # align a metric the translation cannot know about
+```
+
+`target:` takes any engine's name (`matrainer` is the default `<split>/<name>` shape), which also
+means a torch run can be recorded in the spelling an existing dashboard queries. What an engine
+hands its OWN callbacks is untouched either way: a wired
+`keras.callbacks.EarlyStopping(monitor="val_loss")` still finds the name Keras gave it, and the
+Keras `History` object keeps Keras's columns. The vocabularies live in `matrainer.metric_names`.
 
 ### Framework callbacks
 

@@ -65,7 +65,8 @@ from fastai.learner import Learner
 from fastai.losses import BCEWithLogitsLossFlat, CrossEntropyLossFlat
 from loggair import get_logger
 from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
-from matrainer.metric_slots import merge_metric_specs
+from matrainer.metric_names import MetricNames, as_metric_names
+from matrainer.metric_slots import merge_metric_specs, union_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
 from matrainer.tracking.provenance import capture_log_file, log_run_context
@@ -146,11 +147,19 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
             ``"ranger"``, …).
         loss: A fastai / torch loss module. ``None`` picks by target shape, like every other
             backend's sentinel.
-        metrics: fastai metrics — callables, or names resolved against ``fastai.metrics``.
-            ``None`` picks ``accuracy`` / ``accuracy_multi`` by target shape.
-        val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is
-            no ``train_metrics``: a fastai ``Learner`` computes its metrics on the validation
-            pass only.
+        metrics: fastai metrics — callables, names resolved against ``fastai.metrics``, or one
+            of this backend's configured aliases (``f1_macro`` / ``f1_micro`` / ``f1_weighted``,
+            which name a particular ``F1Score(average=…)`` the module exposes only as a
+            factory). ``None`` picks ``accuracy`` / ``accuracy_multi`` by target shape.
+        train_metrics / val_metrics / test_metrics: That split's OWN metrics. ``test_metrics``
+            merges over ``metrics`` and narrows; ``train_metrics`` and ``val_metrics`` are
+            UNIONED, because a fitting ``Learner`` reports one list on both passes — see
+            :meth:`_learner_metrics`.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. The ``Recorder``'s columns are
+            ``train_loss`` / ``valid_loss`` / the metrics; the default translates them to the
+            canonical ``train/loss`` / ``val/loss`` / ``val/<metric>``, an unprefixed column
+            landing under ``val`` because that is the split a ``Learner`` measures.
 
     Post-construction slots (YAML / broadcasting): ``train/val/test_loader`` (the torch
     ``DataLoader``s), ``dataloaders`` (fastai's ``DataLoaders`` around them — its ``path``),
@@ -183,8 +192,10 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         opt_func: FastaiOptimizer = "Adam",
         loss: Optional[Lazy[FastaiLoss]] = None,
         metrics: Optional[Sequence[FastaiMetric]] = None,
+        train_metrics: Optional[Sequence[FastaiMetric]] = None,
         val_metrics: Optional[Sequence[FastaiMetric]] = None,
         test_metrics: Optional[Sequence[FastaiMetric]] = None,
+        metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
         super().__init__()
         # `torch.nn.Module`, not `Lazy[torch.nn.Module]`: the deferred-ness is declared once, on
@@ -257,10 +268,13 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         # from a user's explicit choice.
         self.loss: Optional[FastaiLoss] = cast(Optional[FastaiLoss], loss)
         self.metrics: Optional[Sequence[FastaiMetric]] = metrics
-        # Per-split ADDITIONS, merged over `metrics` by the shared rule. There is no
-        # `train_metrics`, and that is a fastai fact rather than an omission: a `Learner`
-        # computes its metrics on the VALIDATION pass only, so a train-only metric would have
-        # nowhere to be computed.
+        # Per-split ADDITIONS. `train_metrics` IS served — a `Recorder` computes its metrics on
+        # the validation pass by DEFAULT, not by necessity, and `_build_learner` turns the
+        # training accumulation on — but it combines by UNION with `val_metrics` rather than
+        # narrowing, because a `Learner` reports ONE list on both passes (see
+        # `_learner_metrics`). `test_metrics` still narrows: the test path builds its own
+        # Learner.
+        self.train_metrics: Optional[Sequence[FastaiMetric]] = train_metrics
         self.val_metrics: Optional[Sequence[FastaiMetric]] = val_metrics
         self.test_metrics: Optional[Sequence[FastaiMetric]] = test_metrics
         self.multilabel: bool = False
@@ -270,6 +284,9 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
         # and flows it at run time.
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self._class_names: Optional[List[str]] = None
         self._computed_metrics: Dict[str, float] = {}
         self._learner: Optional[Learner] = None
@@ -426,10 +443,11 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
     def _build_learner(self, dataloaders: DataLoaders, split: str = "val") -> Learner:
         """Assemble the ``Learner``: model, loss, metrics, callbacks, artifact path.
 
-        ``split`` picks which metric slot is merged over the shared ``metrics`` — a `Learner`
-        holds ONE list and computes it on the validation pass, so the split is decided by which
-        entry point is building it (``fit`` validates, ``test`` scores the held-out split)
-        rather than by anything inside the Learner.
+        ``split`` picks which metric slot is combined with the shared ``metrics`` — a `Learner`
+        holds ONE list, so the split is decided by which entry point is building it (``fit``
+        validates, ``test`` scores the held-out split) rather than by anything inside the
+        Learner. See :meth:`_learner_metrics` for why the fit path UNIONS two slots where the
+        test path merges one.
 
         Everything passed here is something only the RUN knows — the data, the flowed loss, the
         resolved optimizer function, this split's metrics, the callbacks, the artifact path. The
@@ -445,15 +463,43 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
                 model=self.model,
                 loss_func=flow(self.loss),
                 opt_func=_as_opt_func(self.opt_func),
-                metrics=[
-                    _as_metric(m) for m in (merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or [])
-                ],
+                metrics=[_as_metric(m) for m in self._learner_metrics(split)],
                 cbs=self._callbacks(),
                 path=Path(path) if path else None,
             ),
         )
+        # A `Recorder` computes its metrics on the VALIDATION pass unless told otherwise, and
+        # `train_metrics=True` makes it accumulate the same list over the TRAINING batches as
+        # they go by — no second pass over the data, and the numbers describe the network as it
+        # trained. The columns become `train_loss, train_<m>…, valid_loss, valid_<m>…`, which is
+        # exactly the shape `matrainer.metric_names`' fastai vocabulary already reads (verified
+        # against `Recorder.before_fit`), so nothing downstream changes.
+        #
+        # Set on the FIT path only: `Learner.validate()` runs no training pass, so asking for
+        # train columns there would declare names no row ever fills.
+        if split == "val":
+            learner.recorder.train_metrics = True
         self._learner = learner
         return learner
+
+    def _learner_metrics(self, split: str) -> Sequence[FastaiMetric]:
+        """The ONE metric list this Learner gets — and why the two paths combine differently.
+
+        A `Learner` holds a single ``metrics`` list and, with ``train_metrics`` on, reports it
+        on BOTH passes: `Recorder._train_mets` and `_valid_mets` are the same ``self.metrics``
+        with different prefixes. So during a fit, ``train_metrics:`` and ``val_metrics:`` cannot
+        be narrowed apart and the honest combination is the UNION — the same shape the Keras
+        backend's ``compile()`` forces, and the same trade: a metric computed on a split that
+        did not ask for it is noise a reader skips, where dropping it would be a wired metric
+        that silently reports nothing.
+
+        The TEST path has no such constraint — it builds its own Learner and runs one pass — so
+        it keeps the narrowing merge, and a ``test_metrics:`` entry shadows the shared one by
+        name exactly as it does on the backends that own their loop.
+        """
+        if split == "test":
+            return merge_metric_specs(self.metrics, self.test_metrics) or []
+        return union_metric_specs(self.metrics, self.train_metrics, self.val_metrics) or []
 
     def _callbacks(self) -> List[Any]:
         """The wired fastai callbacks, with any file destination's parent directory created.
@@ -486,8 +532,9 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
             learner.fit_one_cycle(self.max_epochs, lr_max=self.learning_rate)
         else:
             learner.fit(self.max_epochs, lr=self.learning_rate)
-        self._computed_metrics = _recorded_metrics(learner)
-        _log_recorded_epochs(learner, trackers)
+        names = as_metric_names(self.metric_names)
+        self._computed_metrics = _recorded_metrics(learner, names)
+        _log_recorded_epochs(learner, trackers, names)
         logger.info(f"Training complete: {self._computed_metrics}")
         save_class_names(self._class_names, self._artifact_dir(), trackers)
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
@@ -507,7 +554,9 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         loader = flow(self.test_loader, dataset=ensure_record_dataset(self.test_set))
         learner = self._build_learner(DataLoaders(loader, loader), "test")
         values = learner.validate()
-        self._computed_metrics = _named_values(learner, values)
+        # `validate()` fills the VALIDATION columns whichever split it walked, so the row is read
+        # as fastai spells it and lands under `val/` — the same names a fit's last epoch reports.
+        self._computed_metrics = _named_values(learner, values, as_metric_names(self.metric_names))
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 
@@ -609,23 +658,54 @@ class FastaiClassifier(TorchRunner, ProgressReporting):
         return list(self._class_names or [])
 
 
+def _built_metric(average: str) -> Any:
+    """``fastai.metrics.F1Score(average=…)``, renamed to the workspace-canonical column."""
+    metric = fastai_metrics.F1Score(average=average)
+    # `AccumMetric.name` is what the Recorder writes as the COLUMN, and the factory derives it
+    # from the wrapped function: `f1_score` for every averaging mode. Overriding it is what
+    # lines this run's number up with the torch backends' `f1_macro` instead of opening a
+    # second column for the same quantity (the ONE NAME PER QUANTITY mandate).
+    metric.name = f"f1_{average}"
+    return metric
+
+
+#: Names that need CONSTRUCTION rather than a plain ``getattr`` on ``fastai.metrics``, because
+#: the module exposes a FACTORY where the workspace wants one particular configuration of it.
+#: Each entry is a thunk so nothing is built until a config actually asks for it.
+_METRIC_ALIASES: Dict[str, Callable[[], Any]] = {
+    "f1_macro": lambda: _built_metric("macro"),
+    "f1_micro": lambda: _built_metric("micro"),
+    "f1_weighted": lambda: _built_metric("weighted"),
+}
+
+
 def _as_metric(value: FastaiMetric) -> Any:
-    """A fastai metric from a callable or from its NAME in ``fastai.metrics``.
+    """A fastai metric from a callable, from an ALIAS, or from its NAME in ``fastai.metrics``.
 
     The string form is not sugar. ``accuracy``, ``error_rate`` and ``top_k_accuracy`` are plain
     functions and ``F1Score`` / ``RocAuc`` are factories that RETURN one, so none of them is a
     class — there is nothing for a ``!class:`` tag to name or for confluid's registry to tag. A
     name is the only thing a YAML config can write, so this resolves it and says which names
     exist when it cannot.
+
+    The aliases come FIRST, and that ordering is load-bearing: ``fastai.metrics`` has no
+    ``f1_macro`` attribute at all, and a bare ``getattr(fastai_metrics, "F1Score")`` would hand
+    the LEARNER a factory rather than a metric — accepted without complaint and then reported
+    under fastai's own ``f1_score`` column with the default ``average="binary"``, which on a
+    10-class problem raises deep inside scikit-learn. Naming the configured form is the only
+    spelling a config can get right.
     """
     built = flow(value)
     if not isinstance(built, str):
         return built
+    if built in _METRIC_ALIASES:
+        return _METRIC_ALIASES[built]()
     metric = getattr(fastai_metrics, built, None)
     if metric is None:
         raise ValueError(
             f"Unknown fastai metric {built!r}. Names come from `fastai.metrics` — e.g. accuracy, "
-            f"accuracy_multi, error_rate, top_k_accuracy, BalancedAccuracy, MatthewsCorrCoef."
+            f"accuracy_multi, error_rate, top_k_accuracy, BalancedAccuracy, MatthewsCorrCoef — "
+            f"or this backend's configured aliases: {', '.join(sorted(_METRIC_ALIASES))}."
         )
     return metric
 
@@ -655,26 +735,36 @@ def _metric_names(learner: Learner) -> List[str]:
     return [name for name in names if name not in ("epoch", "time")]
 
 
-def _named_values(learner: Learner, values: Sequence[Any]) -> Dict[str, float]:
+def _named_values(learner: Learner, values: Sequence[Any], names: MetricNames) -> Dict[str, float]:
     """Pair a Recorder row with its column names, tolerating a shorter row.
 
     ``Learner.validate`` returns one fewer value than a training epoch does (there is no
-    ``train_loss``), so the names are matched from the END — where ``valid_loss`` and the metrics
-    line up — rather than from the front.
+    ``train_loss``), so the columns are matched from the END — where ``valid_loss`` and the
+    metrics line up — rather than from the front.
+
+    The row is then translated out of fastai's vocabulary (``names``), which is what makes this
+    run's record comparable with another engine's. Two things only a fastai reader knows and the
+    translation encodes: ``valid_loss`` is the validation loss, and an UNPREFIXED column is a
+    VALIDATION metric — where every other engine's bare key is a training one.
+
+    An unprefixed column only appears when ``Recorder.train_metrics`` is off, which is the case
+    for the ``validate()`` path: with it ON (the fit path — see :meth:`_build_learner`) the
+    Recorder prefixes EVERY column ``train_``/``valid_`` and the default never applies. Both
+    shapes go through the same vocabulary, which is why turning it on needed no change here.
     """
-    names = _metric_names(learner)
-    if len(names) > len(values):
-        names = names[len(names) - len(values) :]
-    return {name: float(value) for name, value in zip(names, values)}
+    columns = _metric_names(learner)
+    if len(columns) > len(values):
+        columns = columns[len(columns) - len(values) :]
+    return names({name: float(value) for name, value in zip(columns, values)}, source="fastai")
 
 
-def _recorded_metrics(learner: Learner) -> Dict[str, float]:
+def _recorded_metrics(learner: Learner, names: MetricNames) -> Dict[str, float]:
     """The last epoch's metrics as ``{name: value}``, or ``{}`` if nothing was recorded."""
     values = list(getattr(learner.recorder, "values", []) or [])
-    return _named_values(learner, values[-1]) if values else {}
+    return _named_values(learner, values[-1], names) if values else {}
 
 
-def _log_recorded_epochs(learner: Learner, trackers: Sequence[Tracker]) -> None:
+def _log_recorded_epochs(learner: Learner, trackers: Sequence[Tracker], names: MetricNames) -> None:
     """Forward EVERY recorded epoch to the trackers, not just the final one.
 
     fastai's ``Recorder`` already holds the whole history (``recorder.values`` is one row per
@@ -686,6 +776,6 @@ def _log_recorded_epochs(learner: Learner, trackers: Sequence[Tracker]) -> None:
     if not trackers:
         return
     for epoch, row in enumerate(getattr(learner.recorder, "values", []) or []):
-        metrics = _named_values(learner, row)
+        metrics = _named_values(learner, row, names)
         for tracker in trackers:
             tracker.log_metrics(metrics, step=epoch)

@@ -199,6 +199,13 @@ The `sonair evaluate <cfg>` and `sonair predict <cfg>` verbs bind the same
 held-out split or dump per-record classification JSON — the verb wins over any
 `task:` set in the config, so one config can serve all three.
 
+## Documentation
+
+| Page | Covers |
+| --- | --- |
+| [docs/frameworks.md](docs/frameworks.md) | Every training backend, what each one needs, and how the same config drives all of them |
+| [docs/architecture.md](docs/architecture.md) | Why the framework split is shaped the way it is — decision records |
+
 ## Training backends
 
 Eight engines, one config. `--framework <name>` picks the engine; everything above the

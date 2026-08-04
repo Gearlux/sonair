@@ -44,6 +44,7 @@ import numpy as np
 from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
 from loggair import get_logger
 from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import union_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -126,6 +127,12 @@ class KerasClassifier(ProgressReporting):
         train_metrics / val_metrics / test_metrics: That split's OWN metrics, merged over
             ``metrics``. This engine computes their UNION — ``compile()`` owns one list (see
             ``_compiled_metrics``), so a metric asked for on one split appears on the others.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. Keras writes ``loss`` / ``val_loss``;
+            the default translates that to the canonical ``train/loss`` / ``val/loss`` on the way
+            to the trackers and the sidecar, so this run is comparable with one from any other
+            engine. What Keras hands its OWN callbacks is untouched — ``EarlyStopping`` monitors
+            ``val_loss`` and must keep finding it.
     """
 
     def __init__(
@@ -150,6 +157,7 @@ class KerasClassifier(ProgressReporting):
         train_metrics: Optional[Sequence[KerasMetric]] = None,
         val_metrics: Optional[Sequence[KerasMetric]] = None,
         test_metrics: Optional[Sequence[KerasMetric]] = None,
+        metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
         super().__init__()
         # `keras.Model`, not `Lazy[keras.Model]`: the DEFERRED-ness is declared once, on the ctor
@@ -194,6 +202,9 @@ class KerasClassifier(ProgressReporting):
         # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
         # and flows it at run time.
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self._class_names: Optional[List[str]] = None
         self._history: Dict[str, Any] = {}
         self._computed_metrics: Dict[str, float] = {}
@@ -285,7 +296,20 @@ class KerasClassifier(ProgressReporting):
                 else keras.losses.SparseCategoricalCrossentropy(from_logits=True)
             )
         if self.metrics is None:
-            self.metrics = ["binary_accuracy"] if self.multilabel else ["accuracy"]
+            # The OBJECT rather than the `"accuracy"` string alias, purely to fix the NAME.
+            # `compile()` resolves that alias contextually (by loss and target shape) and names
+            # the result after whatever it picked — `sparse_categorical_accuracy` here — which
+            # is a compile-time artefact nobody wrote and which no other backend can produce.
+            # The class chosen per branch is exactly what the alias resolves to, so what is
+            # COMPUTED is unchanged; `_as_metric` in the TensorFlow backend documents the same
+            # mapping for the loop that has no `compile()` to do it.
+            self.metrics = [
+                (
+                    keras.metrics.BinaryAccuracy(name="accuracy")
+                    if self.multilabel
+                    else keras.metrics.SparseCategoricalAccuracy(name="accuracy")
+                )
+            ]
 
     def _compile(self) -> None:
         """Build the model at the resolved width, then compile it.
@@ -389,7 +413,9 @@ class KerasClassifier(ProgressReporting):
             # `runnable=self` rather than a params dict: matrainer derives the hyperparameters
             # from the flowed object graph AND dumps the resolved config, so no backend
             # transcribes its own configuration into a second, diverging answer.
-            callbacks.append(keras_tracking_callback(trackers, runnable=self))
+            callbacks.append(
+                keras_tracking_callback(trackers, runnable=self, metric_names=as_metric_names(self.metric_names))
+            )
         return callbacks
 
     # ---- the four entry points ---------------------------------------------- #
@@ -413,8 +439,13 @@ class KerasClassifier(ProgressReporting):
         history = self.model.fit(
             train_seq, validation_data=val_seq, epochs=self.max_epochs, callbacks=self._callbacks()
         )
+        # The HISTORY keeps Keras's own names — it is Keras's object, and a `CSVLogger` beside
+        # it writes those same columns. What leaves this run — the sidecar and the
+        # `computed_metrics` output — is translated, so it can be read beside another engine's.
         self._history = {k: [float(x) for x in v] for k, v in history.history.items()}
-        self._computed_metrics = {k: v[-1] for k, v in self._history.items()}
+        self._computed_metrics = as_metric_names(self.metric_names)(
+            {k: v[-1] for k, v in self._history.items()}, source="keras"
+        )
         logger.info("Training complete.")
         # Local file only — no tracker touch, so it is safe after the run has ended.
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
@@ -428,7 +459,11 @@ class KerasClassifier(ProgressReporting):
         if self.test_set is None:
             raise ValueError("KerasClassifier.test() requires a 'test_set'.")
         results = self.model.evaluate(self._sequence(self.test_set), return_dict=True, callbacks=self._callbacks())
-        self._computed_metrics = {k: float(v) for k, v in results.items()}
+        # `split="test"`: `evaluate()` returns UNPREFIXED keys (`loss`, `accuracy`) whichever
+        # split it ran on, so the caller states which one this was — Keras cannot.
+        self._computed_metrics = as_metric_names(self.metric_names)(
+            {k: float(v) for k, v in results.items()}, source="keras", split="test"
+        )
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 

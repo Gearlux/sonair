@@ -24,7 +24,13 @@ from confluid import Fluid, lazy_param_names  # noqa: E402
 from recordstream import Stream  # noqa: E402
 from transformers.modeling_outputs import ImageClassifierOutput  # noqa: E402
 
-from sonair.huggingface_classifier import HuggingFaceClassifier, _accuracy, _accuracy_multi, _as_metric  # noqa: E402
+from sonair.huggingface_classifier import (  # noqa: E402
+    HuggingFaceClassifier,
+    _accuracy,
+    _accuracy_multi,
+    _as_metric,
+    _f1_macro,
+)
 
 
 class _CaptureSink:
@@ -377,6 +383,7 @@ def test_metrics_resolve_by_name_and_reject_an_unknown_one() -> None:
     """Plain functions over numpy — no class for a `!class:` tag to name, the fastai situation."""
     assert _as_metric("accuracy") is _accuracy
     assert _as_metric("accuracy_multi") is _accuracy_multi
+    assert _as_metric("f1_macro") is _f1_macro
     with pytest.raises(ValueError, match="Unknown metric"):
         _as_metric("nope")
 
@@ -538,3 +545,37 @@ def test_it_registers_no_loss_module() -> None:
 
     assert FRAMEWORKS["huggingface"].registrations is None
     assert importlib.util.find_spec("sonair.huggingface_classification") is None
+
+
+def test_f1_macro_agrees_with_the_torch_backends_torchmetrics() -> None:
+    """The comparability claim, checked against the library the torch backends actually use.
+
+    `compute_metrics` is handed the WHOLE split at once, so this backend builds the confusion
+    matrix in one call where JAX and MLX accumulate it across an epoch — same arithmetic,
+    different arrival pattern, which is exactly why it lives in `matrainer.metric_functions`.
+    """
+    torchmetrics = pytest.importorskip("torchmetrics.classification")
+
+    rng = np.random.default_rng(7)
+    labels = rng.integers(0, 5, 240)
+    predicted = np.where(rng.random(240) < 0.6, labels, rng.integers(0, 5, 240))
+    logits = np.eye(5)[predicted] * 4.0 + rng.normal(0, 0.1, (240, 5))
+
+    expected = torchmetrics.MulticlassF1Score(num_classes=5, average="macro")(
+        torch.tensor(logits), torch.tensor(labels)
+    )
+    assert _f1_macro(logits, labels) == pytest.approx(float(expected), abs=1e-6)
+
+
+def test_there_is_no_train_metrics_slot_and_that_is_the_trainers_doing() -> None:
+    """The one remaining gap in the cross-framework table, pinned so it stays deliberate.
+
+    `compute_metrics` is a `transformers.Trainer`'s EVALUATION hook, so a `train_metrics` param
+    could only be honoured with a second forward pass over the whole train split at every epoch
+    end. Offering it and quietly not calling it is the failure the split slots exist to remove;
+    offering it and paying for it is a cost every user of this backend would carry.
+    """
+    import inspect
+
+    assert "train_metrics" not in inspect.signature(HuggingFaceClassifier.__init__).parameters
+    assert {"val_metrics", "test_metrics"} <= set(inspect.signature(HuggingFaceClassifier.__init__).parameters)

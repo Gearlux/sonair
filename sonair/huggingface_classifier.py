@@ -44,6 +44,8 @@ import torch
 from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
 from loggair import get_logger
 from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.metric_functions import accumulate_confusion, macro_f1, zero_confusion
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.tracking.base import Tracker, as_tracker_list
@@ -118,12 +120,28 @@ def _accuracy_multi(logits: np.ndarray, labels: np.ndarray, threshold: float = 0
     return float(((logits > threshold).astype(labels.dtype) == labels).mean())
 
 
+def _f1_macro(logits: np.ndarray, labels: np.ndarray) -> float:
+    """Macro-averaged F1 for single-label targets (int64 ids).
+
+    A plain ``(logits, labels)`` function like its neighbours, and that is a property of WHERE
+    it runs: ``compute_metrics`` is handed the WHOLE split at once, so the confusion matrix is
+    built in one call. The JAX and MLX backends need the same arithmetic split across an epoch
+    of batches, which is why the counting and the reduction live in
+    :mod:`matrainer.metric_functions` rather than being written out here — one implementation,
+    three engines, and a number comparable with the torch backends' torchmetrics one.
+    """
+    matrix = zero_confusion(int(logits.shape[-1]))
+    accumulate_confusion(matrix, logits, labels)
+    return macro_f1(matrix)
+
+
 #: Names the ``metrics`` slot resolves. Kept a small dict rather than a registry because these
 #: are plain FUNCTIONS over numpy — there is no class for confluid to tag, the same situation
 #: the fastai backend's `fastai.metrics` names are in.
 _METRICS: Dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
     "accuracy": _accuracy,
     "accuracy_multi": _accuracy_multi,
+    "f1_macro": _f1_macro,
 }
 
 
@@ -160,10 +178,14 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
             PURPOSE: Trainer auto-enables every tracker it can import, so on a workspace that
             has wandb and mlflow installed an innocent run would start reporting to both.
             Tracking here goes through the `trackers` slot, like every other backend.
-        metrics: Metric names (``"accuracy"``, ``"accuracy_multi"``) or callables over
+        metrics: Metric names (``"accuracy"``, ``"accuracy_multi"``, ``"f1_macro"``) or callables over
             ``(logits, labels)``. ``None`` picks by target shape.
         val_metrics / test_metrics: That split's OWN metrics, merged over ``metrics``. There is
             no ``train_metrics``: ``compute_metrics`` is the Trainer's EVALUATION hook.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. A ``Trainer`` writes ``train_*`` and
+            ``eval_*``; the default translates those to the canonical ``train/*`` and ``val/*``
+            on the way to the trackers and the sidecar.
 
     Post-construction slots (YAML / broadcasting): ``training_arguments`` (every
     ``transformers.TrainingArguments`` knob the ctor does not restate — gradient accumulation,
@@ -197,6 +219,7 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         metrics: Optional[Sequence[HuggingFaceMetric]] = None,
         val_metrics: Optional[Sequence[HuggingFaceMetric]] = None,
         test_metrics: Optional[Sequence[HuggingFaceMetric]] = None,
+        metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
         super().__init__()
         # `HuggingFaceNetwork`, not `Lazy[HuggingFaceNetwork]`: the deferred-ness is declared
@@ -277,6 +300,9 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
         # and flows it at run time.
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self._class_names: Optional[List[str]] = None
         self._computed_metrics: Dict[str, float] = {}
 
@@ -488,10 +514,12 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         manifest = log_run_context(trackers, runnable=self)
         trainer = self._build_trainer(train=self.train_set, evaluate=self.val_set)
         result = trainer.train()
-        self._computed_metrics = {k: float(v) for k, v in result.metrics.items() if isinstance(v, (int, float))}
+        names = as_metric_names(self.metric_names)
+        scored = {k: float(v) for k, v in result.metrics.items() if isinstance(v, (int, float))}
         if self.val_set is not None:
-            self._computed_metrics.update({k: float(v) for k, v in trainer.evaluate().items() if _is_number(v)})
-        _log_trainer_history(trainer, trackers)
+            scored.update({k: float(v) for k, v in trainer.evaluate().items() if _is_number(v)})
+        self._computed_metrics = names(scored, source="huggingface")
+        _log_trainer_history(trainer, trackers, names)
         logger.info(f"Training complete: {self._computed_metrics}")
         save_class_names(self._class_names, self._artifact_dir(), trackers)
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
@@ -508,8 +536,13 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
     def test(self) -> None:
         if self.test_set is None:
             raise ValueError("HuggingFaceClassifier.test() requires a 'test_set'.")
-        results = self._build_trainer(evaluate=self.test_set, split="test").evaluate()
-        self._computed_metrics = {k: float(v) for k, v in results.items() if _is_number(v)}
+        # `metric_key_prefix="test"` rather than Trainer's `eval` default: this pass walks the
+        # HELD-OUT split, and the prefix is the only thing that says so — left at `eval` the run
+        # would report its test scores in the column a validation pass fills.
+        results = self._build_trainer(evaluate=self.test_set, split="test").evaluate(metric_key_prefix="test")
+        self._computed_metrics = as_metric_names(self.metric_names)(
+            {k: float(v) for k, v in results.items() if _is_number(v)}, source="huggingface"
+        )
         logger.info(f"Evaluation complete: {self._computed_metrics}")
         write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
 
@@ -604,7 +637,7 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _log_trainer_history(trainer: Any, trackers: Sequence[Tracker]) -> None:
+def _log_trainer_history(trainer: Any, trackers: Sequence[Tracker], names: MetricNames) -> None:
     """Replay ``Trainer``'s own log history onto the trackers.
 
     ``transformers.Trainer`` owns the loop, so there is no epoch boundary here to hook — but
@@ -616,12 +649,19 @@ def _log_trainer_history(trainer: Any, trackers: Sequence[Tracker]) -> None:
     ``step`` is the ENTRY's global optimizer step, not the list index: HF logs training and
     evaluation entries at different cadences, so indexing would interleave two series onto one
     misleading axis.
+
+    The entry's own keys (``loss`` / ``train_runtime`` / ``eval_accuracy``) are translated on the
+    way out — ``names`` knows ``eval_`` is this engine's word for validation — so the curves land
+    beside another backend's rather than in columns of their own.
     """
     if not trackers:
         return
     for entry in getattr(getattr(trainer, "state", None), "log_history", []) or []:
         step = entry.get("step")
-        metrics = {key: float(value) for key, value in entry.items() if key != "step" and _is_number(value)}
+        metrics = names(
+            {key: float(value) for key, value in entry.items() if key != "step" and _is_number(value)},
+            source="huggingface",
+        )
         if not metrics:
             continue
         for tracker in trackers:

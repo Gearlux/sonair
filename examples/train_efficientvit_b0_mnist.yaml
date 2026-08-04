@@ -150,8 +150,14 @@ convnet: !scope:model=convnet
 # where it answers something ("99% top-1, but which digits does it confuse?" — on MNIST, 4↔9 and
 # 3↔5) — while the training split, whose metrics are per-batch, never builds one.
 #
-# Both keys are spelled out rather than left to the classifier's own `accuracy_top1` + `f1_macro`
+# Both keys are spelled out rather than left to the classifier's own `accuracy` + `f1_macro`
 # default, because the point of the file is that the config is the program.
+#
+# The KEY is the metric's name in every tracker, so it is `accuracy` and not `accuracy_top1`:
+# the other backends get that name from their own engine (fastai from the function's
+# `__name__`, Keras from a metric's `name=`) and none of them can say `_top1`, so a different
+# word here would put one quantity in two columns of the same comparison. The `top_k: 1` below
+# says which accuracy this is, where it is checkable.
 #
 # `!lazy:` for the same reason the model is: `num_classes` (10) is derived from the dataset and
 # injected at run time, so it is never written here. Dotted paths rather than the bare registered
@@ -162,7 +168,7 @@ convnet: !scope:model=convnet
 # (lightning / torch / fastai) all read these two keys, and a backend on another engine MUST
 # override them; see `metrics: null` in the keras block.
 metrics:
-  accuracy_top1: !lazy:torchmetrics.classification.MulticlassAccuracy
+  accuracy: !lazy:torchmetrics.classification.MulticlassAccuracy
     top_k: 1
   f1_macro: !lazy:torchmetrics.classification.MulticlassF1Score
     average: macro
@@ -364,7 +370,11 @@ keras: !scope:framework=keras
 # four, because fastai runs on torch: the model, the preprocessing chain and the batch
 # shape are the top level's verbatim, and only the loop changes. `metrics` are NAMES,
 # not `!class:` tags — fastai's classification metrics are plain functions, so there
-# is no class for a tag to resolve (see sonair/fastai_classification.py).
+# is no class for a tag to resolve (see sonair/fastai_classification.py). Two kinds of
+# name resolve: a `fastai.metrics` attribute (`accuracy`, `error_rate`,
+# `top_k_accuracy`) and this backend's configured aliases (`f1_macro` / `f1_micro` /
+# `f1_weighted`), which name a particular `F1Score(average=…)` — that module publishes
+# only the FACTORY, so a bare `F1Score` would reach the Learner unbuilt.
 #
 #   sonair train examples/train_efficientvit_b0_mnist.yaml --framework fastai
 #
@@ -372,7 +382,7 @@ keras: !scope:framework=keras
 #   runnable: !class:sonair.FastaiClassifier
 #     learning_rate: 0.001
 #     one_cycle: true
-#     metrics: [accuracy, top_k_accuracy]
+#     metrics: [accuracy, f1_macro]
 #     # No `model:` override — fastai IS torch, so it inherits the top-level slot
 #     # unchanged, whether that is `TimmModel` or `TorchConvNet`. There is no
 #     # `FastaiConvNet` for the same reason there is no `fastai_model.py`: a backend

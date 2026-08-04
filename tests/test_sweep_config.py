@@ -131,18 +131,26 @@ def test_the_tracker_takes_its_names_from_the_run(tracker: str) -> None:
 def test_a_metric_set_never_reaches_an_engine_that_cannot_consume_it() -> None:
     """Same rule as the example: torchmetrics are `framework="torch"`-bound.
 
-    A block can escape the top-level set two ways, and both are in use here, so this checks the
-    EFFECTIVE value rather than the document key. Either the block nulls the key (`keras`,
-    `tensorflow` — their runnable takes the metrics through broadcasting, so the key has to go),
-    or it names its own on the runnable (`fastai`, `jax`, `mlx`, `huggingface` — an explicit
-    constructor kwarg wins over a broadcast one, verified, so the inherited key has no reader).
+    A block escapes the inherited set one of two ways, and both are in use here, so this checks
+    the EFFECTIVE value rather than the document key. Either it RESTATES the key with its own
+    engine's metric objects (`keras`, `tensorflow` — the runnable takes them by broadcasting, so
+    the key must be the right kind rather than merely absent), or it names its own on the
+    runnable (`fastai`, `jax`, `mlx`, `huggingface` — an explicit constructor kwarg wins over a
+    broadcast one, verified, so the inherited key has no reader).
+
+    What is checked is the TARGET each entry names, not that the key is empty: a nulled key was
+    the right answer only while the non-torch engines reported nothing but their sentinel
+    accuracy. They now name accuracy AND macro-F1 in their own vocabulary, which is the point of
+    the sweep — one column per quantity — and an empty key would forbid exactly that.
 
     `val_metrics` has no second escape: every one of those runnables grew that slot with the
     per-split metrics work, so an un-nulled key WOULD reach it.
     """
     for framework in ("keras", "tensorflow"):
-        document = resolve(framework)
-        assert not document.get("metrics"), f"{framework} inherited the torchmetrics set"
+        wired = resolve(framework).get("metrics") or []
+        assert wired, f"{framework} must state its own metric objects — the inherited ones are torchmetrics"
+        targets = [str(getattr(m, "target", m)) for m in wired]
+        assert not any("torchmetrics" in t for t in targets), f"{framework} inherited a torchmetrics entry: {targets}"
 
     for framework in ("fastai", "jax", "mlx", "huggingface"):
         wired = resolve(framework)["runnable"].kwargs.get("metrics")
@@ -156,3 +164,43 @@ def test_a_metric_set_never_reaches_an_engine_that_cannot_consume_it() -> None:
         document = resolve(framework)
         assert document["metrics"], f"{framework} runs on torch and should keep the shared metrics"
         assert "confusion" in document["val_metrics"]
+
+
+def test_every_backend_reports_the_same_two_quantities() -> None:
+    """Accuracy AND macro-F1, on every one of the thirteen runs — the sweep's whole point.
+
+    The name is what a comparison lines up on, so this checks the NAME each block asks for
+    rather than the metric object: `accuracy` and `f1_macro` are the only two spellings all
+    eight engines can produce (fastai / jax / mlx / huggingface take a metric's name from a
+    function's `__name__`, so nothing carrying a `_top1` suffix is reachable there).
+
+    Config-level, like every test in this file: no venv carries all eight frameworks, so an
+    import-based check would silently reduce to whichever extras are installed locally — which
+    is exactly where a copy-pasted omission lands.
+    """
+    for framework in ("lightning", "torch"):
+        assert set(resolve(framework)["metrics"]) >= {"accuracy", "f1_macro"}
+
+    for framework in ("keras", "tensorflow"):
+        names = [m.kwargs.get("name") or str(m.target).rsplit(".", 1)[-1] for m in resolve(framework)["metrics"]]
+        assert "accuracy" in names, f"{framework} must name its accuracy `accuracy`, not compile()'s expansion"
+        assert any("F1" in n or n == "f1_macro" for n in names), f"{framework} reports no macro-F1: {names}"
+
+    for framework in ("fastai", "jax", "mlx", "huggingface"):
+        wired = resolve(framework)["runnable"].kwargs["metrics"]
+        assert {"accuracy", "f1_macro"} <= set(wired), f"{framework} reports {wired}"
+
+
+def test_only_huggingface_goes_without_training_metrics() -> None:
+    """The one gap in the table, declared here so it stays deliberate.
+
+    `transformers.Trainer` exposes `compute_metrics` as its EVALUATION hook, so training metrics
+    would cost a second forward pass over the whole train split at every epoch end. Every other
+    backend gets them for free — from its engine (lightning / torch / keras / tensorflow /
+    fastai) or from the logits its own gradient step already produced (jax / mlx).
+    """
+    for framework in ("jax", "mlx"):
+        wired = resolve(framework)["runnable"].kwargs.get("train_metrics")
+        assert wired, f"{framework} owns its loop and should score the training pass"
+
+    assert "train_metrics" not in resolve("huggingface")["runnable"].kwargs

@@ -25,19 +25,30 @@ SOURCE_DIR = Path(__file__).resolve().parent.parent / "sonair"
 #: a slot is offered where the engine can compute it and absent where it cannot, rather than
 #: accepted everywhere and silently ignored by half the fleet.
 #:
-#: * all three — the loop belongs to this project, so each split gets its own metric objects.
-#: * val + test only — the engine's metric hook IS its evaluation hook (a fastai ``Learner``
-#:   validates, a ``transformers.Trainer`` calls ``compute_metrics`` on eval, and the JAX / MLX
-#:   training passes compute the loss and nothing else), so a train-only metric has nowhere to go.
-#: * keras takes all three and computes their UNION — ``compile()`` owns one list.
+#: * SEPARATE per split — the loop belongs to this project (lightning / torch / tensorflow /
+#:   jax / mlx), so each split gets its own metric objects and a val-only metric stays val-only.
+#: * UNION — keras and fastai take all three and widen: ``compile()`` owns one list, and a
+#:   fitting ``Learner`` reports one list on both passes (``Recorder._train_mets`` and
+#:   ``_valid_mets`` are the same ``self.metrics``). fastai's TEST path still narrows, since it
+#:   builds its own Learner.
+#: * val + test only — ``huggingface``, and it is the one remaining gap: ``compute_metrics`` is
+#:   a ``transformers.Trainer``'s EVALUATION hook, so a `train_metrics` param would accept a
+#:   wired set and could only honour it with a second forward pass over the whole train split.
+#:
+#: ``jax`` / ``mlx`` moved into the first group on 2026-08-04. The old note — "the JAX / MLX
+#: training passes compute the loss and nothing else" — described this project's loop rather than
+#: the engines: the step now returns its logits as an aux output, so the training metrics cost
+#: one reduction per batch and no second pass. fastai moved for the same kind of reason: its
+#: ``Recorder`` computes on the validation pass by DEFAULT, not by necessity, and
+#: ``train_metrics=True`` accumulates over the training batches as they go by.
 SERVED = {
     "lightning_classifier": {"train", "val", "test"},
     "torch_classifier": {"train", "val", "test"},
     "tensorflow_classifier": {"train", "val", "test"},
     "keras_classifier": {"train", "val", "test"},
-    "fastai_classifier": {"val", "test"},
-    "jax_classifier": {"val", "test"},
-    "mlx_classifier": {"val", "test"},
+    "fastai_classifier": {"train", "val", "test"},
+    "jax_classifier": {"train", "val", "test"},
+    "mlx_classifier": {"train", "val", "test"},
     "huggingface_classifier": {"val", "test"},
 }
 

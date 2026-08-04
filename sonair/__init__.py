@@ -65,6 +65,11 @@ _BACKEND_NAMES = {
     "TensorFlowConvNet": ("sonair.convnet.tensorflow_convnet", "tensorflow"),
     "FlaxConvNet": ("sonair.convnet.flax_convnet", "jax"),
     "MlxConvNet": ("sonair.convnet.mlx_convnet", "mlx"),
+    # The one loss/metric class sonair OWNS — every other entry in `keras_classification` is an
+    # upstream class registered as-is and reached by its own name. It is here because a config
+    # writes `!class:sonair.SparseF1Score`, and it must be lazy for the same reason the rest
+    # are: naming it must not import keras on a torch-only install.
+    "SparseF1Score": ("sonair.keras_classification", "keras"),
 }
 
 __all__ = [*_BACKEND_NAMES]

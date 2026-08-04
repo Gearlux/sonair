@@ -370,7 +370,8 @@ def _resolve_task_defaults(self) -> None:
         self.metrics = (
             {"accuracy": LazyClass[Metric](MultilabelAccuracy), ...}
             if self.multilabel
-            else {"accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1), ...}
+            # `accuracy`, the word EVERY engine can produce — see record 11.
+            else {"accuracy": LazyClass[Metric](MulticlassAccuracy, top_k=1), ...}
         )
 ```
 
@@ -1103,3 +1104,179 @@ def _glorot_uniform(shape, seed):
 **What you may change.** The initializer, if the spec's comparability is preserved — the parameter
 COUNT is what `spec.trainable_parameter_count` pins, not the distribution. What you may not do is
 reach back into `tf.initializers` for brevity.
+
+---
+
+## 11. One name per quantity, chosen where the name is chosen (2026-08-04)
+
+**Context.** `examples/sweep/run_sweep.sh` trains ONE config on every installed
+backend so the runs can be compared in a single table. They could not be. Every
+tracker records the key it is handed, so each run landed its engine's own spelling —
+measured from the header line of each `metrics.csv` in a real 13-run sweep:
+
+```
+lightning     train/loss_epoch  train/accuracy_top1  val/loss  val/accuracy_top1
+torch         train/loss        train/accuracy_top1  val/loss  val/accuracy_top1
+fastai        train_loss        valid_loss           accuracy  top_k_accuracy
+keras         loss              accuracy             val_loss  val_accuracy
+tensorflow    loss              sparse_categorical_accuracy    val_loss  val_sparse_categorical_accuracy
+huggingface   train_loss        eval_loss            eval_accuracy
+jax / mlx     loss              val_loss             val_accuracy
+```
+
+The report printed the union of those keys: one quantity in four columns, every row
+mostly blank, and `sweep_report.py` said so in its own source ("the backends
+genuinely disagree on naming").
+
+**Decision.** The fix is split by WHERE each name is decided, and the split is the
+whole point — neither half can do the other's job.
+
+*The split prefix and the loss* are decided by the engine, which sonair does not
+control, so they are TRANSLATED at the boundary: each backend hands what it reports
+through `matrainer.MetricNames` (record 6 in matrainer's own architecture doc),
+declaring its own `source`, on the way to a tracker and to the metrics sidecar. Only
+the backend knows which engine wrote the names and which split an unprefixed key
+belongs to — fastai's bare `accuracy` is a VALIDATION metric where Keras' is a
+training one.
+
+*The metric's own name* is decided by whoever wires the metric, so it is fixed THERE
+rather than mapped: the torch/Lightning defaults and the example config say
+`accuracy` instead of `accuracy_top1`, and the Keras/TensorFlow defaults pass
+`name="accuracy"` to the metric object instead of letting `compile()` expand the
+`"accuracy"` alias into `sparse_categorical_accuracy`. The reason it goes this way
+round is that the OTHER five backends cannot be moved: fastai, JAX, MLX and
+HuggingFace take their metric's name from the function's `__name__`, so `accuracy`
+is the only word all eight can produce. Renaming it in code instead would mean
+rewriting a name the user WROTE in their config, which is a different and worse
+thing than translating one an engine generated.
+
+**Consequences.**
+
+- Every backend now records `train/loss`, `val/loss` and `val/accuracy`. Verified by
+  running the sweep: 13/13 runs, CSV and MLflow alike.
+- A metric only one backend computes keeps its own column — the report shows the
+  union, because those are genuinely different measurements. The sweep config no longer
+  has one: `val/f1_macro` reached every engine under record 12, and fastai's
+  `val/top_k_accuracy` was dropped once it was the last ragged column (a k=5 accuracy on
+  10 classes, which chance alone scores 0.5 on). The union rule stays, because it is a
+  property of the report rather than of one config.
+- `LightningClassifier.training_step` logs the loss TWICE, under `train/loss`
+  (`on_epoch`) and `train/loss_step` (`on_step`). Lightning appends `_step`/`_epoch`
+  only when one name carries both, and `train/loss_epoch` is a name no other backend
+  writes. The per-step series is kept — nothing else shows the loss moving within an
+  epoch — and it keeps the progress bar's live number. The sweep report FOLDS it away
+  by default under its own reason (`is_within_epoch_series`, not `BOOKKEEPING`): a
+  one-row-per-run table cannot show a finer axis, and only this backend fills the
+  column — but calling a genuine result "bookkeeping" in the footer would be a
+  different kind of wrong.
+- `HuggingFaceClassifier.test()` passes `metric_key_prefix="test"` to
+  `Trainer.evaluate()`. Left at HF's `eval` default the held-out scores would be
+  translated into the `val/` columns a validation pass fills.
+- Every backend gained a `metric_names:` constructor slot, so one top-level key
+  reaches all eight — including `target:`, which records the whole sweep in another
+  engine's spelling.
+- What an engine hands its OWN callbacks is untouched: `EarlyStopping(monitor="val_loss")`
+  still finds Keras' name, and `KerasClassifier._history` keeps Keras' columns while
+  `computed_metrics` carries the translated ones.
+
+**Example.**
+
+```yaml
+metrics:
+  accuracy: !lazy:torchmetrics.classification.MulticlassAccuracy { top_k: 1 }
+
+metric_names: !class:matrainer.MetricNames    # optional; the default is <split>/<name>
+  target: keras
+```
+
+```
+| run           | val/accuracy | val/f1_macro | val/loss | train/loss |
+| keras_zoo     |       0.69   |       0.6612 |   0.9272 |     0.7906 |
+| lightning_zoo |       0.2411 |       0.1498 |   2.3028 |     1.1786 |
+```
+
+**What you may change.** A new backend declares the slot and calls
+`as_metric_names(self.metric_names)` where it reports (pinned fleet-wide by
+`tests/test_tracking_parity.py`). Name a new metric with the word every engine can
+produce. Do NOT translate a name the user wrote in a config, and do not push the
+translation down into `Tracker.log_metrics` — a tracker cannot know which engine or
+which split produced a bare key.
+
+
+## 12. Naming a quantity is half the job; every engine must be able to COMPUTE it (2026-08-04)
+
+**Context.** Record 11 made the eight backends agree on what a quantity is CALLED, and the sweep
+then showed the other half of the problem: the columns were consistent and mostly empty.
+`val/f1_macro` reached two backends of eight, the training columns three, so eleven of thirteen
+runs were blank in three columns of a table whose entire purpose is comparison. Nothing was
+misnamed. The engines simply could not produce the measurement:
+
+- Keras publishes `F1Score`, but it compares two `[N, C]` tensors while a single-label run here
+  produces int64 class ids `[N]` — wired as it stands it dies on the first batch.
+- `fastai.metrics` publishes `F1Score` as a FACTORY, so the only thing a config can name resolves
+  to the factory itself.
+- The JAX, MLX and HuggingFace metric sets held two functions each, neither of them an F1.
+- Three backends computed no training metrics at all, and a fourth (Lightning) computed them
+  per-STEP, which `log_every_n_steps` then discarded on any run shorter than 50 steps.
+
+**Decision.** Give each engine family the smallest thing that lets it compute the SAME quantity,
+and put the arithmetic that is genuinely shared upstream.
+
+- `keras` / `tensorflow`: **`sonair.keras_classification.SparseF1Score`** — the one loss/metric
+  class this project owns, and the exception record 5's rule already allows (a transport shim for
+  something unregisterable as it stands). It one-hots `y_true` and delegates; no F1 arithmetic of
+  its own. Its name is DERIVED as `f1_<average>`, so `average="micro"` cannot be recorded under
+  the macro name.
+- `fastai`: **configured aliases** (`f1_macro` / `f1_micro` / `f1_weighted`) resolving to a BUILT
+  and renamed `F1Score(average=…)`.
+- `jax` / `mlx`: a **`_CONFUSION_METRICS`** table beside the per-batch `_METRICS`, partitioned by
+  NAME before resolution.
+- `huggingface`: a numpy `_f1_macro` — its hook already sees the whole split at once.
+- The counting and the reduction are ONE implementation in `matrainer.metric_functions` (its
+  architecture record 7), because three engines need identical arithmetic.
+
+**Consequences.**
+
+- **A per-class metric may not be averaged over batches.** This is the part that is invisible
+  when wrong: batch-averaged macro-F1 reads three to five points LOW (0.8849 where the truth is
+  0.9182, on 10 classes at batch 32) and always downward, because a class absent from a batch
+  scores 0 for that batch. In THIS project's sweep that would have been a systematic penalty on
+  exactly the backends that own their loop — the one bias a cross-framework comparison must not
+  introduce. So a confusion metric accumulates one `C×C` matrix over the split and reduces once,
+  which is what `torchmetrics` does internally.
+- **Only a NAMED metric can be confusion-accumulated.** The partition happens before resolution,
+  because nothing here can know what a user-supplied callable would want accumulated.
+- **A multi-label run DROPS a confusion metric with a warning.** A multi-hot row has no single
+  cell to land in, and a number under the name `f1_macro` computed some other way is worse than a
+  gap — nothing downstream could tell.
+- **`train_metrics` reached five more backends, and both blocking claims were about THIS code.**
+  "The JAX/MLX training passes compute the loss and nothing else" described the loop as written;
+  the step now returns its logits as an aux output. "A fastai `Learner` computes its metrics on
+  the validation pass" is `Recorder`'s DEFAULT, not a constraint. Neither backend runs a second
+  forward pass — that would cost a pass AND measure a different network, since `training=True`
+  leaves dropout and batch norm in train mode.
+- **`LightningClassifier` moved its train metrics to the epoch end**, matching every other
+  backend and its own eval splits. Only `huggingface` still has no training metrics, and that one
+  IS the engine: `compute_metrics` is its evaluation hook.
+- A training metric therefore measures the network as it trained, so a gap against validation is
+  expected. The bare-torch backend's BatchNorm note in `AGENTS.md` is the same observation.
+
+**Example.**
+
+```yaml
+keras: !scope:framework=keras
+  metrics:
+    - !class:keras.metrics.SparseCategoricalAccuracy { name: accuracy }
+    - !class:sonair.SparseF1Score                      # -> "f1_macro"
+
+jax: !scope:framework=jax
+  runnable: !class:sonair.JaxClassifier
+    metrics: [accuracy, f1_macro]        # f1_macro is ACCUMULATED, accuracy per batch
+    train_metrics: [accuracy, f1_macro]  # no second forward pass — the step returns its logits
+```
+
+**What you may change.** Add a metric derived from a confusion matrix (per-class recall, kappa) —
+the accumulator is already there, so it is a reduction in `matrainer.metric_functions` plus a name
+in each backend's table. Add an engine's own metric where it ships one. Do NOT average a per-class
+metric over batches to avoid the accumulator, do NOT approximate a confusion metric for a
+multi-label run, and do NOT re-run the model in eval mode to produce training metrics.

@@ -105,8 +105,21 @@ def test_the_loss_metric_namesakes_are_both_registered_and_resolve_by_role() -> 
             registry.get_class(name)
 
 
-def test_registering_the_keras_set_emits_no_clobber_warning() -> None:
-    """Every duplicate here differs by ``role``, so none is a clobber."""
+def test_registering_the_UPSTREAM_keras_set_emits_no_clobber_warning() -> None:
+    """Every duplicate among the registered upstream classes differs by ``role``.
+
+    The check is scoped to the ``register(...)`` calls — the thirteen names published under both
+    ``keras.losses`` and ``keras.metrics`` — and a reload is how it is exercised, because a
+    clobber is only observable when the same name is registered twice.
+
+    ``SparseF1Score`` is excluded, and that exclusion is about the RELOAD rather than about the
+    class: confluid stays silent when the identical class OBJECT is re-registered
+    (``registry._store``: ``existing.cls is entry.cls``), which is what makes re-importing this
+    module free for the upstream classes — ``keras.metrics.F1Score`` is the same object every
+    time. A ``@configurable`` class defined HERE is rebuilt by the reload, so the registry sees
+    a genuinely different object under the same name and tags and correctly says so. Nothing in
+    a normal run reloads a module, so the warning cannot occur outside this test.
+    """
     import confluid.registry as registry_module
 
     collected: list = []
@@ -118,7 +131,17 @@ def test_registering_the_keras_set_emits_no_clobber_warning() -> None:
         importlib.reload(kc)
     finally:
         registry_module.logger = original  # type: ignore[assignment]
-    assert collected == []
+    upstream = [message for message in collected if "SparseF1Score" not in str(message)]
+    assert upstream == []
+
+
+def test_the_sparse_f1_shim_registers_as_a_keras_classification_metric() -> None:
+    """The one sonair-owned class in this module is discoverable like every registered one."""
+    found = get_registry().get_class("SparseF1Score", task="classification", role="metric", framework="keras")
+    assert found is kc.SparseF1Score
+    assert "SparseF1Score" in kc.__all__
+    # Zero-arg construction, and the default name is the column the sweep compares on.
+    assert kc.SparseF1Score().name == "f1_macro"
 
 
 def test_registered_classes_are_the_upstream_keras_ones() -> None:
@@ -315,3 +338,49 @@ def test_a_registered_loss_and_metric_drive_a_real_compile_and_fit() -> None:
     history = model.fit(x, y, epochs=1, batch_size=8, verbose=0)
     assert "sparse_categorical_accuracy" in history.history
     assert np.isfinite(history.history["loss"][0])
+
+
+def test_the_sparse_f1_shim_agrees_with_sklearn_on_INT_ID_targets() -> None:
+    """What upstream's `F1Score` cannot do: read the `[N]` int ids a single-label run produces.
+
+    Accumulated across batches, exactly as `compile()` would drive it, and compared against the
+    reduction the torch backends' `MulticlassF1Score(average="macro")` computes — that agreement
+    is what puts both engines' numbers in ONE column of a cross-framework comparison.
+    """
+    sklearn_metrics = pytest.importorskip("sklearn.metrics")
+
+    rng = np.random.default_rng(11)
+    targets = rng.integers(0, 10, 320)
+    predicted = np.where(rng.random(320) < 0.6, targets, rng.integers(0, 10, 320))
+    logits = (np.eye(10)[predicted] * 4.0 + rng.normal(0, 0.1, (320, 10))).astype("float32")
+
+    metric = kc.SparseF1Score()
+    for start in range(0, 320, 32):
+        metric.update_state(targets[start : start + 32].astype("int64"), logits[start : start + 32])
+
+    expected = sklearn_metrics.f1_score(targets, logits.argmax(-1), average="macro", labels=range(10), zero_division=0)
+    assert float(metric.result()) == pytest.approx(expected, abs=1e-5)
+
+
+def test_the_sparse_f1_shim_reads_RAW_LOGITS() -> None:
+    """`threshold=None` argmaxes, and argmax is invariant under softmax — so a bare `Dense`
+    head needs no `from_logits` knob, the same property that makes `SparseCategoricalAccuracy`
+    safe here."""
+    rng = np.random.default_rng(12)
+    targets = rng.integers(0, 4, 64)
+    logits = (np.eye(4)[targets] * 3.0 + rng.normal(0, 0.5, (64, 4))).astype("float32")
+    probabilities = (np.exp(logits) / np.exp(logits).sum(axis=-1, keepdims=True)).astype("float32")
+
+    from_logits, from_probabilities = kc.SparseF1Score(), kc.SparseF1Score()
+    from_logits.update_state(targets.astype("int64"), logits)
+    from_probabilities.update_state(targets.astype("int64"), probabilities)
+
+    assert float(from_logits.result()) == pytest.approx(float(from_probabilities.result()), abs=1e-6)
+
+
+def test_the_sparse_f1_shims_name_follows_its_averaging() -> None:
+    """Derived rather than a literal default, so `average="micro"` cannot be recorded under the
+    macro name — one name per quantity, decided where the metric is wired."""
+    assert kc.SparseF1Score().name == "f1_macro"
+    assert kc.SparseF1Score(average="micro").name == "f1_micro"
+    assert kc.SparseF1Score(name="whatever_the_config_says").name == "whatever_the_config_says"

@@ -456,6 +456,81 @@ def test_the_trackers_become_the_trainers_loggers() -> None:
     assert adapters[0].tracker is tracker
 
 
+def test_a_metric_names_key_broadcasts_from_a_flat_config() -> None:
+    """The knob has to be reachable the way every other one is — a top-level sibling key.
+
+    Wired in a CONSTRUCTOR slot it arrives as a deferred marker (only `!class:X()` builds
+    eagerly), which is why the slot stores it verbatim and `as_metric_names` flows it at use.
+    """
+    from confluid import flow, load
+    from confluid.fluid import Fluid
+    from matrainer.metric_names import as_metric_names
+
+    yaml = """
+trainer: !class:sonair.LightningClassifier
+  run_name: x
+model: "MODEL_SENTINEL"
+metric_names: !class:matrainer.MetricNames
+  target: keras
+"""
+    trainer = load(yaml)["trainer"]
+    trainer = flow(trainer) if isinstance(trainer, Fluid) else trainer
+
+    assert trainer.metric_names is not None, "a `metric_names:` key did not reach the slot"
+    assert as_metric_names(trainer.metric_names).target == "keras"
+
+
+def test_the_metric_names_knob_reaches_the_adapters() -> None:
+    """One `metric_names:` key, and every tracker this run writes to records that vocabulary."""
+    from matrainer import CsvTracker, MetricNames
+    from matrainer.lightning import TrackerLogger
+
+    names = MetricNames(target="keras")
+    trainer = LightningClassifier(
+        model=_TinyClassifier(),
+        trackers=[CsvTracker(experiment_name="e", run_name="r", save_dir="./_sonair_test_logs")],
+        metric_names=names,
+    )
+
+    adapters = [lg for lg in trainer._build_trainer().loggers if isinstance(lg, TrackerLogger)]
+    assert adapters and adapters[0].metric_names is names
+
+
+def test_the_training_loss_is_recorded_under_the_canonical_name() -> None:
+    """`train/loss`, never Lightning's `train/loss_epoch`.
+
+    Lightning appends `_step` / `_epoch` when ONE name carries both, so the single
+    `on_step=True, on_epoch=True` call this used to make recorded `train/loss_epoch` — a name
+    no other backend writes, in the column a cross-engine sweep compares. The per-step series
+    is still logged, under a name of its own.
+    """
+    logged: List[str] = []
+    trainer = LightningClassifier(model=_TinyClassifier(num_classes=3), num_classes=3)
+    trainer.log = lambda name, *_args, **_kw: logged.append(name)  # type: ignore[method-assign]
+    trainer._resolve_task_defaults()
+
+    trainer.training_step(_make_batch(), 0)
+
+    assert "train/loss" in logged
+    assert "train/loss_step" in logged
+    assert not any(name.endswith("_epoch") for name in logged)
+
+
+def test_the_default_metric_set_names_accuracy_what_every_backend_can_name_it() -> None:
+    """`accuracy`, not `accuracy_top1`.
+
+    The other seven backends get their accuracy metric's name from their own engine — fastai
+    from `fn.__name__`, Keras from a metric's `name=` — and none of them can produce `_top1`.
+    A different word here would put one quantity in two columns of the same sweep report.
+    `top_k=1` lives in the template, where it is checkable.
+    """
+    trainer = LightningClassifier(model=_TinyClassifier(num_classes=3), num_classes=3)
+    trainer._resolve_task_defaults()
+
+    assert set(trainer.metrics) == {"accuracy", "f1_macro"}
+    assert trainer.metrics["accuracy"].kwargs["top_k"] == 1
+
+
 def test_flowing_twice_does_not_rebuild_a_deferred_tracker() -> None:
     """A re-flowed `Fluid` would be a SECOND tracker — two MLflow runs for one training run."""
     from confluid.fluid import Class
@@ -1115,8 +1190,19 @@ def test_the_split_slots_are_built_once() -> None:
     assert sorted(str(k) for k in trainer.val_metrics.keys()) == ["val/accuracy_top1", "val/confusion"]
 
 
-def test_a_per_step_train_metric_is_scalar_filtered_too() -> None:
-    """`training_step` logs per-BATCH values; the same filter applies or it dies on batch one."""
+def test_training_step_only_updates_and_the_epoch_end_reports() -> None:
+    """The train split reduces ONCE per epoch, exactly as the eval splits do.
+
+    It used to log the per-BATCH values with ``on_step=True``, which lost the training metrics
+    in two different ways — Lightning's ``log_every_n_steps`` (50) DROPS a per-step series
+    shorter than the interval, so a 32-step run recorded none at all; and what survived a longer
+    run was one batch's value where every other backend reports an epoch aggregate. Both were
+    measured on the backend sweep before this changed.
+
+    The scalar filter is still applied at the epoch end (``_report_epoch_metrics``), because
+    ``log_dict`` carries scalars only — the confusion matrix in this fixture is what would kill
+    the run otherwise.
+    """
     logged: List[Any] = []
     trainer = _confusion_trainer()
     trainer.initialize()
@@ -1124,8 +1210,33 @@ def test_a_per_step_train_metric_is_scalar_filtered_too() -> None:
     trainer.log = lambda *a, **k: None  # type: ignore[method-assign]
 
     trainer.training_step(_make_batch(8, num_classes=3), 0)
+    assert logged == [], "the training step must accumulate, not report"
 
+    trainer.on_train_epoch_end()
     assert list(logged[0]) == ["train/accuracy_top1"]
+
+
+def test_the_train_metrics_reset_at_epoch_START_so_the_last_epoch_survives() -> None:
+    """Same rule the eval splits follow, and for the same reason.
+
+    ``_write_metrics_sidecar`` and the ``computed_metrics`` @output both ``compute()`` after
+    ``trainer.fit()`` has returned, so resetting at epoch END would hand them an emptied metric.
+    """
+    trainer = _confusion_trainer()
+    trainer.initialize()
+    trainer.log_dict = lambda *a, **k: None  # type: ignore[method-assign]
+    trainer.log = lambda *a, **k: None  # type: ignore[method-assign]
+
+    batch = _make_batch(8, num_classes=3)
+    trainer.training_step(batch, 0)
+    accuracy = trainer.train_metrics["train/accuracy_top1"]
+    during_epoch = float(accuracy.compute())
+
+    trainer.on_train_epoch_end()
+    assert float(accuracy.compute()) == pytest.approx(during_epoch), "the epoch END must not reset"
+
+    trainer.on_train_epoch_start()
+    assert accuracy.update_count == 0, "the epoch START is what resets"
 
 
 # ---------------------------------------------------------------------------

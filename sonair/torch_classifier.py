@@ -53,6 +53,7 @@ from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, outp
 from confluid.registry import resolve_class
 from loggair import get_logger
 from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.metric_names import MetricNames, as_metric_names
 from matrainer.metric_slots import merge_metric_specs
 from matrainer.run_names import generate_run_name, run_prefix
 from matrainer.torch import Device, build_metric_collection, resolve_device, scalar_metrics
@@ -132,6 +133,10 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         plot_metrics: ALSO send each non-scalar metric to the trackers as a matplotlib
             heatmap, not only as a table. Off by default: it makes matplotlib
             (``matrainer[plot]``) a cost of every eval epoch, where the table costs nothing.
+        metric_names: How recorded metrics are named — see
+            :class:`~matrainer.metric_names.MetricNames`. This loop already writes the canonical
+            ``<split>/<name>``, so the default translates nothing; wiring ``target:`` is what
+            makes it record in another engine's spelling instead.
         device: Where to run — see :data:`Device`.
         checkpoint_dir: Directory for ``model.pt`` (a plain ``state_dict``) and the run's
             ``class_names.json``. ``None`` writes no weights, which is what a smoke run wants.
@@ -167,6 +172,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         checkpoint_dir: Optional[str] = None,
         grad_clip: Optional[float] = None,
         trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
+        metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
         super().__init__()
         # `nn.Module`, not `Lazy[nn.Module]`: the DEFERRED-ness is declared once, on the ctor
@@ -224,6 +230,9 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
         # and flows it at run time.
         self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
+        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
+        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
+        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
         self._class_names: Optional[List[str]] = None
         self._history: Dict[str, List[float]] = {}
         self._computed_metrics: Dict[str, float] = {}
@@ -377,7 +386,11 @@ class TorchClassifier(TorchRunner, ProgressReporting):
                 }
                 if self.multilabel
                 else {
-                    "accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1),
+                    # `accuracy`, not `accuracy_top1`: every other backend's accuracy metric is
+                    # named by its own engine (`fn.__name__`, a keras metric's `name=`) and none
+                    # of them can say `_top1`, so a sweep across engines would report one
+                    # quantity in two columns. `top_k=1` is in the template, where it belongs.
+                    "accuracy": LazyClass[Metric](MulticlassAccuracy, top_k=1),
                     "f1_macro": LazyClass[Metric](MulticlassF1Score, average="macro"),
                 }
             )
@@ -563,6 +576,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
             if loaders["val"] is not None:
                 logs["val/loss"] = self._eval_epoch(cast(DataLoader[Any], loaders["val"]), self.val_metrics)
                 logs.update(self._epoch_metrics(self.val_metrics, trackers, epoch))
+            logs = as_metric_names(self.metric_names)(logs)
             for tracker in trackers:
                 tracker.log_metrics(logs, step=epoch)
             for key, value in logs.items():
@@ -598,6 +612,7 @@ class TorchClassifier(TorchRunner, ProgressReporting):
         trackers = self._live_trackers()
         results = {"test/loss": self._eval_epoch(loader, self.test_metrics)}
         results.update(self._epoch_metrics(self.test_metrics, trackers))
+        results = as_metric_names(self.metric_names)(results)
         for tracker in trackers:
             tracker.log_metrics(results)
         logger.info(f"Evaluation complete: {results}")

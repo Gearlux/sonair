@@ -314,9 +314,12 @@ def test_fit_runs_the_graph_loop_and_records_history(keras_module: Any) -> None:
     )
     clf.run()
 
-    assert set(clf._history) == {"loss", "sparse_categorical_accuracy"}
+    # The history is what the loop drove its `CallbackList` with, so it keeps Keras's own
+    # spelling; `computed_metrics` (the sidecar, the `@output`) carries the canonical names, so
+    # this run's record reads beside any other backend's.
+    assert set(clf._history) == {"loss", "accuracy"}
     assert len(clf._history["loss"]) == 2
-    assert clf.computed_metrics["loss"] == clf._history["loss"][-1]
+    assert clf.computed_metrics["train/loss"] == clf._history["loss"][-1]
 
 
 @requires_tensorflow
@@ -335,8 +338,8 @@ def test_a_wired_val_set_is_scored_every_epoch(keras_module: Any) -> None:
     clf.val_set = Stream(source=_records(8))
     clf.run()
 
-    assert "val_loss" in clf.computed_metrics
-    assert "val_sparse_categorical_accuracy" in clf.computed_metrics
+    assert "val/loss" in clf.computed_metrics
+    assert "val/accuracy" in clf.computed_metrics
 
 
 @requires_tensorflow
@@ -416,6 +419,9 @@ def test_the_accuracy_alias_resolves_the_way_compile_would(keras_module: Any) ->
 
     assert isinstance(_as_metric("accuracy", multilabel=False), keras_module.metrics.SparseCategoricalAccuracy)
     assert isinstance(_as_metric("accuracy", multilabel=True), keras_module.metrics.BinaryAccuracy)
+    # ...and it is NAMED after what the caller wrote, not after the class picked for them: the
+    # class default (`sparse_categorical_accuracy`) is a spelling no other engine can produce.
+    assert _as_metric("accuracy", multilabel=False).name == "accuracy"
 
 
 @pytest.mark.parametrize(
@@ -470,7 +476,9 @@ def test_evaluate_scores_the_test_set(keras_module: Any) -> None:
     )
     clf.run()
 
-    assert set(clf.computed_metrics) == {"loss", "sparse_categorical_accuracy"}
+    # `test/`, because `_run_epoch` returns unprefixed keys whichever split it walked — the
+    # caller states which one this was, since the engine cannot.
+    assert set(clf.computed_metrics) == {"test/loss", "test/accuracy"}
 
 
 @requires_tensorflow

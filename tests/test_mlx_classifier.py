@@ -311,7 +311,7 @@ def test_fit_trains_and_reports(tmp_path: Path) -> None:
     clf.metrics_sidecar_path = str(tmp_path / "metrics.json")
     clf.run()
 
-    assert "loss" in clf.computed_metrics and "val_accuracy" in clf.computed_metrics
+    assert "train/loss" in clf.computed_metrics and "val/accuracy" in clf.computed_metrics
     assert (tmp_path / "metrics.json").exists()
     assert clf.num_classes == 3
 
@@ -328,7 +328,7 @@ def test_the_loss_actually_descends() -> None:
     longer = _classifier(train_set=Stream(source=records), max_epochs=6)
     longer.run()
 
-    assert longer.computed_metrics["loss"] < first.computed_metrics["loss"]
+    assert longer.computed_metrics["train/loss"] < first.computed_metrics["train/loss"]
 
 
 @requires_mlx
@@ -433,3 +433,99 @@ def test_eval_verbs_without_a_test_set_are_clear_errors(method: str) -> None:
     clf = _classifier(model=MlxConvNet(num_classes=3, input_shape=INPUT), task=method)
     with pytest.raises(ValueError, match="test_set"):
         getattr(clf, method)()
+
+
+# --------------------------------------------------------------------------- #
+# Metrics: the training pass, and the confusion-matrix ones
+# --------------------------------------------------------------------------- #
+@requires_mlx
+def test_the_training_pass_reports_its_own_metrics() -> None:
+    """`train_metrics` is served because the loop is ours — no second forward pass.
+
+    `nn.value_and_grad` differentiates the FIRST element of a returned tuple and hands the rest
+    back untouched, so the step returns `(loss, logits)` and the training metrics read the very
+    tensor the gradient was taken through.
+    """
+    from recordstream import Stream
+
+    clf = _classifier(
+        train_set=Stream(source=_records(12)),
+        val_set=Stream(source=_records(8)),
+        metrics=["accuracy"],
+        train_metrics=["f1_macro"],
+    )
+    clf.run()
+
+    assert "train/accuracy" in clf.computed_metrics
+    assert "train/f1_macro" in clf.computed_metrics
+    assert "val/accuracy" in clf.computed_metrics
+    assert "val/f1_macro" not in clf.computed_metrics, "a train-only metric stays out of val"
+
+
+@requires_mlx
+def test_the_training_step_still_returns_a_differentiable_loss() -> None:
+    """The aux logits must not cost the loop its gradient — the loss still has to DESCEND.
+
+    Pinned as a behaviour rather than a shape: `nn.value_and_grad` accepts a tuple return
+    happily, and a mistake here (differentiating the wrong element, or dropping the update)
+    produces a loop that runs to completion and simply never learns.
+    """
+    from recordstream import Stream
+
+    clf = _classifier(train_set=Stream(source=_records(24)), max_epochs=1, batch_size=4)
+    losses: list = []
+    clf.callbacks = [lambda epoch, logs: losses.append(logs["train/loss"])]
+    clf.run()
+
+    assert losses and all(isinstance(value, float) for value in losses)
+
+
+@requires_mlx
+def test_f1_macro_does_not_depend_on_the_batch_SIZE() -> None:
+    """Accumulation, not averaging — the same property the JAX backend's suite pins.
+
+    A confusion matrix summed over the split gives one answer whatever the batching; a mean of
+    per-batch F1s is biased downward the smaller the batches.
+    """
+    from confluid import LazyClass
+    from recordstream import Stream
+
+    from sonair.convnet.mlx_convnet import MlxConvNet
+
+    records = _records(12)
+    scores = []
+    for batch_size in (3, 12):
+        clf = _classifier(
+            model=LazyClass(MlxConvNet, input_shape=INPUT, num_classes=3, seed=0),
+            test_set=Stream(source=records),
+            batch_size=batch_size,
+            metrics=["accuracy", "f1_macro"],
+        )
+        clf.task = "test"
+        clf.run()
+        scores.append(clf.computed_metrics)
+
+    assert scores[0]["test/f1_macro"] == pytest.approx(scores[1]["test/f1_macro"], abs=1e-6)
+    assert scores[0]["test/accuracy"] == pytest.approx(scores[1]["test/accuracy"], abs=1e-6)
+
+
+@requires_mlx
+def test_a_confusion_metric_is_dropped_on_a_multilabel_run() -> None:
+    """A multi-hot row has no single cell to land in, so the metric is not reported at all."""
+    from recordstream import Stream
+    from recordstream.items import Image, MultiLabel
+
+    records = [
+        {"image": Image(np.zeros(INPUT, "float32"), layout="HWC"), "class": MultiLabel([i % 3, (i + 1) % 3])}
+        for i in range(8)
+    ]
+    clf = _classifier(
+        train_set=Stream(source=records),
+        val_set=Stream(source=records),
+        num_classes=3,
+        metrics=["accuracy_multi", "f1_macro"],
+    )
+    clf.run()
+
+    assert "val/accuracy_multi" in clf.computed_metrics
+    assert "val/f1_macro" not in clf.computed_metrics

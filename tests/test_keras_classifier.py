@@ -175,7 +175,7 @@ def test_the_model_slot_takes_a_BARE_keras_model_too() -> None:
     clf.run()
 
     assert clf.trained_model is bare
-    assert "loss" in clf.computed_metrics
+    assert "train/loss" in clf.computed_metrics
 
 
 def test_a_never_flowed_model_still_builds_on_first_use() -> None:
@@ -208,7 +208,10 @@ def test_fit_reports_metrics() -> None:
     clf = _classifier(train_set=Stream(source=_records()))
     clf.run()
 
-    assert "loss" in clf.computed_metrics
+    # `train/loss`, not Keras's bare `loss`: what LEAVES the run is the canonical vocabulary,
+    # so this sidecar reads beside any other backend's (`clf._history` keeps Keras's names).
+    assert "train/loss" in clf.computed_metrics
+    assert "loss" in clf._history, "the Keras History object keeps Keras's own spelling"
     assert all(isinstance(v, float) for v in clf.computed_metrics.values())
 
 

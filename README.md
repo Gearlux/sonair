@@ -324,7 +324,7 @@ Both stay in the tracker, and neither is dropped silently — the footer names w
 reason, and the command that brings it back:
 
 ```bash
-python examples/sweep/sweep_report.py report csv Tue_Aug_4_2026_1 --all
+python -m matrainer.sweep report csv Tue_Aug_4_2026_1 --all
 ```
 
 MLflow and CSV can be read back from here; the others are write surfaces from this machine and

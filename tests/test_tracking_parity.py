@@ -315,3 +315,38 @@ def test_the_forking_backends_warm_their_splits_in_the_parent(stem: str) -> None
         f"{stem} forks its DataLoader workers but never warms its splits in the parent — call "
         "recordstream.ensure_materialized() beside ensure_record_dataset() in _initialize_fit()."
     )
+
+
+#: How each backend gets its METRICS onto the wired trackers — a DIFFERENT question from the
+#: provenance hookup above, and the distinction is what let a real bug through: raidar's
+#: `rfdetr_detector` had `log_run_context` (so the provenance table passed) while never calling
+#: `tracker.log_metrics` at all, so a tracked run recorded its git state and its log file and NOT
+#: its mAP. Its evaluate path had no tracker wiring whatsoever.
+#:
+#: The sibling restoration project found the same shape on its `transformers.Trainer` backend, and
+#: only because a backend SWEEP put eleven runs in one table and one came out blank. A backend read
+#: ALONE looks perfect — it prints its score and writes its metrics sidecar.
+METRIC_BRIDGES = {
+    "fastai_classifier.py": "log_metrics",
+    "huggingface_classifier.py": "_log_trainer_history",
+    "jax_classifier.py": "log_metrics",
+    "keras_classifier.py": "keras_tracking_callback",
+    "lightning_classifier.py": "TrackerLogger",
+    "mlx_classifier.py": "log_metrics",
+    "tensorflow_classifier.py": "keras_tracking_callback",
+    "torch_classifier.py": "log_metrics",
+}
+
+
+def test_every_backend_puts_its_METRICS_on_the_trackers() -> None:
+    """Provenance is not enough: a run whose numbers reach only the log is invisible to every
+    comparison, every tracker UI and every sweep."""
+    for name, marker in METRIC_BRIDGES.items():
+        source = (SOURCE_DIR / name).read_text()
+        assert marker in source, f"{name} never reaches a tracker's metric channel via {marker}"
+
+
+def test_the_metric_bridge_table_covers_every_backend_on_disk() -> None:
+    """The converse — a new backend must not be added without a metric channel."""
+    on_disk = {p.name for p in SOURCE_DIR.glob("*_classifier.py")}
+    assert on_disk == set(METRIC_BRIDGES)

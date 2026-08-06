@@ -36,7 +36,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"   # …/sonair
 WORKSPACE_DIR="$(cd "${PROJECT_DIR}/.." && pwd)"
 CONFIG="examples/sweep/all_backends.yaml"
-REPORT="${SCRIPT_DIR}/sweep_report.py"
+# The report is matrainer's, not this project's: naming an experiment and reading a sweep back are
+# queries against a TRACKER, and three task projects carried byte-identical copies of them before the
+# lift. What stays here is the matrix and the per-engine quirks — the halves that are genuinely this
+# project's. matrainer ships no binary, so it is a module main.
+REPORT=(python -m matrainer.sweep)
 
 TRACKER="mlflow"
 ONLY=""
@@ -121,7 +125,7 @@ fi
 # TRACKER (see sweep_report.py), so a wiped tracker restarts at 1 rather than counting a history
 # that is no longer there.
 PREFIX="$(date '+%a_%b_%-d_%Y')"
-if ! EXPERIMENT="$(python "${REPORT}" next-experiment "${TRACKER}" "${PREFIX}")" || [[ -z "${EXPERIMENT}" ]]; then
+if ! EXPERIMENT="$("${REPORT[@]}" next-experiment "${TRACKER}" "${PREFIX}")" || [[ -z "${EXPERIMENT}" ]]; then
   # Checked rather than assumed: the first run of this script hit an MLflow whose SQLite schema
   # had never been created, so every API call 500'd. Unguarded, the empty name flowed into
   # `--experiment_name ''` and thirteen runs would have trained into an unnamed experiment.
@@ -181,7 +185,7 @@ echo " ${EXPERIMENT} — ${#PASSED[@]} ok, ${#FAILED[@]} failed"
 echo "============================================================"
 [[ ${#FAILED[@]} -gt 0 ]] && printf '  failed: %s\n  logs:   %s/\n' "${FAILED[*]}" "${LOG_DIR}"
 echo
-python "${REPORT}" report "${TRACKER}" "${EXPERIMENT}"
+"${REPORT[@]}" report "${TRACKER}" "${EXPERIMENT}"
 
 # A failed run is a failed sweep for CI purposes, but only AFTER the report — the comparison is
 # the deliverable and it is still worth reading when one backend is broken.

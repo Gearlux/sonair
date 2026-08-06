@@ -1125,8 +1125,8 @@ jax / mlx     loss              val_loss             val_accuracy
 ```
 
 The report printed the union of those keys: one quantity in four columns, every row
-mostly blank, and `sweep_report.py` said so in its own source ("the backends
-genuinely disagree on naming").
+mostly blank, and the report said so in its own source ("the backends genuinely
+disagree on naming"). That report is now `matrainer.sweep`.
 
 **Decision.** The fix is split by WHERE each name is decided, and the split is the
 whole point — neither half can do the other's job.

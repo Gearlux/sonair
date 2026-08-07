@@ -1,0 +1,59 @@
+# The sonair backend sweep — the MATRIX, declaratively.
+#
+#   matrainer sweep backends examples/sweep/sweep.yaml                 # frameworks × models, one tracker
+#   matrainer sweep backends examples/sweep/sweep.yaml --tracker csv   # …into the CSV backend
+#   matrainer sweep trackers examples/sweep/sweep.yaml                 # every tracker, one framework
+#   matrainer sweep all      examples/sweep/sweep.yaml                 # frameworks × models × trackers
+#   matrainer sweep backends examples/sweep/sweep.yaml --dry-run       # print the commands, run nothing
+#
+# This file is the PROJECT's half of the sweep — which cells exist, what each needs installed,
+# which model variants it runs. The MACHINERY (probing, one subprocess per cell, experiment
+# naming from the tracker, failure isolation, the report) is matrainer's
+# (`matrainer.sweep.runner`); each cell runs through the generic `matrainer train`, ONE
+# process per run — Keras 3 binds its compute engine at import, so `keras` and `tensorflow`
+# cannot share an interpreter, and a subprocess per cell also contains `import fastai`'s
+# process-wide switch of the multiprocessing start method.
+#
+# THIRTEEN cells: every installed backend twice where the shared conv spec exists beside a
+# model-zoo backbone — the zoo rows compare loops on real weights, the convnet rows compare
+# FRAMEWORKS on the same 93,696(+129·C)-parameter network. `huggingface` has no convnet
+# (a `transformers.Trainer` drives models that compute their own loss — a bare-logits convnet
+# does not satisfy that contract) and jax/mlx have no zoo (there is none for their engines).
+#
+# NO ROW PINS AN ENGINE: classification's metrics are per-IMAGE (the per-pixel scatter that
+# forces deltaid's keras pin never happens here), and the `tensorflow` row's pin is set by the
+# generic runner itself (`--framework tensorflow` → KERAS_BACKEND).
+
+config: all_backends.yaml
+epochs: 3
+
+frameworks:
+  - name: lightning
+    requires: [pytorch_lightning]
+    models: [zoo, convnet]
+  - name: torch
+    models: [zoo, convnet]
+  - name: fastai
+    models: [zoo, convnet]
+  - name: keras
+    models: [zoo, convnet]
+  - name: tensorflow
+    models: [zoo, convnet]
+  - name: huggingface
+    requires: [transformers]
+    models: [zoo]
+  - name: jax
+    requires: [flax]
+    models: [convnet]
+  - name: mlx
+    models: [convnet]
+
+models:
+  - name: zoo          # the config's default backbone per engine — appends no flag
+  - name: convnet      # the shared conv spec, reachable via each framework block's nested
+    flags: [--model, convnet]  # `!scope:model=convnet`
+
+trackers: [mlflow, csv]
+
+tracker_setup:
+  mlflow: [aisland, mlflow, start]

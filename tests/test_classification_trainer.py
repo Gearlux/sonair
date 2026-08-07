@@ -746,9 +746,9 @@ def test_multilabel_metrics_are_sized_by_num_labels() -> None:
     """torchmetrics sizes multi-label metrics by `num_labels`, multi-class by `num_classes`."""
     trainer = LightningClassifier(model=_TinyClassifier(num_classes=3), num_classes=3)
     trainer.multilabel = True
-    assert trainer._metric_dims() == {"num_labels": 3}
+    assert trainer._metric_flow_dims() == {"num_labels": 3}
     trainer.multilabel = False
-    assert trainer._metric_dims() == {"num_classes": 3}
+    assert trainer._metric_flow_dims() == {"num_classes": 3}
 
 
 def test_multilabel_class_weights_count_every_label() -> None:
@@ -834,10 +834,10 @@ def test_the_weight_STATISTIC_comes_from_recordstream() -> None:
 
     from recordstream import inverse_frequency_weights
 
-    from sonair import lightning_classifier
+    from sonair import classification_base
 
-    assert lightning_classifier.inverse_frequency_weights is inverse_frequency_weights
-    source = inspect.getsource(lightning_classifier)
+    assert classification_base.inverse_frequency_weights is inverse_frequency_weights
+    source = inspect.getsource(classification_base)
     assert "def inverse_frequency_weights" not in source, "the arithmetic must not be re-derived here"
 
 
@@ -964,10 +964,11 @@ def test_log_dict_receives_the_scalars_only() -> None:
 def test_the_confusion_matrix_is_rendered_at_validation_epoch_end(monkeypatch: pytest.MonkeyPatch) -> None:
     """It is reported instead — as a table, through matrainer's renderer.
 
-    Patched on `sonair.lightning_classifier`, not on `matrainer.tracking.render`: an imported
-    name is a BINDING in the importing module, so patching the definition site would not be seen.
+    Since the 2026-08-06 consolidation the reporting loop is matrainer's `report_matrices`
+    (called via the task's `_report_nonscalars` hook), which reads the renderer as a module
+    global of `matrainer.tracking.render` — so that is the module to patch.
     """
-    from sonair import lightning_classifier as mod
+    from matrainer.tracking import render as mod
 
     rendered: List[Any] = []
     monkeypatch.setattr(mod, "render_matrix_as_table", lambda name, matrix, names: rendered.append((name, names)))
@@ -983,7 +984,7 @@ def test_the_confusion_matrix_is_rendered_at_validation_epoch_end(monkeypatch: p
 
 def test_nothing_is_rendered_during_the_sanity_check(monkeypatch: pytest.MonkeyPatch) -> None:
     """Lightning's sanity pass runs two batches through an untrained model — not worth a table."""
-    from sonair import lightning_classifier as mod
+    from matrainer.tracking import render as mod
 
     rendered: List[Any] = []
     monkeypatch.setattr(mod, "render_matrix_as_table", lambda *a: rendered.append(a))
@@ -1248,8 +1249,9 @@ def test_declares_trained_model_output() -> None:
     specs = {s["name"]: s for s in output_specs(LightningClassifier)}
     assert "trained_model" in specs
     assert specs["trained_model"]["type"] == "Module"
-    # The marker rides on the getter so StreamStudio / form-spec can read it.
-    fget = LightningClassifier.__dict__["trained_model"].fget
+    # The marker rides on the getter so StreamStudio / form-spec can read it. Inherited from
+    # the torch family base since 2026-08-06, so the lookup walks the MRO rather than __dict__.
+    fget = next(k.__dict__["trained_model"].fget for k in LightningClassifier.__mro__ if "trained_model" in k.__dict__)
     assert getattr(fget, "__confluid_output__", False) is True
 
 

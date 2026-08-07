@@ -252,16 +252,22 @@ def test_a_confusion_matrix_is_rendered_rather_than_dropped(monkeypatch: pytest.
 
     A non-scalar metric would therefore vanish without a trace, which is worse than not
     supporting it. It is rendered into the log instead; the scalars beside it are unaffected.
-    Patched on `sonair.torch_classifier`, the module that BINDS the name.
+    Patched on `sonair.classification_torch`, the module that BINDS the fan-out since the
+    shared-base consolidation (the `_report_nonscalars` hook hands the computed mapping to
+    matrainer's `report_matrices`).
     """
     from confluid import LazyClass
     from torchmetrics import Metric
     from torchmetrics.classification import MulticlassConfusionMatrix
 
-    from sonair import torch_classifier as mod
+    from sonair import classification_torch as hooks_mod
 
     rendered: List[Any] = []
-    monkeypatch.setattr(mod, "render_matrix_as_table", lambda name, matrix, names: rendered.append(name))
+    monkeypatch.setattr(
+        hooks_mod,
+        "report_matrices",
+        lambda values, names, trackers, step=None, plot=False: rendered.append(sorted(values)),
+    )
 
     clf = _clf(train_set=Stream(source=_records(16)), num_classes=NUM_CLASSES)
     clf.metrics = {"confusion": LazyClass[Metric](MulticlassConfusionMatrix)}
@@ -271,7 +277,7 @@ def test_a_confusion_matrix_is_rendered_rather_than_dropped(monkeypatch: pytest.
     collection.update(torch.randn(8, NUM_CLASSES), torch.randint(0, NUM_CLASSES, (8,)))
 
     assert clf._epoch_metrics(collection) == {}  # nothing scalar to report
-    assert rendered == ["train/confusion"]
+    assert rendered == [["train/confusion"]]
 
 
 def test_a_rendered_matrix_reaches_every_wired_tracker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -299,7 +305,8 @@ def test_a_rendered_matrix_reaches_every_wired_tracker(monkeypatch: pytest.Monke
     assert collection is not None
     collection.update(torch.randn(8, NUM_CLASSES), torch.randint(0, NUM_CLASSES, (8,)))
 
-    clf._epoch_metrics(collection, [tracker], step=2)  # type: ignore[list-item]
+    clf.trackers = [tracker]  # type: ignore[list-item]
+    clf._epoch_metrics(collection, step=2)
 
     assert len(tracker.texts) == 1
     name, table, step = tracker.texts[0]
@@ -430,7 +437,7 @@ def test_balancing_is_skipped_for_a_loss_that_cannot_take_weights() -> None:
     clf = _clf(train_set=Stream(source=_records(8)), balance_classes=True)
     clf.loss_fn = _NoWeight()
 
-    assert clf._accepts_class_weights() is False
+    assert clf.accepts_class_weights() is False
     clf.initialize()
     assert clf.class_weights is None
 
@@ -498,11 +505,15 @@ def test_the_outputs_raise_before_the_run() -> None:
 
 
 def test_a_non_module_in_the_model_slot_fails_during_setup() -> None:
-    """During SETUP, not minutes into a fit — the failure a wrong `model:` should produce."""
+    """During SETUP, not minutes into a fit — the failure a wrong `model:` should produce.
+
+    The check lives in the shared loop base's device bracket (`_finalize_device`), which
+    `run()` applies right after the task's `initialize()` — still before any batch is read.
+    """
     clf = _clf(model="not-a-module", train_set=Stream(source=_records(4)), num_classes=NUM_CLASSES)
 
     with pytest.raises(TypeError, match="must be a torch.nn.Module"):
-        clf.initialize()
+        clf.run()
 
 
 # --------------------------------------------------------------------------- #

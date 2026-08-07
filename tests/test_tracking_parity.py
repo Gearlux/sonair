@@ -33,6 +33,37 @@ BACKENDS = [
 ]
 
 
+def built_on_shared_base(source: str) -> bool:
+    """The 2026-08-06 consolidation: a backend on a shared machinery base inherits its
+    tracking wiring — `runnable=self` + provenance via `TrackingCallback` in `_build_trainer`
+    (lightning) / `_log_run_context` + the per-epoch `tracker.log_metrics` and terminal
+    `capture_log_file` in `fit` (the owned loop), metric forwarding, the naming knob's
+    application — all pinned in matrainer's own suite. What such a module must not do is
+    SHADOW that wiring."""
+    return "LightningRunnable" in source or "TorchLoopRunnable" in source
+
+
+def assert_does_not_shadow_the_tracking(stem: str, source: str) -> None:
+    shared = (
+        # the Lightning machinery base's wiring
+        "_build_trainer",
+        "_run_eval",
+        "_report_epoch_metrics",
+        # the owned-loop machinery base's wiring
+        "fit",
+        "_score",
+        "_epoch_metrics",
+        "_log_run_context",
+        # both
+        "_live_trackers",
+    )
+    for name in shared:
+        assert f"def {name}" not in source, (
+            f"{stem} is built on the shared base but shadows {name} — the inherited tracking "
+            "wiring no longer applies; extend via the hooks instead."
+        )
+
+
 def module_source(stem: str) -> str:
     return (SOURCE_DIR / f"{stem}.py").read_text()
 
@@ -61,7 +92,11 @@ def called_names(source: str) -> Set[str]:
 @pytest.mark.parametrize("stem", BACKENDS)
 def test_every_backend_hands_matrainer_the_runnable(stem: str) -> None:
     """`runnable=self`, never a params dict the backend transcribes for itself."""
-    entries = calls_with_runnable_self(module_source(stem))
+    source = module_source(stem)
+    if built_on_shared_base(source):
+        assert_does_not_shadow_the_tracking(stem, source)
+        return
+    entries = calls_with_runnable_self(source)
     assert entries, (
         f"{stem} does not pass `runnable=self` to any tracking entry point. "
         "Hand matrainer the object so the hyperparameters come from its one derivation "
@@ -73,7 +108,11 @@ def test_every_backend_hands_matrainer_the_runnable(stem: str) -> None:
 @pytest.mark.parametrize("stem", BACKENDS)
 def test_every_backend_captures_run_provenance(stem: str) -> None:
     """Wiring `trackers:` must record the run, not just its class names."""
-    names = called_names(module_source(stem))
+    source = module_source(stem)
+    if built_on_shared_base(source):
+        assert_does_not_shadow_the_tracking(stem, source)
+        return
+    names = called_names(source)
     entry_points = {"log_run_context", "TrackingCallback", "keras_tracking_callback"}
     assert names & entry_points, (
         f"{stem} wires trackers but never captures run provenance — no git state, no config, "
@@ -94,6 +133,10 @@ def test_every_backend_finishes_its_manifest(stem: str) -> None:
     together rather than given a call each.
     """
     source = module_source(stem)
+    if built_on_shared_base(source):
+        # The lightning base wires TrackingCallback, whose end hook owns the lifecycle; the
+        # owned-loop base's `fit()` calls `capture_log_file` itself. Both pinned upstream.
+        return
     names = called_names(source)
     if names & {"TrackingCallback", "keras_tracking_callback"}:
         return  # the callback owns the lifecycle
@@ -159,6 +202,9 @@ def test_every_backend_forwards_metrics_to_trackers(stem: str) -> None:
     framework's own history is replayed after the fit.
     """
     source = module_source(stem)
+    if built_on_shared_base(source):
+        assert_does_not_shadow_the_tracking(stem, source)
+        return
     names = called_names(source)
     forwards = "log_metrics" in names
     via_callback = bool(names & {"TrackingCallback", "keras_tracking_callback"})
@@ -196,6 +242,9 @@ def test_every_backend_takes_the_metric_naming_knob(stem: str) -> None:
 def test_every_backend_applies_the_naming_it_was_given(stem: str) -> None:
     """Declaring the slot is half of it — the metrics it reports have to go THROUGH it."""
     source = module_source(stem)
+    if built_on_shared_base(source):
+        assert_does_not_shadow_the_tracking(stem, source)
+        return
     names = called_names(source)
 
     assert "as_metric_names" in names, (
@@ -343,6 +392,12 @@ def test_every_backend_puts_its_METRICS_on_the_trackers() -> None:
     comparison, every tracker UI and every sweep."""
     for name, marker in METRIC_BRIDGES.items():
         source = (SOURCE_DIR / name).read_text()
+        if built_on_shared_base(source):
+            # The bridge lives in the shared machinery base (the `TrackerLogger` adapters in
+            # `_build_trainer` / the `tracker.log_metrics` calls in the loop's `fit` and
+            # `_score`) — pinned in matrainer's own suite; no shadow = it applies.
+            assert_does_not_shadow_the_tracking(name, source)
+            continue
         assert marker in source, f"{name} never reaches a tracker's metric channel via {marker}"
 
 

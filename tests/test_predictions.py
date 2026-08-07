@@ -13,9 +13,9 @@ from typing import Any, Dict, List
 import pytest
 import torch
 import torch.nn as nn
-from recordstream import Image, Label, collate_records
+from recordstream import Image, Label, collate_records, per_record_predictions
 
-from sonair.lightning_classifier import LightningClassifier, _per_record_predictions
+from sonair.lightning_classifier import LightningClassifier
 
 
 class _TinyClassifier(nn.Module):
@@ -131,34 +131,35 @@ def test_the_real_sink_consumes_the_output() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# _per_record_predictions — the shapes a model can hand back
+# per_record_predictions — the shapes a model can hand back (recordstream's since 2026-08-06;
+# these stay as the torch-typed cases, the numpy ones live in recordstream/tests/test_batch.py)
 # --------------------------------------------------------------------------- #
 
 
 def test_a_batched_mapping_is_sliced_row_wise() -> None:
-    sliced = _per_record_predictions({"probs": torch.zeros(3, 2), "class_idx": torch.zeros(3)})
+    sliced = per_record_predictions({"probs": torch.zeros(3, 2), "class_idx": torch.zeros(3)})
     assert len(sliced) == 3
     assert sliced[0]["probs"].shape == (2,)
 
 
 def test_a_list_is_already_per_record() -> None:
-    assert _per_record_predictions([{"a": 1}, {"a": 2}]) == [{"a": 1}, {"a": 2}]
+    assert per_record_predictions([{"a": 1}, {"a": 2}]) == [{"a": 1}, {"a": 2}]
 
 
 def test_a_predictions_wrapper_is_unwrapped() -> None:
     """A detector's `{"predictions": [...]}` convention."""
-    assert _per_record_predictions({"predictions": [{"boxes": 1}, {"boxes": 2}]}) == [{"boxes": 1}, {"boxes": 2}]
+    assert per_record_predictions({"predictions": [{"boxes": 1}, {"boxes": 2}]}) == [{"boxes": 1}, {"boxes": 2}]
 
 
 def test_a_ragged_mapping_falls_back_to_one_prediction() -> None:
     """Disagreeing lengths mean it is not a batch — pass it through rather than mis-slicing."""
     ragged = {"probs": torch.zeros(3, 2), "extra": torch.zeros(5)}
-    assert _per_record_predictions(ragged) == [ragged]
+    assert per_record_predictions(ragged) == [ragged]
 
 
 def test_a_bare_value_is_one_prediction() -> None:
     tensor = torch.zeros(3)
-    assert _per_record_predictions(tensor) == [tensor]
+    assert per_record_predictions(tensor) == [tensor]
 
 
 if __name__ == "__main__":

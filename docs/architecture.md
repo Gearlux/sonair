@@ -1319,6 +1319,8 @@ class LightningClassifier(ClassificationTorchHooks, LightningRunnable):
 
 **Amendment (2026-08-07).** The bare-torch backend joined the same shape: ``TorchClassifier`` is `(ClassificationTorchHooks, matrainer.torch.TorchLoopRunnable)` — the same task hooks, a different machinery base (the owned epoch loop instead of a `pl.Trainer`), plus the `_after_fit` epilogue saving the class names beside `model.pt`. Its `evaluate` was harmonized to score the VAL split (it used to delegate to `test()`).
 
+**Amendment (2026-08-07, second).** The fastai backend joined: ``FastaiClassifier`` is `(ClassificationTorchHooks, matrainer.fastai.FastaiRunnable)` — the same task hooks, the Learner machinery base, plus the task's fastai vocabulary as hooks (`_default_fastai_loss` — the `*Flat` pair, `_default_fastai_metrics`, `_metric_aliases` — the `f1_*` configured forms) and the `_after_fit` class-names epilogue. Its `evaluate` was harmonized to score the VAL split.
+
 **What you may change.** Hook implementations and task state freely; the concrete signature
 (it is the config surface). What you may not do: shadow the inherited machinery
 (`_build_trainer` / `_live_trackers` / `_run_eval` / `_report_epoch_metrics`) — extend through

@@ -97,11 +97,12 @@ def test_every_backend_uses_the_shared_combination_rule(stem: str) -> None:
     moving between them would silently change which metrics it computes.
     """
     source = (SOURCE_DIR / f"{stem}.py").read_text()
-    if "LightningRunnable" in source or "TorchLoopRunnable" in source:
-        # Built on a shared machinery base (2026-08-06), whose `_build_split_metrics`
-        # applies `merge_metric_specs` — pinned in matrainer's own suite; the module must
-        # not shadow the builder with an inline re-derivation.
+    if "LightningRunnable" in source or "TorchLoopRunnable" in source or "FastaiRunnable" in source:
+        # Built on a shared machinery base (2026-08-06), whose `_build_split_metrics` /
+        # `_learner_metrics` applies the shared combination rule — pinned in matrainer's
+        # own suite; the module must not shadow it with an inline re-derivation.
         assert "def _build_split_metrics" not in source, f"{stem} shadows the shared metric builder"
+        assert "def _learner_metrics" not in source, f"{stem} shadows the shared combination rule"
         return
     called = {
         (node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", ""))

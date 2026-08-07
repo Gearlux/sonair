@@ -40,7 +40,7 @@ def built_on_shared_base(source: str) -> bool:
     `capture_log_file` in `fit` (the owned loop), metric forwarding, the naming knob's
     application — all pinned in matrainer's own suite. What such a module must not do is
     SHADOW that wiring."""
-    return "LightningRunnable" in source or "TorchLoopRunnable" in source
+    return "LightningRunnable" in source or "TorchLoopRunnable" in source or "FastaiRunnable" in source
 
 
 def assert_does_not_shadow_the_tracking(stem: str, source: str) -> None:
@@ -360,7 +360,15 @@ def test_the_forking_backends_warm_their_splits_in_the_parent(stem: str) -> None
     worker (`_share_filename_: only available on CPU`). Warming in the parent is, so it is pinned
     here rather than left to whoever next edits `_initialize_fit`.
     """
-    assert "ensure_materialized" in called_names(module_source(stem)), (
+    source = module_source(stem)
+    if built_on_shared_base(source):
+        # The warm lives in the shared fastai base's data seams (`_dataloaders` /
+        # `_validate_split` / `predict` all `_prepare` — normalize + materialize — in the
+        # parent), pinned in matrainer's own suite; the module must not shadow them.
+        for name in ("_dataloaders", "_validate_split", "predict", "_prepare"):
+            assert f"def {name}" not in source, f"{stem} shadows the shared (warming) {name}"
+        return
+    assert "ensure_materialized" in called_names(source), (
         f"{stem} forks its DataLoader workers but never warms its splits in the parent — call "
         "recordstream.ensure_materialized() beside ensure_record_dataset() in _initialize_fit()."
     )

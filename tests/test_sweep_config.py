@@ -76,6 +76,19 @@ def target_name(value: Any) -> Optional[str]:
     return str(target).rsplit(".", 1)[-1]
 
 
+def test_the_sweep_spec_declares_exactly_this_matrix() -> None:
+    """The declarative spec (`matrainer sweep`'s input) and this table must not drift — a
+    cell in one and not the other is either a run nobody checks or a check nothing runs."""
+    from matrainer.sweep import load_spec
+
+    spec = load_spec(SWEEP.parent / "sweep.yaml")
+    default = spec.models[0].name if spec.models else None
+    declared = {
+        (row.name, model) for row in spec.frameworks for model in (row.models or ([default] if default else []))
+    }
+    assert declared == set(MATRIX)
+
+
 @pytest.mark.parametrize("cell", sorted(MATRIX), ids=lambda c: f"{c[0]}-{c[1]}")
 def test_every_backend_resolves_to_its_own_runnable_and_model(cell: Tuple[str, str]) -> None:
     """The regression pin for the replace-not-merge trap described in the module docstring."""

@@ -19,10 +19,17 @@ pytest.importorskip("fastai", reason="the fastai backend needs sonair[fastai]")
 
 import torch  # noqa: E402 - after the skip, so a fastai-less install never imports it for this file
 from confluid import Fluid, LazyClass, flow, lazy_param_names  # noqa: E402
+from matrainer.fastai import as_opt_func as _as_opt_func  # noqa: E402
+from matrainer.fastai import named_values as _named_values  # noqa: E402
 from matrainer.metric_names import MetricNames  # noqa: E402
 from torch.utils.data import DataLoader  # noqa: E402
 
-from sonair.fastai_classifier import FastaiClassifier, _as_metric, _as_opt_func, _named_values  # noqa: E402
+from sonair.fastai_classifier import FastaiClassifier  # noqa: E402
+
+
+def _as_metric(name: str) -> Any:
+    """Resolve a metric the way a built classifier does — the base's alias-first resolution."""
+    return FastaiClassifier(model=torch.nn.Identity())._resolve_metric(name)
 
 
 class _CaptureSink:
@@ -540,8 +547,8 @@ def test_eval_verbs_without_a_test_set_are_clear_errors(method: str) -> None:
 
 
 def test_a_non_module_model_is_a_clear_error() -> None:
-    """Raised at the flow site in `initialize()`, so a wrong model fails during SETUP rather
-    than several minutes into a fit inside `Learner`.
+    """Raised at Learner assembly (`_learner_model`), which `run()` reaches right after the
+    task's `initialize()` — still during SETUP, before any batch is trained on.
 
     The fit path is what this covers, because it is the only one that reaches the check: an
     eval task resolves `num_classes` OFF the model first (`_initialize_eval`) and so rejects a
@@ -549,7 +556,7 @@ def test_a_non_module_model_is_a_clear_error() -> None:
     """
     clf = FastaiClassifier(model=cast(Any, "not a model"), train_set=_stream(_records(4)), num_classes=3)
     with pytest.raises(TypeError, match="nn.Module"):
-        clf.initialize()
+        clf.run()
 
 
 # ---------------------------------------------------------------------------

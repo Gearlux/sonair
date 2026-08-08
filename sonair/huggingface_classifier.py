@@ -1,31 +1,30 @@
 """``HuggingFaceClassifier`` — the same classification run, driven by ``transformers.Trainer``.
 
-The fifth backend, and the one that swaps the most while writing the least. Keras and
-TensorFlow bring their own array libraries; fastai brings its own loop over torch. This brings
-somebody else's *whole training program*: ``Trainer`` owns the epoch, the optimizer, the
-scheduler, gradient accumulation, mixed precision and distribution (through Accelerate). What
-sonair supplies is the data, the run identity, and the artifacts — the things that are the
-task's, not the engine's.
+Since P6 (2026-08-08) this is ``(ClassificationBase, matrainer.huggingface.
+HuggingFaceRunnable)``: the machinery — the deferred ``TrainingArguments`` / ``Trainer``
+slots, the run-time argument FLOOR, the entry points with the plain-function tracking hookup,
+the ``log_history`` replay, the record-loader predict walk — lives in
+:class:`matrainer.huggingface.trainer.HuggingFaceRunnable`; the label pipeline (the
+multilabel peek, ``LabelMap`` fitting/encoding, ``num_classes`` resolution) in
+:class:`~sonair.classification_base.ClassificationBase`. What stays HERE is classification's
+huggingface vocabulary:
 
-So what is written here is small and specific:
-
-* **:meth:`HuggingFaceClassifier._to_hf_batch`** — one collated record batch to the
-  ``{"pixel_values", "labels"}`` mapping ``Trainer`` feeds a model. The twin of the Lightning
-  backend's ``_targets``, the Keras backend's ``_to_arrays`` and the fastai backend's
-  ``_to_tuple``, handed to ``Trainer`` as its ``data_collator`` exactly as those are handed to
-  a ``DataLoader``. It is the whole of what this backend says about batches.
-* **``TrainingArguments`` from the shared knobs** — ``max_epochs`` → ``num_train_epochs``,
-  ``batch_size`` → ``per_device_train_batch_size``. One flat config drives this backend and
-  every other.
-* The task dispatch, and a predict loop that keeps the metadata (below).
+* **:meth:`_to_hf_batch`** — one collated record batch to ``{"pixel_values", "labels"}``:
+  int64 ids for a single-label target, FLOAT multi-hot for a multi-label one, because
+  ``problem_type="multi_label_classification"`` routes to ``BCEWithLogitsLoss``, which
+  compares against float targets.
+* **``initialize()`` sets ``config.problem_type``** on the built model when the peek says
+  multi-label — on the CLASSIFIER, because only it has peeked the targets; the model wrapper
+  never sees the data.
+* **The metric names** (``accuracy`` / ``accuracy_multi`` / ``f1_macro``) — plain functions
+  over ``(logits, labels)`` numpy arrays, resolved by :meth:`_metrics_hook`. There is no
+  class for a ``!class:`` tag to name, the same situation the fastai names are in.
+* **The class names persist in :meth:`_after_fit`** — beside the sidecar, onto the trackers.
 
 **There is no loss set for this backend, and that is a fact about transformers rather than an
 omission.** An ``AutoModelForImageClassification`` handed ``labels=`` computes its own loss
-inside ``forward`` and returns it on the output object — picking it from ``config.problem_type``
-(single- vs multi-label). There is nothing for a config to wire, so there is no
-``huggingface_classification.py`` (``docs/architecture.md`` §5: a backend contributes a module
-only where it contributes something a config can WIRE). What a config CAN choose — which is
-what the sentinel ``metrics`` slot is for — is what gets reported.
+inside ``forward``, picking it from ``config.problem_type`` — so there is nothing a config
+could wire and therefore no ``huggingface_classification.py``.
 
 Minimal flat YAML::
 
@@ -37,39 +36,29 @@ Minimal flat YAML::
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union, cast
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union, cast
 
 import numpy as np
 import torch
-from confluid import Fluid, Lazy, LazyClass, Mandatory, configurable, flow, output
+from confluid import Lazy, Mandatory, configurable, flow
 from loggair import get_logger
-from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.artifacts import save_class_names
+from matrainer.huggingface.trainer import HuggingFaceCallback, HuggingFaceRunnable
 from matrainer.metric_functions import accumulate_confusion, macro_f1, zero_confusion
-from matrainer.metric_names import MetricNames, as_metric_names
+from matrainer.metric_names import MetricNames
 from matrainer.metric_slots import merge_metric_specs
-from matrainer.run_names import generate_run_name, run_prefix
-from matrainer.tracking.base import Tracker, as_tracker_list
-from matrainer.tracking.provenance import capture_log_file, log_run_context
+from matrainer.tracking.base import Tracker
 from recordstream import (
-    ClassificationOutput,
     LabelMap,
-    PredictionsSink,
     RecordSource,
-    batch_metadata,
     batch_tensor,
     class_names,
     classification_output,
     collate_records,
-    ensure_materialized,
-    ensure_record_dataset,
-    first_value,
-    is_class_id,
-    iter_key,
     multi_hot,
 )
-from recordstream.runnable import ProgressReporting, TorchRunner, entrypoint, run_entrypoint
-from torch.utils.data import DataLoader
 
+from sonair.classification_base import ClassificationBase
 from sonair.huggingface_model import HuggingFaceModel
 
 logger = get_logger(__name__)
@@ -86,22 +75,11 @@ HuggingFaceMetric = Union[str, Callable[[np.ndarray, np.ndarray], float]]
 #: What the ``model`` slot admits: the :class:`~sonair.huggingface_model.HuggingFaceModel`
 #: wrapper (the usual wiring — it builds the checkpoint at ``flow()`` time with the
 #: dataset-derived width), or a live ``transformers`` model handed in directly, which
-#: :meth:`HuggingFaceClassifier._network` unwraps to either way. The second arm is
-#: ``torch.nn.Module`` rather than ``transformers.PreTrainedModel`` because every
-#: ``AutoModelFor*`` IS one, and naming the transformers class would force a module-level
-#: ``import transformers`` this module deliberately defers to the methods that need it.
+#: ``_network()`` unwraps to either way. The second arm is ``torch.nn.Module`` rather than
+#: ``transformers.PreTrainedModel`` because every ``AutoModelFor*`` IS one, and naming the
+#: transformers class would force a module-level ``import transformers`` this module
+#: deliberately defers to the machinery's method bodies.
 HuggingFaceNetwork = Union[HuggingFaceModel, torch.nn.Module]
-
-#: What the ``callbacks`` slot holds. This is the ONE backend whose element type stays open,
-#: and for the same reason the union above names ``torch.nn.Module``: the honest type is
-#: ``transformers.TrainerCallback``, and naming it would force the module-level
-#: ``import transformers`` this module defers. Unlike the model slot there is no lighter
-#: standin — a ``TrainerCallback`` is a plain object with ``on_*`` hooks and inherits nothing
-#: importable from elsewhere — so the type lives in the docstring instead.
-HuggingFaceCallback = Any
-
-if TYPE_CHECKING:  # the deferred slots' real types, without the module-level import
-    from transformers import Trainer, TrainingArguments
 
 __all__ = ["ClassifierTask", "HuggingFaceCallback", "HuggingFaceClassifier", "HuggingFaceNetwork"]
 
@@ -146,7 +124,7 @@ _METRICS: Dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
 
 
 @configurable(task="classification", role="trainer", framework="huggingface")
-class HuggingFaceClassifier(TorchRunner, ProgressReporting):
+class HuggingFaceClassifier(ClassificationBase, HuggingFaceRunnable):
     """Train, evaluate or predict an image classifier with ``transformers.Trainer``.
 
     Args:
@@ -189,9 +167,10 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
 
     Post-construction slots (YAML / broadcasting): ``training_arguments`` (every
     ``transformers.TrainingArguments`` knob the ctor does not restate — gradient accumulation,
-    mixed precision, warmup, scheduler, …), ``trainer`` (the ``transformers.Trainer`` itself:
-    ``optimizers``, ``processing_class``, a Trainer SUBCLASS), ``test_loader`` (the record-dict
-    ``DataLoader`` :meth:`predict` walks), ``predictions_sink``, ``metrics_sidecar_path``.
+    mixed precision, warmup, scheduler, …; the derived knobs are a run-time FLOOR, so an
+    override ADDS to them), ``trainer`` (the ``transformers.Trainer`` itself: ``optimizers``,
+    ``processing_class``, a Trainer SUBCLASS), ``test_loader`` (the record-dict ``DataLoader``
+    :meth:`predict` walks), ``predictions_sink``, ``metrics_sidecar_path``.
     """
 
     def __init__(
@@ -221,205 +200,62 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
         test_metrics: Optional[Sequence[HuggingFaceMetric]] = None,
         metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
-        super().__init__()
-        # `HuggingFaceNetwork`, not `Lazy[HuggingFaceNetwork]`: the deferred-ness is declared
-        # once, on the ctor param, which is what `lazy_param_names` / `to_pydantic` read;
-        # restating it here would only make the attribute a union no method could read through.
-        self.model: HuggingFaceNetwork = cast(HuggingFaceNetwork, model)
-        self.train_set: Optional[Lazy[RecordSource]] = train_set
-        self.val_set: Optional[Lazy[RecordSource]] = val_set
-        self.test_set: Optional[Lazy[RecordSource]] = test_set
-        self.task: ClassifierTask = task
-        self.num_classes = int(num_classes) if num_classes is not None else None
-        self.max_epochs = max_epochs
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        # Internal only: this backend's own tracking callback is appended at run time.
-        # Stored VERBATIM like `trackers` (lazy-init): entries may be deferred `Fluid`
-        # markers, and they are flowed where they are used.
-        self.callbacks: Optional[List[HuggingFaceCallback]] = callbacks
-        self.experiment_name = experiment_name
-        self.run_name = run_name if run_name is not None else generate_run_name(prefix=run_prefix(task))
-        self.input_key = str(input_key)
-        self.target_key = str(target_key)
-        self.label_map = label_map
-        self.learning_rate = learning_rate
-        self.weight_decay = weight_decay
-        self.output_dir = output_dir
-        self.report_to = report_to
-        # Sentinel, for the same reason every other backend uses one: the right metric depends
-        # on whether the targets are single- or multi-label, which is only known once
-        # `initialize()` has peeked the data. A live default here could not be told apart from
-        # a user's explicit choice.
-        self.metrics: Optional[Sequence[HuggingFaceMetric]] = metrics
-        # Per-split ADDITIONS, merged over `metrics` by the shared rule. There is no
-        # `train_metrics`, and that is a `transformers.Trainer` fact: `compute_metrics` is
-        # its EVALUATION hook, so a train-only metric would never be called.
-        self.val_metrics: Optional[Sequence[HuggingFaceMetric]] = val_metrics
-        self.test_metrics: Optional[Sequence[HuggingFaceMetric]] = test_metrics
-        self.multilabel: bool = False
-        # The three transformers objects this backend constructs, all deferred so a config can
-        # reach every knob they take. `TrainingArguments` alone has ~100 of them (gradient
-        # accumulation, mixed precision, warmup, deepspeed, …) and this class restates SEVEN —
-        # while it swaps the MOST of any backend, so unreachable knobs cost the most here.
-        # Everything derivable at construction is baked; what only the run knows arrives as a
-        # flow kwarg (`output_dir=` reads `metrics_sidecar_path`, a post-construction slot).
-        #
-        # The targets are STRING paths, and that is load-bearing rather than stylistic: this
-        # module has no top-level `import transformers` (the methods that need it import it in
-        # their bodies), and confluid resolves a dotted target at flow time — so the slots stay
-        # declarable without dragging the library into every `import sonair`.
-        self.test_loader: Lazy[DataLoader[Any]] = LazyClass(
-            DataLoader,
+        super().__init__(
+            model=model,
+            train_set=train_set,
+            test_set=test_set,
+            task=task,
+            max_epochs=max_epochs,
             batch_size=batch_size,
-            shuffle=False,
             num_workers=num_workers,
-            collate_fn=collate_records,
-        )
-        self.training_arguments: Lazy["TrainingArguments"] = LazyClass(
-            "transformers.TrainingArguments",
-            num_train_epochs=max_epochs,
-            per_device_train_batch_size=batch_size,
-            per_device_eval_batch_size=batch_size,
             learning_rate=learning_rate,
             weight_decay=weight_decay,
-            dataloader_num_workers=num_workers,
-            # A generic map-style source is not a `datasets.Dataset`, so Trainer must not try to
-            # drop "unused" columns by inspecting the model signature — our collate already
-            # produces exactly the two keys the model takes.
-            remove_unused_columns=False,
             report_to=report_to,
-            run_name=self.run_name,
-            disable_tqdm=True,
-            save_strategy="no",
+            output_dir=output_dir,
+            trackers=trackers,
+            callbacks=callbacks,
+            experiment_name=experiment_name,
+            run_name=run_name,
+            input_key=input_key,
+            target_key=target_key,
+            metrics=metrics,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            metric_names=metric_names,
         )
-        self.trainer: Lazy["Trainer"] = LazyClass("transformers.Trainer")
-        self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
-        self.metrics_sidecar_path: Optional[str] = None
-        # Stored VERBATIM (lazy-init mandate: the constructor does no work). It may hold a
-        # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
-        # and flows it at run time.
-        self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
-        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
-        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
-        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
+        self.val_set = val_set
+        self.num_classes = int(num_classes) if num_classes is not None else None
+        self.label_map = label_map
+        self.multilabel: bool = False
+        # Balancing is a loss-side convention and this backend has no loss slot — the model
+        # computes its own from `problem_type` — so the base's capability probe answers no.
+        self.balance_classes = False
         self._class_names: Optional[List[str]] = None
-        self._computed_metrics: Dict[str, float] = {}
 
-    @property
-    def __needs_autograd__(self) -> bool:  # type: ignore[override]  # dynamic per-task override
-        """Only ``fit`` optimizes — an evaluate/predict run is happy under inference mode."""
-        return self.task == "fit"
-
-    # ---- run dispatch ------------------------------------------------------- #
-    def run(self) -> None:
-        self.initialize()
-        # The `@entrypoint` markers below ARE the dispatch table (recordstream docs/runnable.md).
-        run_entrypoint(self, self.task)
-
-    # ---- setup -------------------------------------------------------------- #
+    # ---- setup: the label pipeline is the task base's; the problem_type is ours ------------- #
     def initialize(self) -> None:
-        """Resolve labels and ``num_classes``, then build the model at that width."""
-        if self.task == "fit":
-            self._initialize_fit()
-        else:
-            self._initialize_eval()
-        self._resolve_task_defaults()
-        self.model = flow(self.model, num_classes=self.num_classes)
-        # `problem_type` is what an `AutoModelForImageClassification` reads in `forward` to pick
-        # BCE-with-logits over cross-entropy. Set here rather than on the model wrapper because
-        # only the classifier has peeked the targets — the wrapper never sees the data.
+        """Resolve labels and ``num_classes`` (task base), then route the loss choice.
+
+        ``problem_type`` is what an ``AutoModelForImageClassification`` reads in ``forward``
+        to pick BCE-with-logits over cross-entropy. Set here rather than on the model wrapper
+        because only the classifier has peeked the targets — the wrapper never sees the data.
+        """
+        super().initialize()
         if self.multilabel:
             self._network().config.problem_type = "multi_label_classification"
 
-    def _initialize_fit(self) -> None:
-        # Every split is READ once here, in the parent. `ensure_record_dataset` normalizes the
-        # TYPE; this normalizes the STATE, and it is load-bearing for this backend specifically:
-        # `import fastai` sets the multiprocessing start method to `fork`, so a DataLoader worker
-        # that is the FIRST to touch a lazy source builds it inside a forked child — and a
-        # HuggingFace source reaching the Hub there segfaults in CoreFoundation, which is not
-        # fork-safe. Warming in the parent makes the child inherit a source that needs nothing.
-        # See `recordstream.ensure_materialized`.
-        self.train_set = ensure_materialized(ensure_record_dataset(self.train_set))
-        if self.val_set is not None:
-            self.val_set = ensure_materialized(ensure_record_dataset(self.val_set))
-        if self.test_set is not None:
-            self.test_set = ensure_materialized(ensure_record_dataset(self.test_set))
+    def _default_hf_metrics(self) -> Optional[List[Any]]:
+        """A multi-label target needs an element-wise, logit-thresholded accuracy."""
+        return ["accuracy_multi"] if self.multilabel else ["accuracy"]
 
-        first = first_value(self.train_set, self.target_key)
-        self.multilabel = isinstance(first, (list, tuple, set))
-        probe = next(iter(first), None) if self.multilabel else first
-        targets_are_names = probe is not None and not is_class_id(probe)
-
-        if targets_are_names and self.label_map is None:
-            self.label_map = LabelMap.fit(iter_key(self.train_set, self.target_key))
-            logger.info(f"Fitted LabelMap with {self.label_map.num_classes} classes from train targets.")
-        if targets_are_names and self.label_map is not None:
-            self.train_set = self.label_map.encode(self.train_set)
-            if self.val_set is not None:
-                self.val_set = self.label_map.encode(self.val_set)
-            if self.test_set is not None:
-                self.test_set = self.label_map.encode(self.test_set)
-
-        if self.num_classes is None:
-            if self.label_map is not None:
-                self.num_classes = self.label_map.num_classes
-            else:
-                ids = [i for t in iter_key(self.train_set, self.target_key) for i in LabelMap().to_ids(t)]
-                self.num_classes = max(ids) + 1 if ids else None
-        if not self.num_classes:
-            raise RuntimeError("could not determine num_classes — set it, or wire a labelled dataset.")
-        self._class_names = class_names(self.train_set, self.val_set, self.test_set)
-
-    def _initialize_eval(self) -> None:
-        self.model = flow(self.model)
-        count = getattr(self.model, "num_classes", None)
-        if not count:
-            raise RuntimeError("could not determine num_classes from the model (it must expose `num_classes`).")
-        self.num_classes = int(count)
-        if self.test_set is None:
-            return
-        dataset = ensure_record_dataset(self.test_set)
-        first = first_value(dataset, self.target_key)
-        self.multilabel = isinstance(first, (list, tuple, set))
-        probe = next(iter(first), None) if self.multilabel else first
-        if probe is not None and not is_class_id(probe):
-            label_map = self.label_map or load_class_names(getattr(self.model, "checkpoint_path", None))
-            if label_map is None:
-                raise RuntimeError("eval dataset has string targets but no label_map and no class_names.json found.")
-            self.label_map = label_map
-            dataset = label_map.encode(dataset)
-        self.test_set = dataset
-        self._class_names = class_names(dataset)
-
-    def _resolve_task_defaults(self) -> None:
-        """Fill the unset (``None``) metrics slot. Idempotent; never overwrites.
-
-        There is no loss to resolve — the model computes its own (module docstring). The metric
-        default still has to wait for the data, because a multi-label target needs an
-        element-wise, logit-thresholded accuracy rather than an argmax one.
-        """
-        if self.metrics is None:
-            self.metrics = ["accuracy_multi"] if self.multilabel else ["accuracy"]
-
-    def _network(self) -> Any:
-        """The live ``transformers`` model — the wrapper's, or a bare one wired directly."""
-        return getattr(self.model, "model", self.model)
-
-    # ---- data --------------------------------------------------------------- #
+    # ---- data ------------------------------------------------------------------------------- #
     def _to_hf_batch(self, records: Sequence[Any]) -> Dict[str, torch.Tensor]:
         """One list of records → the mapping ``Trainer`` feeds the model.
 
-        Handed to ``Trainer`` as its ``data_collator``, which is the same seat a ``collate_fn``
-        occupies in the other torch backends. ``collate_records`` stacks the already-tensorized
-        image to ``[N, 3, H, W]``; the keys are transformers' contract, not ours —
-        ``pixel_values`` is what an image model's ``forward`` takes and ``labels`` is what makes
-        it return a loss.
-
-        int64 is named explicitly for the same reason as every other backend: a dataset yielding
-        int32 label tensors is legal and the loss rejects it. A multi-label target instead needs
-        FLOAT multi-hot, because ``problem_type="multi_label_classification"`` routes to
-        ``BCEWithLogitsLoss``, which compares against float targets.
+        int64 is named explicitly for the same reason as every other backend: a dataset
+        yielding int32 label tensors is legal and the loss rejects it. A multi-label target
+        instead needs FLOAT multi-hot, because ``problem_type="multi_label_classification"``
+        routes to ``BCEWithLogitsLoss``, which compares against float targets.
         """
         batch = collate_records(list(records))
         pixel_values = batch_tensor(batch, self.input_key)
@@ -431,54 +267,9 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
             labels = batch_tensor(batch, self.target_key, dtype=torch.int64)
         return {"pixel_values": pixel_values, "labels": labels}
 
-    def _record_loader(self, source: Any) -> DataLoader:
-        """A loader of COLLATED RECORD BATCHES — the shape :meth:`predict` needs.
-
-        Prediction pairs each output row with the metadata that travelled beside the image, and
-        :meth:`_to_hf_batch` has already dropped it. So the predict path keeps the record dict
-        and reads it with recordstream's generic readers, exactly as the other backends do.
-
-        The loader comes from the deferred ``test_loader`` slot, flowed with the ``dataset=``
-        that did not exist at construction — the same construction every other torch backend
-        uses, so ``pin_memory`` / ``drop_last`` / a sampler are config knobs here too.
-        """
-        return cast(DataLoader, flow(self.test_loader, dataset=ensure_record_dataset(source)))
-
-    # ---- the Trainer -------------------------------------------------------- #
-    def _training_arguments(self) -> Any:
-        """``TrainingArguments`` from the shared knobs — the flat config, in Trainer's words.
-
-        Every knob derivable at construction is already baked into the deferred slot; only
-        ``output_dir`` arrives here, because it reads ``metrics_sidecar_path``, which a config
-        may set after the constructor has run.
-        """
-        return flow(self.training_arguments, output_dir=self._output_dir())
-
-    def _build_trainer(self, train: Any = None, evaluate: Any = None, split: str = "val") -> Any:
-        """Flow the ``Trainer`` with everything only the RUN knows.
-
-        The model, the split datasets, the batch shape and this split's metric hook cannot be
-        config values — they are derived from the data or built per entry point — so they are
-        flow kwargs, and every other ``Trainer`` knob is whatever the config put on the slot.
-        """
-        return flow(
-            self.trainer,
-            model=self._network(),
-            args=self._training_arguments(),
-            train_dataset=train,
-            eval_dataset=evaluate,
-            data_collator=self._to_hf_batch,
-            compute_metrics=self._metrics_hook(split),
-            callbacks=[flow(cb) for cb in (self.callbacks or [])] or None,
-        )
-
+    # ---- metrics ---------------------------------------------------------------------------- #
     def _metrics_hook(self, split: str) -> Any:
-        """Trainer's ``compute_metrics``, bound to ONE split's metric list.
-
-        A `Trainer` holds a single hook, so the split is decided where the Trainer is BUILT —
-        ``fit`` evaluates the validation split, ``test`` the held-out one — rather than inside
-        the hook, which cannot tell which dataset it was called on.
-        """
+        """Trainer's ``compute_metrics``, bound to ONE split's resolved metric list."""
         metrics = merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or []
 
         def compute_metrics(eval_pred: Any) -> Dict[str, float]:
@@ -493,179 +284,27 @@ class HuggingFaceClassifier(TorchRunner, ProgressReporting):
 
         return compute_metrics
 
-    def _output_dir(self) -> str:
-        """Where Trainer writes its state — beside the sidecar when one is configured."""
-        if self.output_dir:
-            return str(Path(self.output_dir).expanduser())
-        if self.metrics_sidecar_path:
-            return str(Path(self.metrics_sidecar_path).expanduser().parent / self.run_name)
-        return str(Path("./hf_runs") / self.run_name)
+    # ---- artifacts --------------------------------------------------------------------------- #
+    def _after_fit(self, trainer: Any, train_ds: Any, val_ds: Any, test_ds: Any) -> None:
+        """Persist the run's label vocabulary beside the sidecar and onto the trackers."""
+        self._class_names = class_names(train_ds, val_ds, test_ds)
+        save_class_names(self._class_names, self._artifact_dir(), self._live_trackers())
 
-    # ---- the four entry points ---------------------------------------------- #
-    @entrypoint("fit", role="trainer", primary=True)
-    def fit(self) -> None:
-        logger.info(f"sonair huggingface training: {self.experiment_name} ({self.run_name})")
-        if self.train_set is None:
-            raise ValueError("HuggingFaceClassifier.fit() requires a 'train_set'.")
-        # Provenance through matrainer's plain FUNCTIONS — `runnable=self` so the
-        # hyperparameters and the resolved config come from matrainer's ONE derivation
-        # rather than a dict this backend transcribes for itself.
-        trackers = self._live_trackers()
-        manifest = log_run_context(trackers, runnable=self)
-        trainer = self._build_trainer(train=self.train_set, evaluate=self.val_set)
-        result = trainer.train()
-        names = as_metric_names(self.metric_names)
-        scored = {k: float(v) for k, v in result.metrics.items() if isinstance(v, (int, float))}
-        if self.val_set is not None:
-            scored.update({k: float(v) for k, v in trainer.evaluate().items() if _is_number(v)})
-        self._computed_metrics = names(scored, source="huggingface")
-        _log_trainer_history(trainer, trackers, names)
-        logger.info(f"Training complete: {self._computed_metrics}")
-        save_class_names(self._class_names, self._artifact_dir(), trackers)
-        write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
-        # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
-        # manifest exists: left unfinished it stays `running`, and matrainer's atexit hook then
-        # calls a successful run `interrupted`.
-        capture_log_file(trackers, manifest=manifest, status="success")
-
-    @entrypoint("evaluate", role="evaluator")
-    def evaluate(self) -> None:
-        self.test()
-
-    @entrypoint("test", role="evaluator", primary=True)
-    def test(self) -> None:
-        if self.test_set is None:
-            raise ValueError("HuggingFaceClassifier.test() requires a 'test_set'.")
-        # `metric_key_prefix="test"` rather than Trainer's `eval` default: this pass walks the
-        # HELD-OUT split, and the prefix is the only thing that says so — left at `eval` the run
-        # would report its test scores in the column a validation pass fills.
-        results = self._build_trainer(evaluate=self.test_set, split="test").evaluate(metric_key_prefix="test")
-        self._computed_metrics = as_metric_names(self.metric_names)(
-            {k: float(v) for k, v in results.items() if _is_number(v)}, source="huggingface"
-        )
-        logger.info(f"Evaluation complete: {self._computed_metrics}")
-        write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
-
-    @entrypoint("predict", role="predictor", primary=True)
-    def predict(self) -> None:
-        """Stream per-record predictions to the sink.
-
-        A plain ``torch.no_grad()`` forward rather than ``Trainer.predict``: that returns only
-        the stacked logits, and the sink contract needs each row paired with the metadata from
-        the record it came from. One walk over the record loader keeps the two in step by
-        construction — the same choice the fastai backend makes for the same reason.
-        """
-        if self.test_set is None:
-            raise ValueError("HuggingFaceClassifier.predict() requires a 'test_set'.")
-        sink = flow(self.predictions_sink)
-        network = self._network().eval()
-        device = next(network.parameters()).device
-        with torch.no_grad():
-            for batch in self._record_loader(self.test_set):
-                logits = network(pixel_values=batch_tensor(batch, self.input_key, device)).logits
-                if sink is not None:
-                    self._write_predictions(logits, batch, cast(PredictionsSink, sink))
-        if sink is not None and hasattr(sink, "close"):
-            sink.close()
-        logger.info("Prediction complete.")
-
-    # ---- predictions -------------------------------------------------------- #
-    def _write_predictions(self, logits: torch.Tensor, batch: Any, sink: PredictionsSink) -> None:
-        """One :class:`~recordstream.ClassificationOutput` per record, paired with its metadata.
-
-        ``classification_output`` builds the CONTRACT (logits / probs / class_idx) — a sink reads
-        those by name and cannot softmax on the caller's behalf, since only the model knows
-        whether its head already did. The contract is generic in its array type, which is why the
-        very same sink consumes this output and the Keras backend's numpy one.
-        """
-        batched = classification_output(logits)
-        per_record_meta = batch_metadata(batch, exclude=(self.input_key, self.target_key))
-        for i in range(len(logits)):
-            row: ClassificationOutput[torch.Tensor] = {
-                "logits": batched["logits"][i],
-                "probs": batched["probs"][i],
-                "class_idx": batched["class_idx"][i],
-            }
-            meta = per_record_meta[i] if per_record_meta and i < len(per_record_meta) else {}
-            sink.write(row, meta)
-
-    # ---- artifacts + tracking ----------------------------------------------- #
     def _artifact_dir(self) -> Optional[str]:
         """Where run artifacts land. Trainer's own output dir is the natural home."""
         if self.metrics_sidecar_path:
             return str(Path(self.metrics_sidecar_path).expanduser().parent)
         return self._output_dir()
 
-    def _live_trackers(self) -> List[Tracker]:
-        """Normalize and flow the wired trackers ONCE, writing the result back to the slot.
+    # ---- predictions ------------------------------------------------------------------------- #
+    def _prediction_output(self, preds: Any) -> Any:
+        """The batched :class:`~recordstream.ClassificationOutput` — the machinery slices it.
 
-        Written back rather than returned fresh each call: ``flow()`` on a LIVE object returns
-        that same object (idempotent), but a deferred ``Fluid`` would be REBUILT on every call —
-        two MLflow runs for one training run. One attribute, flowed in place, is the same idiom
-        this class already uses for ``model`` / ``loss_fn`` / ``predictions_sink``.
+        ``classification_output`` builds the CONTRACT (logits / probs / class_idx) — a sink
+        reads those by name and cannot softmax on the caller's behalf, since only the model
+        knows whether its head already did.
         """
-        # `flow()` resolves a marker to the live object, which the Lazy-typed slot cannot
-        # express — the cast says what the call guarantees.
-        self.trackers = [flow(t) for t in as_tracker_list(self.trackers) or []]
-        return cast(List[Tracker], self.trackers)
-
-    # ---- @outputs ------------------------------------------------------------ #
-    @property
-    @output
-    def trained_model(self) -> Any:
-        """The live trained model (post-run ``@output``). Raises while still deferred."""
-        if isinstance(self.model, Fluid):
-            raise RuntimeError("trained_model is only available after run() — the model is still deferred.")
-        return self.model
-
-    @property
-    @output
-    def computed_metrics(self) -> Dict[str, float]:
-        """Final scalar metrics from the last fit/evaluate."""
-        return dict(self._computed_metrics)
-
-    @property
-    @output
-    def class_names(self) -> List[str]:
-        """Resolved class names for the run (post-run ``@output``), or ``[]``."""
-        if self.label_map is not None:
-            return list(self.label_map.class_names)
-        return list(self._class_names or [])
-
-
-def _is_number(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def _log_trainer_history(trainer: Any, trackers: Sequence[Tracker], names: MetricNames) -> None:
-    """Replay ``Trainer``'s own log history onto the trackers.
-
-    ``transformers.Trainer`` owns the loop, so there is no epoch boundary here to hook — but
-    it records every log entry in ``state.log_history``, which is exactly what its own MLflow
-    and W&B integrations consume. Replaying it after the fit gives the same curves without
-    setting ``report_to``, which would silently start reporting to every tracker library that
-    happens to be importable (this workspace has several).
-
-    ``step`` is the ENTRY's global optimizer step, not the list index: HF logs training and
-    evaluation entries at different cadences, so indexing would interleave two series onto one
-    misleading axis.
-
-    The entry's own keys (``loss`` / ``train_runtime`` / ``eval_accuracy``) are translated on the
-    way out — ``names`` knows ``eval_`` is this engine's word for validation — so the curves land
-    beside another backend's rather than in columns of their own.
-    """
-    if not trackers:
-        return
-    for entry in getattr(getattr(trainer, "state", None), "log_history", []) or []:
-        step = entry.get("step")
-        metrics = names(
-            {key: float(value) for key, value in entry.items() if key != "step" and _is_number(value)},
-            source="huggingface",
-        )
-        if not metrics:
-            continue
-        for tracker in trackers:
-            tracker.log_metrics(metrics, step=int(step) if _is_number(step) else None)
+        return classification_output(preds)
 
 
 def _as_metric(value: HuggingFaceMetric) -> Callable[[np.ndarray, np.ndarray], float]:

@@ -260,9 +260,16 @@ def test_declaring_the_slots_does_not_import_transformers() -> None:
     top_level = [line for line in source.splitlines() if line.startswith(("import transformers", "from transformers"))]
 
     assert not top_level, f"module-level transformers import: {top_level}"
-    assert 'LazyClass(\n            "transformers.TrainingArguments"' in source or (
-        'LazyClass("transformers.TrainingArguments"' in source
-    )
+    # The deferred slots themselves moved to the machinery base (P6) — the string-dotted
+    # targets are pinned THERE, and that module must be transformers-free at the top too.
+    import matrainer.huggingface.trainer as machinery
+
+    machinery_source = inspect.getsource(machinery)
+    machinery_top = [
+        line for line in machinery_source.splitlines() if line.startswith(("import transformers", "from transformers"))
+    ]
+    assert not machinery_top, f"module-level transformers import in the machinery: {machinery_top}"
+    assert 'LazyClass("transformers.TrainingArguments")' in machinery_source
 
 
 def test_a_wired_training_argument_reaches_the_built_object(tmp_path: Path) -> None:
@@ -464,7 +471,7 @@ def test_predict_writes_one_entry_per_record_with_its_metadata() -> None:
 
 def test_outputs_raise_before_the_run_and_answer_after() -> None:
     clf = HuggingFaceClassifier(model=_deferred(), train_set=_stream(_records(4)))
-    with pytest.raises(RuntimeError, match="still deferred"):
+    with pytest.raises(RuntimeError, match="deferred"):
         _ = clf.trained_model
 
 
@@ -485,7 +492,7 @@ def test_computed_metrics_and_class_names_are_outputs() -> None:
 def test_a_deferred_model_is_reported_as_such() -> None:
     clf = HuggingFaceClassifier(model=_deferred())
     assert isinstance(clf.model, Fluid)
-    with pytest.raises(RuntimeError, match="still deferred"):
+    with pytest.raises(RuntimeError, match="deferred"):
         _ = clf.trained_model
 
 

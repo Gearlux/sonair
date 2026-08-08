@@ -23,12 +23,14 @@ import jax  # noqa: E402 - after the skip
 import jax.numpy as jnp  # noqa: E402
 from confluid import Fluid, LazyClass, lazy_param_names, output_specs  # noqa: E402
 from flax import nnx  # noqa: E402
+from matrainer.jax.loop import as_optax_loss as _as_loss  # noqa: E402
+from matrainer.jax.loop import as_optax_optimizer as _as_optimizer  # noqa: E402
 from recordstream import Stream  # noqa: E402
 from recordstream.items import Image, Label, MultiLabel  # noqa: E402
 
 from sonair.convnet.flax_convnet import FlaxConvNet  # noqa: E402
 from sonair.convnet.spec import trainable_parameter_count  # noqa: E402
-from sonair.jax_classifier import JaxClassifier, _as_loss, _as_metric, _as_optimizer  # noqa: E402
+from sonair.jax_classifier import JaxClassifier, _as_metric  # noqa: E402
 
 INPUT = (16, 16, 3)
 
@@ -315,7 +317,7 @@ def test_outputs_are_declared_and_raise_before_the_run() -> None:
 
     clf = _classifier()
     assert isinstance(clf.model, Fluid)
-    with pytest.raises(RuntimeError, match="still deferred"):
+    with pytest.raises(RuntimeError, match="deferred"):
         _ = clf.trained_model
 
 

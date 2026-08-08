@@ -72,18 +72,20 @@ preprocess:
   - !class:recordstream.ops.torch.ToTensor
     normalize: false
 
-# Data: HuggingFace `mnist`. It exposes `train` and `test` splits (no
-# `validation`), so the held-out split is `test`.
+# Data: HuggingFace `ylecun/mnist`. It exposes `train` and `test` splits (no
+# `validation`), so the held-out split is `test`. The id is the NAMESPACED form:
+# current huggingface_hub rejects the legacy bare `mnist` (HfUriError) — a bare id
+# only "works" by silently falling back to a stale local cache.
 train_set: !class:recordstream.Stream
   source: !class:recordstream.sources.huggingface.HuggingFaceSource()
-    path: "mnist"
+    path: "ylecun/mnist"
     split: train
     count: 1000
   ops: !ref:preprocess
 
 val_set: !class:recordstream.Stream
   source: !class:recordstream.sources.huggingface.HuggingFaceSource()
-    path: "mnist"
+    path: "ylecun/mnist"
     split: test
     count: 100
   ops: !ref:preprocess

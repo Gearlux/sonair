@@ -262,7 +262,7 @@ set.
 ```yaml
 # shared — identical for every backend
 train_set: !class:recordstream.sources.huggingface.HuggingFaceSource
-  path: mnist
+  path: ylecun/mnist
   split: train
 batch_size: 32
 max_epochs: 3

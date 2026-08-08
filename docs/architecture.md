@@ -1304,8 +1304,8 @@ plus its own full flat constructor (the confluid introspection surface, signatur
 the fleet drift tests now check "inherits the shared base and does not shadow its wiring"
 instead of per-module source patterns; matrainer is load-bearing for training (the old
 "removing it keeps the class training" claim is dead by design). The other engine backends
-still carry their private copies until their family's migration phase lands (root workspace
-backlog).
+joined family by family through 2026-08-08, when the migration COMPLETED — every backend
+now composes its task hooks with a shared machinery base (see the closing amendment below).
 
 **Example.**
 
@@ -1320,6 +1320,21 @@ class LightningClassifier(ClassificationTorchHooks, LightningRunnable):
 **Amendment (2026-08-07).** The bare-torch backend joined the same shape: ``TorchClassifier`` is `(ClassificationTorchHooks, matrainer.torch.TorchLoopRunnable)` — the same task hooks, a different machinery base (the owned epoch loop instead of a `pl.Trainer`), plus the `_after_fit` epilogue saving the class names beside `model.pt`. Its `evaluate` was harmonized to score the VAL split (it used to delegate to `test()`).
 
 **Amendment (2026-08-07, second).** The fastai backend joined: ``FastaiClassifier`` is `(ClassificationTorchHooks, matrainer.fastai.FastaiRunnable)` — the same task hooks, the Learner machinery base, plus the task's fastai vocabulary as hooks (`_default_fastai_loss` — the `*Flat` pair, `_default_fastai_metrics`, `_metric_aliases` — the `f1_*` configured forms) and the `_after_fit` class-names epilogue. Its `evaluate` was harmonized to score the VAL split.
+
+**Amendment (2026-08-07/08, closing — P5 + P6, the migration completes).** The remaining five
+backends joined and the fleet is DONE. P5 (keras family): ``KerasClassifier`` and
+``TensorFlowClassifier`` are ``(ClassificationKerasHooks, matrainer.keras.KerasRunnable)`` and
+``(…, matrainer.tensorflow.TensorFlowRunnable)`` — ONE hooks module (`classification_keras.py`)
+serving both machinery siblings, which also fixed the TF loop sharing one metric accumulator
+across splits and the missing fork-warm. P6: ``HuggingFaceClassifier`` is
+``(ClassificationBase, matrainer.huggingface.HuggingFaceRunnable)`` (the label pipeline is the
+task base's; the `problem_type` placement, the multilabel collate and the numpy metric names
+stay here), and ``JaxClassifier`` / ``MlxClassifier`` are ``(ClassificationBase,
+matrainer.jax.JaxLoopRunnable)`` / ``(…, matrainer.mlx.MlxLoopRunnable)`` with the task's
+accumulation vocabulary as the machinery's split-state hooks (`f1_macro` over one confusion
+matrix per split). Every `evaluate` scores the VAL split, fleet-wide. What remains task-owned
+is exactly the hooks: the batch dtypes, the loss/metric defaults by target shape, and the
+class-names artifact.
 
 **What you may change.** Hook implementations and task state freely; the concrete signature
 (it is the config surface). What you may not do: shadow the inherited machinery

@@ -100,10 +100,15 @@ def test_the_class_is_exported() -> None:
 
 def test_the_classifier_branches_on_the_export_capability() -> None:
     """A `tf.Module` has no `keras.Model.export`, so the classifier must not call it blindly."""
-    source = (Path(__file__).resolve().parents[1] / "sonair" / "tensorflow_classifier.py").read_text()
+    import inspect
 
-    assert 'hasattr(self.model, "export")' in source
-    assert "tf.saved_model.save" in source
+    from matrainer.tensorflow.loop import TensorFlowRunnable
+
+    source = (Path(__file__).resolve().parents[1] / "sonair" / "tensorflow_classifier.py").read_text()
+    assert "def _export" not in source, "the classifier must inherit the machinery's export branch"
+    export_source = inspect.getsource(TensorFlowRunnable._export)
+    assert 'getattr(self.model, "export", None)' in export_source
+    assert "tf.saved_model.save" in export_source
 
 
 # --------------------------------------------------------------------------- #

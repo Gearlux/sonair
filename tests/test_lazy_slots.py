@@ -79,8 +79,8 @@ def test_every_backend_declares_the_slots_it_flows() -> None:
         if not flowed:
             # A module with no flow calls must be one built on the shared bases (the machinery
             # — and its flows — live there; covered by the MRO-union test above).
-            assert (
-                "ClassificationTorchHooks" in source
+            assert any(
+                m in source for m in ("ClassificationTorchHooks", "ClassificationKerasHooks")
             ), f"{path.name}: no flow(self.<slot>) calls and no shared base — has the dispatch changed?"
             checked += 1
             continue

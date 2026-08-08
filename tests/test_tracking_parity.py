@@ -40,7 +40,16 @@ def built_on_shared_base(source: str) -> bool:
     `capture_log_file` in `fit` (the owned loop), metric forwarding, the naming knob's
     application — all pinned in matrainer's own suite. What such a module must not do is
     SHADOW that wiring."""
-    markers = ("LightningRunnable", "TorchLoopRunnable", "FastaiRunnable", "KerasRunnable", "TensorFlowRunnable")
+    markers = (
+        "LightningRunnable",
+        "TorchLoopRunnable",
+        "FastaiRunnable",
+        "KerasRunnable",
+        "TensorFlowRunnable",
+        "HuggingFaceRunnable",
+        "JaxLoopRunnable",
+        "MlxLoopRunnable",
+    )
     return any(marker in source for marker in markers)
 
 
@@ -59,7 +68,9 @@ def assert_does_not_shadow_the_tracking(stem: str, source: str) -> None:
         "_live_trackers",
     )
     for name in shared:
-        assert f"def {name}" not in source, (
+        # Anchored with the paren: the entries are METHOD names, and a hook that merely
+        # STARTS with one (`_score_batch` vs the loop's `_score`) is not a shadow.
+        assert f"def {name}(" not in source, (
             f"{stem} is built on the shared base but shadows {name} — the inherited tracking "
             "wiring no longer applies; extend via the hooks instead."
         )

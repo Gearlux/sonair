@@ -1,31 +1,27 @@
 """``JaxClassifier`` — the same classification run, on a jitted ``optax`` loop.
 
-The sixth backend, and the one that shows what "owns the loop" means when the framework hands
-you nothing. Lightning, Keras, Trainer and ``Learner`` each bring an epoch loop; JAX brings
-function transformations and expects you to write the loop yourself. So this backend is the
-closest sibling of :mod:`sonair.tensorflow_classifier` — both replace ``fit()`` with a traced
-step function — and the differences between them are exactly the differences between the two
-programming models:
+Since P6 (2026-08-08) this is ``(ClassificationBase, matrainer.jax.JaxLoopRunnable)``: the
+loop machinery — the jit-ONCE step builders (``nnx.value_and_grad`` with the logits as an aux
+output), the epoch driver with the per-epoch reshuffle, the plain-function tracking hookup,
+the per-epoch callback fan-out, the record-batch predict walk — lives in
+:class:`matrainer.jax.loop.JaxLoopRunnable`; the label pipeline (the multilabel peek,
+``LabelMap`` fitting/encoding, ``num_classes`` resolution) in
+:class:`~sonair.classification_base.ClassificationBase`. What stays HERE is classification's
+jax vocabulary:
 
-* **The step is a PURE FUNCTION of (model, batch).** ``nnx.value_and_grad`` differentiates it
-  and ``nnx.Optimizer`` applies the update in place, which is flax's object-oriented face over
-  what is underneath a functional ``(params, grads) -> params``.
-* **It is jitted with ``nnx.jit``, once**, and reused across epochs. A fresh ``jit`` per epoch
-  would retrace the whole graph every time — the same trap the TensorFlow backend documents
-  for ``tf.function``.
-* **Randomness is explicit.** Dropout needs a key, so the model carries its own ``nnx.Rngs``
-  rather than reading a global seed.
+* **The loss/metric defaults branch on the peeked target shape** —
+  ``sigmoid_binary_cross_entropy`` (the JAX spelling of ``BCEWithLogitsLoss``) against the
+  float multi-hot for a multi-label run, ``softmax_cross_entropy_with_integer_labels``
+  otherwise; ``accuracy_multi`` (thresholded in LOGIT space at 0.0) vs ``accuracy``.
+* **``f1_macro`` is accumulated over the split, never averaged per batch** — a per-batch
+  average reads three to five points LOW on 10 classes at batch 32
+  (``matrainer.metric_functions`` quantifies it), so the state hooks keep one confusion
+  matrix per split and reduce once. A multi-label run DROPS a confusion metric with a
+  warning rather than approximating one.
+* **The class names persist in :meth:`_fit_epilogue`** — beside the sidecar, onto the trackers.
 
-Everything else is shared and reused, not rewritten: the record stream, ``LabelMap`` fitting
-and encoding, ``class_names``, the predictions sink and contract, ``save_class_names`` /
-``write_metrics_sidecar``, and the ``@entrypoint`` dispatch. What is written here is
-:meth:`JaxClassifier._to_arrays` (the batch shape — the twin of the Keras backend's method of
-the same name), the step functions, and the epoch loop.
-
-**Losses and metrics are NAMES, not ``!class:`` tags, and that is a JAX fact.** ``optax``
-losses (``softmax_cross_entropy_with_integer_labels`` and friends) are plain *functions*, so
-there is no class for a ``!class:`` tag to resolve or for confluid's registry to tag — exactly
-the situation the fastai backend's ``fastai.metrics`` names are in. Hence no
+Losses and metrics are NAMES, not ``!class:`` tags, and that is a JAX fact — optax ships
+plain functions, so there is no class for a tag to resolve; hence no
 ``jax_classification.py`` (``docs/architecture.md`` §5).
 
 Minimal flat YAML::
@@ -38,57 +34,28 @@ Minimal flat YAML::
 """
 
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union, cast
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union, cast
 
-import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
-from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
+from confluid import Lazy, Mandatory, configurable, flow
 from flax import nnx
 from loggair import get_logger
-from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.artifacts import save_class_names
+from matrainer.jax.loop import EpochCallback, JaxLoopRunnable, JaxLoss, JaxMetric, JaxOptimizer
 from matrainer.metric_functions import accumulate_confusion, macro_f1, zero_confusion
-from matrainer.metric_names import MetricNames, as_metric_names
+from matrainer.metric_names import MetricNames
 from matrainer.metric_slots import merge_metric_specs
-from matrainer.run_names import generate_run_name, run_prefix
-from matrainer.tracking.base import Tracker, as_tracker_list
-from matrainer.tracking.provenance import capture_log_file, log_run_context
-from recordstream import (
-    ClassificationOutput,
-    LabelMap,
-    PredictionsSink,
-    RecordSource,
-    batch_metadata,
-    batch_values,
-    class_names,
-    ensure_record_dataset,
-    first_value,
-    is_class_id,
-    iter_key,
-    multi_hot,
-)
-from recordstream.keras import RecordSequence
-from recordstream.runnable import ProgressReporting, entrypoint, run_entrypoint
+from matrainer.tracking.base import Tracker
+from recordstream import ClassificationOutput, LabelMap, RecordSource, batch_values, multi_hot
+
+from sonair.classification_base import ClassificationBase
 
 logger = get_logger(__name__)
 
 #: Which entry point :meth:`JaxClassifier.run` dispatches to — the same vocabulary every other
 #: backend uses, because the verb is a property of the TASK, not of the engine.
 ClassifierTask = Literal["fit", "evaluate", "test", "predict"]
-
-#: What the ``loss`` / ``metrics`` / ``optimizer`` slots accept: a NAME resolved against
-#: ``optax``, or the callable itself. Spelled out rather than left as ``Any`` so ``to_pydantic``
-#: (form specs / MCP schemas / editor widgets) has a real type to build from.
-JaxLoss = Union[str, Callable[..., Any]]
-JaxMetric = Union[str, Callable[..., Any]]
-JaxOptimizer = Union[str, Callable[..., Any]]
-
-#: What the ``callbacks`` slot holds. There is no JAX callback CLASS to name — this backend
-#: owns its loop, so a callback is a plain callable invoked once per epoch with the epoch index
-#: and that epoch's metric logs (see :meth:`JaxClassifier.fit`). Spelling the signature out is
-#: what makes the slot checkable; the framework backends name their engine's class instead.
-EpochCallback = Callable[[int, Dict[str, float]], None]
 
 __all__ = ["ClassifierTask", "EpochCallback", "JaxClassifier"]
 
@@ -122,7 +89,7 @@ _CONFUSION_METRICS: Dict[str, Callable[[Any], float]] = {"f1_macro": macro_f1}
 
 
 @configurable(task="classification", role="trainer", framework="jax")
-class JaxClassifier(ProgressReporting):
+class JaxClassifier(ClassificationBase, JaxLoopRunnable):
     """Train, evaluate or predict an image classifier with a jitted optax loop.
 
     Args:
@@ -190,168 +157,49 @@ class JaxClassifier(ProgressReporting):
         metric_names: Optional[Lazy[MetricNames]] = None,
         jit: bool = True,
     ) -> None:
-        super().__init__()
-        # `nnx.Module`, not `Lazy[nnx.Module]`: the deferred-ness is declared once, on the ctor
-        # param, which is what `lazy_param_names` / `to_pydantic` read; the ATTRIBUTE's useful
-        # type is what it holds once `initialize()` has flowed it. `nnx.Optimizer(model, …)` and
-        # `nnx.value_and_grad` both require a real `nnx.Module`, so that IS the slot's contract.
-        self.model: nnx.Module = cast(nnx.Module, model)
-        self.train_set: Optional[Lazy[RecordSource]] = train_set
-        self.val_set: Optional[Lazy[RecordSource]] = val_set
-        self.test_set: Optional[Lazy[RecordSource]] = test_set
-        self.task: ClassifierTask = task
-        self.num_classes = int(num_classes) if num_classes is not None else None
-        self.max_epochs = max_epochs
-        self.batch_size = batch_size
-        # Internal only: this backend's own tracking callback is appended at run time.
-        # Stored VERBATIM like `trackers` (lazy-init): entries may be deferred `Fluid`
-        # markers, and they are flowed where they are used.
-        self.callbacks: Optional[List[Lazy[EpochCallback]]] = callbacks
-        self.experiment_name = experiment_name
-        self.run_name = run_name if run_name is not None else generate_run_name(prefix=run_prefix(task))
-        self.input_key = str(input_key)
-        self.target_key = str(target_key)
-        self.label_map = label_map
-        self.learning_rate = learning_rate
-        self.optimizer: JaxOptimizer = optimizer
-        # Sentinels, for the same reason every other backend uses them: the right loss and
-        # metric depend on whether the targets are single- or multi-label, which is only known
-        # once `initialize()` has peeked the data. A live default here could not be told apart
-        # from a user's explicit choice.
-        self.loss: Optional[JaxLoss] = loss
-        self.metrics: Optional[Sequence[JaxMetric]] = metrics
-        # Per-split ADDITIONS, merged over `metrics` by the shared rule. `train_metrics` is
-        # served here — the loop is ours, so it can score the training pass from the logits
-        # `train_step` already produced; what it must NOT do is a second forward pass, which
-        # is why the step returns them as an aux output rather than being run again in eval
-        # mode (that would also measure a different network — dropout and batch norm differ).
-        self.train_metrics: Optional[Sequence[JaxMetric]] = train_metrics
-        self.val_metrics: Optional[Sequence[JaxMetric]] = val_metrics
-        self.test_metrics: Optional[Sequence[JaxMetric]] = test_metrics
-        self.jit = jit
-        self.multilabel: bool = False
-        self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
-        self.metrics_sidecar_path: Optional[str] = None
-        # Stored VERBATIM (lazy-init mandate: the constructor does no work). It may hold a
-        # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
-        # and flows it at run time.
-        self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
-        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
-        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
-        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
-        self._class_names: Optional[List[str]] = None
-        self._computed_metrics: Dict[str, float] = {}
-        self._optimizer_state: Optional[Any] = None
-
-    # ---- run dispatch ------------------------------------------------------- #
-    def run(self) -> None:
-        self.initialize()
-        # The `@entrypoint` markers below ARE the dispatch table (recordstream docs/runnable.md).
-        run_entrypoint(self, self.task)
-
-    # ---- setup -------------------------------------------------------------- #
-    def initialize(self) -> None:
-        """Resolve labels and ``num_classes``, then build the model at that width."""
-        logger.info(f"JAX devices: {jax.devices()}")
-        if self.task == "fit":
-            self._initialize_fit()
-        else:
-            self._initialize_eval()
-        self._resolve_task_defaults()
-        self.model = flow(self.model, num_classes=self.num_classes)
-
-    def _initialize_fit(self) -> None:
-        self.train_set = ensure_record_dataset(self.train_set)
-        if self.val_set is not None:
-            self.val_set = ensure_record_dataset(self.val_set)
-        if self.test_set is not None:
-            self.test_set = ensure_record_dataset(self.test_set)
-
-        first = first_value(self.train_set, self.target_key)
-        self.multilabel = isinstance(first, (list, tuple, set))
-        probe = next(iter(first), None) if self.multilabel else first
-        targets_are_names = probe is not None and not is_class_id(probe)
-
-        if targets_are_names and self.label_map is None:
-            self.label_map = LabelMap.fit(iter_key(self.train_set, self.target_key))
-            logger.info(f"Fitted LabelMap with {self.label_map.num_classes} classes from train targets.")
-        if targets_are_names and self.label_map is not None:
-            self.train_set = self.label_map.encode(self.train_set)
-            if self.val_set is not None:
-                self.val_set = self.label_map.encode(self.val_set)
-            if self.test_set is not None:
-                self.test_set = self.label_map.encode(self.test_set)
-
-        if self.num_classes is None:
-            if self.label_map is not None:
-                self.num_classes = self.label_map.num_classes
-            else:
-                ids = [i for t in iter_key(self.train_set, self.target_key) for i in LabelMap().to_ids(t)]
-                self.num_classes = max(ids) + 1 if ids else None
-        if not self.num_classes:
-            raise RuntimeError("could not determine num_classes — set it, or wire a labelled dataset.")
-        self._class_names = class_names(self.train_set, self.val_set, self.test_set)
-
-    def _initialize_eval(self) -> None:
-        self.model = flow(self.model)
-        count = getattr(self.model, "num_classes", None)
-        if not count:
-            raise RuntimeError("could not determine num_classes from the model (it must expose `num_classes`).")
-        self.num_classes = int(count)
-        if self.test_set is None:
-            return
-        dataset = ensure_record_dataset(self.test_set)
-        first = first_value(dataset, self.target_key)
-        self.multilabel = isinstance(first, (list, tuple, set))
-        probe = next(iter(first), None) if self.multilabel else first
-        if probe is not None and not is_class_id(probe):
-            label_map = self.label_map or load_class_names(getattr(self.model, "checkpoint_path", None))
-            if label_map is None:
-                raise RuntimeError("eval dataset has string targets but no label_map and no class_names.json found.")
-            self.label_map = label_map
-            dataset = label_map.encode(dataset)
-        self.test_set = dataset
-        self._class_names = class_names(dataset)
-
-    def _resolve_task_defaults(self) -> None:
-        """Fill the unset (``None``) task-shaped slots. Idempotent; never overwrites.
-
-        The multi-label pair is optax's ``sigmoid_binary_cross_entropy`` — the JAX spelling of
-        ``BCEWithLogitsLoss`` — against the float multi-hot ``_to_arrays`` produces. Both
-        default losses take LOGITS, which is what the head emits.
-        """
-        if self.loss is None:
-            self.loss = (
-                "sigmoid_binary_cross_entropy" if self.multilabel else "softmax_cross_entropy_with_integer_labels"
-            )
-        if self.metrics is None:
-            self.metrics = ["accuracy_multi"] if self.multilabel else ["accuracy"]
-
-    # ---- data --------------------------------------------------------------- #
-    def _sequence(self, source: Any, shuffle: bool = False, with_targets: bool = True) -> RecordSequence:
-        """recordstream's batching adapter, wearing THIS task's batch shape.
-
-        The same adapter the Keras backend uses — it is engine-neutral (row order, slicing,
-        per-epoch reshuffle, ``collate_records``) and knows nothing about classification or
-        about JAX. ``_to_arrays`` is handed to it exactly as a ``collate_fn`` is handed to a
-        ``DataLoader``.
-        """
-        from functools import partial
-
-        return RecordSequence(
-            source,
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            transform=partial(self._to_arrays, with_targets=with_targets),
+        super().__init__(
+            model=model,
+            train_set=train_set,
+            test_set=test_set,
+            task=task,
+            max_epochs=max_epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            optimizer=optimizer,
+            jit=jit,
+            loss=loss,
+            metrics=metrics,
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            trackers=trackers,
+            callbacks=callbacks,
+            experiment_name=experiment_name,
+            run_name=run_name,
+            input_key=input_key,
+            target_key=target_key,
+            metric_names=metric_names,
         )
+        self.val_set = val_set
+        self.num_classes = int(num_classes) if num_classes is not None else None
+        self.label_map = label_map
+        self.multilabel: bool = False
+        # Balancing is a loss-side convention the optax functions do not carry — the task
+        # base's capability probe answers no.
+        self.balance_classes = False
+        self._class_names: Optional[List[str]] = None
+
+    # ---- the task hooks ---------------------------------------------------------------------- #
+    def _default_jax_loss(self) -> Optional[JaxLoss]:
+        """Both defaults take LOGITS, which is what the head emits — the JAX spellings of
+        ``BCEWithLogitsLoss`` and ``CrossEntropyLoss``."""
+        return "sigmoid_binary_cross_entropy" if self.multilabel else "softmax_cross_entropy_with_integer_labels"
+
+    def _default_jax_metrics(self) -> Optional[List[Any]]:
+        return ["accuracy_multi"] if self.multilabel else ["accuracy"]
 
     def _to_arrays(self, batch: Any, with_targets: bool = True) -> Any:
-        """One collated record batch → the numpy ``(x, y)`` this loop consumes.
-
-        Identical to the Keras backend's method of the same name, and for the same reason:
-        recordstream hands over NUMPY already (``batch_values`` / ``multi_hot`` are not
-        torch-typed), and numpy is exactly what ``jnp.asarray`` takes with no copy on CPU. So
-        the JAX backend needs no conversion layer at all — that is what those return types buy.
+        """float32 image; ``multi_hot`` for a multi-label target, else int64 ids.
 
         Channels-LAST, like Keras: the preprocessing chain for a JAX run stops after
         ``ConvertToImage`` rather than adding a CHW ``ToTensor``.
@@ -365,56 +213,7 @@ class JaxClassifier(ProgressReporting):
             return x, multi_hot(batch, self.target_key, self.num_classes)
         return x, np.asarray(batch_values(batch, self.target_key), dtype="int64")
 
-    # ---- the traced steps --------------------------------------------------- #
-    def _loss_fn(self) -> Callable[..., Any]:
-        """The resolved loss as a callable over ``(logits, labels)`` returning a scalar."""
-        loss = _as_loss(self.loss)
-
-        def compute(logits: Any, labels: Any) -> Any:
-            return jnp.mean(loss(logits, labels))
-
-        return compute
-
-    def _make_steps(self) -> Any:
-        """Build the train and eval steps once, and jit them once.
-
-        Built once and reused across epochs on purpose: a fresh ``nnx.jit`` each epoch retraces
-        the whole graph every time, which is slower than the eager loop it replaced — the same
-        trap the TensorFlow backend documents for ``tf.function``.
-        """
-        loss_fn = self._loss_fn()
-
-        def train_step(model: Any, optimizer: Any, x: Any, y: Any) -> Any:
-            def forward(m: Any) -> Any:
-                # `has_aux`: the logits come back BESIDE the loss so the training metrics are
-                # scored from the very tensor the gradient was taken through. Re-running the
-                # model to get them would cost a second forward pass AND measure a different
-                # network, since `training=True` leaves dropout and batch norm in train mode.
-                logits = m(x, training=True)
-                return loss_fn(logits, y), logits
-
-            (loss, logits), grads = nnx.value_and_grad(forward, has_aux=True)(model)
-            optimizer.update(model, grads)
-            return loss, logits
-
-        def eval_step(model: Any, x: Any, y: Any) -> Any:
-            logits = model(x, training=False)
-            return loss_fn(logits, y), logits
-
-        if self.jit:
-            return nnx.jit(train_step), nnx.jit(eval_step)
-        return train_step, eval_step
-
-    def _split_metrics(self, split: str) -> Sequence[JaxMetric]:
-        """The metric list for one split — its own slot merged over the shared ``metrics``.
-
-        The combination rule is the workspace-wide one
-        (:func:`~matrainer.metric_slots.merge_metric_specs`), so a config moving between backends
-        keeps its shape. All three splits have a slot: this loop is ours, so the training pass
-        can score the logits its gradient step already produced.
-        """
-        return merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or []
-
+    # ---- the metric state: batchwise sums + ONE confusion matrix per split ------------------- #
     def _partition_metrics(self, split: str) -> Any:
         """One split's metrics, split into the per-batch ones and the confusion-matrix ones.
 
@@ -424,7 +223,7 @@ class JaxClassifier(ProgressReporting):
         """
         batchwise: List[JaxMetric] = []
         confusion: Dict[str, Callable[[Any], float]] = {}
-        for metric in self._split_metrics(split):
+        for metric in merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or []:
             name = flow(metric)
             if isinstance(name, str) and name in _CONFUSION_METRICS:
                 confusion[name] = _CONFUSION_METRICS[name]
@@ -450,199 +249,60 @@ class JaxClassifier(ProgressReporting):
             raise RuntimeError("JaxClassifier: a confusion-matrix metric needs num_classes.")
         return zero_confusion(self.num_classes)
 
-    def _metric_values(self, logits: Any, labels: Any, metrics: Sequence[JaxMetric]) -> Dict[str, float]:
-        out: Dict[str, float] = {}
-        for metric in metrics:
+    def _new_split_state(self, split: str) -> Any:
+        batchwise, confusion = self._partition_metrics(split)
+        return {
+            "batchwise": batchwise,
+            "confusion": confusion,
+            "matrix": self._split_confusion(confusion),
+            "sums": {},
+            "batches": 0,
+        }
+
+    def _score_batch(self, state: Any, outputs: Any, arrays: Tuple[Any, ...], split: str) -> None:
+        labels = arrays[1]
+        state["batches"] += 1
+        for metric in state["batchwise"]:
             fn = _as_metric(metric)
-            out[getattr(fn, "__name__", str(metric)).lstrip("_")] = float(fn(logits, labels))
+            name = getattr(fn, "__name__", str(metric)).lstrip("_")
+            state["sums"][name] = state["sums"].get(name, 0.0) + float(fn(outputs, labels))
+        if state["matrix"] is not None:
+            accumulate_confusion(state["matrix"], np.asarray(outputs), np.asarray(labels))
+
+    def _split_scores(self, state: Any, split: str, step: Optional[int] = None) -> Dict[str, float]:
+        if not state["batches"]:
+            return {}
+        out = {name: value / state["batches"] for name, value in state["sums"].items()}
+        if state["matrix"] is not None:
+            out.update({name: fn(state["matrix"]) for name, fn in state["confusion"].items()})
         return out
 
-    def _run_epoch(self, sequence: RecordSequence, step: Any, model: Any, split: str = "val") -> Dict[str, float]:
-        """One pass over ``sequence`` in EVAL mode, returning ``{"loss": …, **metrics}``."""
-        batchwise, confusion = self._partition_metrics(split)
-        matrix = self._split_confusion(confusion)
-        total, batches = 0.0, 0
-        sums: Dict[str, float] = {}
-        for index in range(len(sequence)):
-            x, y = sequence[index]
-            loss, logits = step(model, jnp.asarray(x), jnp.asarray(y))
-            total += float(loss)
-            batches += 1
-            for key, value in self._metric_values(logits, jnp.asarray(y), batchwise).items():
-                sums[key] = sums.get(key, 0.0) + value
-            if matrix is not None:
-                accumulate_confusion(matrix, np.asarray(logits), np.asarray(y))
-        if not batches:
-            return {"loss": float("nan")}
-        reduced = {} if matrix is None else {name: fn(matrix) for name, fn in confusion.items()}
-        return {"loss": total / batches, **{k: v / batches for k, v in sums.items()}, **reduced}
+    # ---- artifacts ---------------------------------------------------------------------------- #
+    def _fit_epilogue(self) -> None:
+        """Persist the run's label vocabulary beside the sidecar and onto the trackers."""
+        save_class_names(self._class_names, self._artifact_dir(), self._live_trackers())
 
-    # ---- the four entry points ---------------------------------------------- #
-    @entrypoint("fit", role="trainer", primary=True)
-    def fit(self) -> None:
-        logger.info(f"sonair jax training: {self.experiment_name} ({self.run_name})")
-        if self.train_set is None:
-            raise ValueError("JaxClassifier.fit() requires a 'train_set'.")
-        # Provenance through matrainer's plain FUNCTIONS — `runnable=self` so the
-        # hyperparameters and the resolved config come from matrainer's ONE derivation
-        # rather than a dict this backend transcribes for itself.
-        trackers = self._live_trackers()
-        names = as_metric_names(self.metric_names)
-        manifest = log_run_context(trackers, runnable=self)
-        model = self.model
-        optimizer = nnx.Optimizer(model, _as_optimizer(self.optimizer, self.learning_rate), wrt=nnx.Param)
-        train_step, eval_step = self._make_steps()
-        train_seq = self._sequence(self.train_set, shuffle=True)
-        val_seq = self._sequence(self.val_set) if self.val_set is not None else None
-
-        # Resolved ONCE, outside the epoch loop: the partition depends only on the config, and
-        # the accumulator has to be zeroed per epoch rather than per batch.
-        train_batchwise, train_confusion = self._partition_metrics("train")
-
-        logs: Dict[str, float] = {}
-        for epoch in range(self.max_epochs):
-            total, batches = 0.0, 0
-            sums: Dict[str, float] = {}
-            matrix = self._split_confusion(train_confusion)
-            for index in range(len(train_seq)):
-                x, y = train_seq[index]
-                loss, logits = train_step(model, optimizer, jnp.asarray(x), jnp.asarray(y))
-                total += float(loss)
-                batches += 1
-                # The training metrics measure the network AS IT TRAINED — these logits come
-                # from the `training=True` forward the gradient was taken through, so a
-                # dropout/batch-norm gap against the validation numbers is expected rather
-                # than a defect (see the bare-torch backend's BatchNorm note in AGENTS.md).
-                for key, value in self._metric_values(logits, jnp.asarray(y), train_batchwise).items():
-                    sums[key] = sums.get(key, 0.0) + value
-                if matrix is not None:
-                    accumulate_confusion(matrix, np.asarray(logits), np.asarray(y))
-            # Named `<split>/<name>` here rather than translated later: this loop is ours, so
-            # there is no engine convention to preserve — and the dict goes to the `callbacks`
-            # below as well, which would otherwise see different names from the trackers.
-            logs = {"train/loss": total / batches if batches else float("nan")}
-            if batches:
-                logs.update({f"train/{k}": v / batches for k, v in sums.items()})
-                if matrix is not None:
-                    logs.update({f"train/{name}": fn(matrix) for name, fn in train_confusion.items()})
-            if val_seq is not None:
-                logs.update({f"val/{k}": v for k, v in self._run_epoch(val_seq, eval_step, model).items()})
-            # A `fit()` would have done this for us; a hand-written loop has to. Forgetting it
-            # is INVISIBLE — training just runs on one fixed row order forever.
-            train_seq.on_epoch_end()
-            for callback in self.callbacks or []:
-                flow(callback)(epoch, logs)
-            # Trackers are the other per-epoch consumer. A `fit()` forwards its logs to every
-            # attached logger; a hand-written loop reaches them the same way it reaches callbacks.
-            for tracker in trackers:
-                tracker.log_metrics(names(logs), step=epoch)
-            logger.info(f"epoch {epoch + 1}/{self.max_epochs}: " + ", ".join(f"{k}={v:.4f}" for k, v in logs.items()))
-
-        self._computed_metrics = names(logs)
-        self._optimizer_state = optimizer
-        logger.info("Training complete.")
-        save_class_names(self._class_names, self._artifact_dir(), trackers)
-        write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
-        # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
-        # manifest exists: left unfinished it stays `running`, and matrainer's atexit hook then
-        # calls a successful run `interrupted`.
-        capture_log_file(trackers, manifest=manifest, status="success")
-
-    @entrypoint("evaluate", role="evaluator")
-    def evaluate(self) -> None:
-        self.test()
-
-    @entrypoint("test", role="evaluator", primary=True)
-    def test(self) -> None:
-        if self.test_set is None:
-            raise ValueError("JaxClassifier.test() requires a 'test_set'.")
-        _, eval_step = self._make_steps()
-        scored = self._run_epoch(self._sequence(self.test_set), eval_step, self.model, "test")
-        self._computed_metrics = as_metric_names(self.metric_names)({f"test/{k}": v for k, v in scored.items()})
-        logger.info(f"Evaluation complete: {self._computed_metrics}")
-        write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
-
-    @entrypoint("predict", role="predictor", primary=True)
-    def predict(self) -> None:
-        """Stream per-record predictions to the sink.
-
-        Walks ``sequence.batches()`` — the COLLATED RECORD batches — rather than the arrays,
-        because the sink needs the metadata that lives beside the image and ``_to_arrays`` has
-        already dropped it. One walk, so output and metadata cannot desync.
-        """
-        if self.test_set is None:
-            raise ValueError("JaxClassifier.predict() requires a 'test_set'.")
-        sink = flow(self.predictions_sink)
-        sequence = self._sequence(self.test_set, with_targets=False)
-        for index, batch in enumerate(sequence.batches()):
-            logits = np.asarray(self.model(jnp.asarray(sequence[index][0]), training=False))
-            if sink is not None:
-                self._write_predictions(logits, batch, cast(PredictionsSink, sink))
-        if sink is not None and hasattr(sink, "close"):
-            sink.close()
-        logger.info("Prediction complete.")
-
-    # ---- predictions -------------------------------------------------------- #
-    def _write_predictions(self, logits: np.ndarray, batch: Any, sink: PredictionsSink) -> None:
-        """One :class:`~recordstream.ClassificationOutput` per record, paired with its metadata.
-
-        The contract is recordstream's and framework-neutral — it is generic in its array type,
-        so the SAME sink consumes this numpy output, the torch backends' tensors and the Keras
-        backend's arrays with no adapter.
-        """
-        probs = _softmax(logits)
-        per_record_meta = batch_metadata(batch, exclude=(self.input_key, self.target_key))
-        for i in range(len(logits)):
-            out: ClassificationOutput[np.ndarray] = {
-                "logits": logits[i],
-                "probs": probs[i],
-                "class_idx": np.asarray(np.argmax(logits[i])),
-            }
-            meta = per_record_meta[i] if per_record_meta and i < len(per_record_meta) else {}
-            sink.write(out, meta)
-
-    # ---- artifacts + tracking ----------------------------------------------- #
     def _artifact_dir(self) -> Optional[str]:
         """Where run artifacts land — beside the sidecar when one is configured."""
         if self.metrics_sidecar_path:
             return str(Path(self.metrics_sidecar_path).expanduser().parent)
         return None
 
-    def _live_trackers(self) -> List[Tracker]:
-        """Normalize and flow the wired trackers ONCE, writing the result back to the slot.
+    # ---- predictions -------------------------------------------------------------------------- #
+    def _prediction_output(self, preds: Any) -> Any:
+        """The batched :class:`~recordstream.ClassificationOutput` — the machinery slices it.
 
-        Written back rather than returned fresh each call: ``flow()`` on a LIVE object returns
-        that same object (idempotent), but a deferred ``Fluid`` would be REBUILT on every call —
-        two MLflow runs for one training run. One attribute, flowed in place, is the same idiom
-        this class already uses for ``model`` / ``loss_fn`` / ``predictions_sink``.
+        The contract is recordstream's and framework-neutral — generic in its array type, so
+        the SAME sink consumes this numpy output, the torch backends' tensors and the Keras
+        backend's arrays with no adapter.
         """
-        # `flow()` resolves a marker to the live object, which the Lazy-typed slot cannot
-        # express — the cast says what the call guarantees.
-        self.trackers = [flow(t) for t in as_tracker_list(self.trackers) or []]
-        return cast(List[Tracker], self.trackers)
-
-    # ---- @outputs ------------------------------------------------------------ #
-    @property
-    @output
-    def trained_model(self) -> Any:
-        """The live trained model (post-run ``@output``). Raises while still deferred."""
-        if isinstance(self.model, Fluid):
-            raise RuntimeError("trained_model is only available after run() — the model is still deferred.")
-        return self.model
-
-    @property
-    @output
-    def computed_metrics(self) -> Dict[str, float]:
-        """Final scalar metrics from the last fit/evaluate."""
-        return dict(self._computed_metrics)
-
-    @property
-    @output
-    def class_names(self) -> List[str]:
-        """Resolved class names for the run (post-run ``@output``), or ``[]``."""
-        if self.label_map is not None:
-            return list(self.label_map.class_names)
-        return list(self._class_names or [])
+        logits = np.asarray(preds)
+        out: ClassificationOutput[np.ndarray] = {
+            "logits": logits,
+            "probs": _softmax(logits),
+            "class_idx": np.argmax(logits, axis=-1),
+        }
+        return out
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:
@@ -650,25 +310,6 @@ def _softmax(logits: np.ndarray) -> np.ndarray:
     shifted = logits - logits.max(axis=-1, keepdims=True)
     exp = np.exp(shifted)
     return cast(np.ndarray, exp / exp.sum(axis=-1, keepdims=True))
-
-
-def _as_loss(value: Optional[JaxLoss]) -> Callable[..., Any]:
-    """An optax loss from a callable or its NAME in ``optax.losses``.
-
-    The string form is not sugar: optax's losses are plain FUNCTIONS, so there is no class for
-    a ``!class:`` tag to name or for confluid's registry to tag — the same situation the fastai
-    backend's metrics are in.
-    """
-    built = flow(value)
-    if callable(built):
-        return cast(Callable[..., Any], built)
-    loss = getattr(optax.losses, str(built), None) or getattr(optax, str(built), None)
-    if loss is None:
-        raise ValueError(
-            f"Unknown optax loss {built!r}. Names come from `optax.losses` — e.g. "
-            "softmax_cross_entropy_with_integer_labels, sigmoid_binary_cross_entropy."
-        )
-    return cast(Callable[..., Any], loss)
 
 
 def _as_metric(value: JaxMetric) -> Callable[..., Any]:
@@ -686,20 +327,3 @@ def _as_metric(value: JaxMetric) -> Callable[..., Any]:
         known = sorted({*_METRICS, *_CONFUSION_METRICS})
         raise ValueError(f"Unknown metric {built!r}. Known names: {', '.join(known)}.")
     return metric
-
-
-def _as_optimizer(value: JaxOptimizer, learning_rate: float) -> Any:
-    """An ``optax.GradientTransformation`` from a callable or its NAME in ``optax``.
-
-    A NAME is resolved and CALLED with the learning rate, because optax optimizers are
-    factories (``optax.adam(1e-3)``) rather than classes — so the ``learning_rate`` knob stays
-    the single place the LR is written, shared with every other backend's config.
-    """
-    built = flow(value)
-    if callable(built) and not isinstance(built, str):
-        made = built(learning_rate) if not hasattr(built, "update") else built
-        return made
-    factory = getattr(optax, str(built), None)
-    if factory is None:
-        raise ValueError(f"Unknown optax optimizer {built!r}. Names come from `optax` — e.g. adam, adamw, sgd.")
-    return factory(learning_rate)

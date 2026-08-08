@@ -275,8 +275,7 @@ def test_optimizers_are_CLASSES_here_not_factories() -> None:
     """Unlike optax, MLX ships optimizer classes — so a name is instantiated, not called. The
     shared `learning_rate` knob stays the one place an LR is written either way."""
     import mlx.optimizers as optim
-
-    from sonair.mlx_classifier import _as_optimizer
+    from matrainer.mlx.loop import as_mlx_optimizer as _as_optimizer
 
     made = _as_optimizer("Adam", 0.5)
 

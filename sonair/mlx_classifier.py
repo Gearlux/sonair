@@ -1,98 +1,50 @@
-"""``MlxClassifier`` — the same classification run, on Apple-silicon unified memory.
+"""``MlxClassifier`` — the same classification run on Apple's MLX.
 
-The seventh and last backend. Like the JAX and TensorFlow ones it owns its loop, and the three
-of them together are the interesting comparison: the same epoch, written against three
-different execution models.
+Since P6 (2026-08-08) this is ``(ClassificationBase, matrainer.mlx.MlxLoopRunnable)``: the
+loop machinery — the ``nn.value_and_grad`` step with the per-step ``mx.eval``, the train/eval
+MODE flips at the loop boundaries, the epoch driver with the per-epoch reshuffle, the
+plain-function tracking hookup, the record-batch predict walk — lives in
+:class:`matrainer.mlx.loop.MlxLoopRunnable`; the label pipeline in
+:class:`~sonair.classification_base.ClassificationBase`. What stays HERE is classification's
+mlx vocabulary:
 
-What MLX contributes to that comparison is **unified memory and laziness**:
+* **Targets are int32**, the one dtype in the fleet that differs from the int64 every other
+  backend names: MLX indexes with int32 and its ``cross_entropy`` expects it.
+* **``binary_cross_entropy`` is bound ``with_logits=True``** for a multi-label run — the head
+  emits raw logits and the MLX default expects probabilities: the same silent failure the
+  Keras string losses have, a finite loss that simply does not train.
+* **``f1_macro`` is accumulated over the split** (one confusion matrix, reduced once) — a
+  per-batch average reads three to five points LOW; a multi-label run DROPS a confusion
+  metric with a warning rather than approximating one.
+* **The class names persist in :meth:`_fit_epilogue`** — beside the sidecar, onto the trackers.
 
-* There is no device transfer. On Apple silicon the CPU and GPU share physical memory, so an
-  array is simply usable from either — no ``.to(device)``, no ``pin_memory``, no host/device
-  copy in the batch path. It is the one place where sonair's batch shaping does LESS than the
-  other backends rather than the same amount.
-* **Arrays are lazy.** ``mx.eval`` is what forces computation, and forgetting it does not raise
-  — it builds an ever-growing graph until memory runs out. So the loop evaluates once per step,
-  deliberately and visibly. Both facts are the reason this backend exists at all rather than
-  being "torch with different imports".
-
-Everything else is shared: the record stream, ``LabelMap`` fitting and encoding, ``class_names``,
-the predictions sink and contract, ``save_class_names`` / ``write_metrics_sidecar``, and the
-``@entrypoint`` dispatch. What is written here is :meth:`MlxClassifier._to_arrays` (the batch
-shape — the Keras backend's method, verbatim, for the same numpy reason), the step function and
-the epoch loop.
-
-Losses and metrics are **names**, not ``!class:`` tags: ``mlx.nn.losses.*`` are plain functions,
-so there is no class for a tag to resolve or for confluid's registry to tag. Same as the fastai
-and JAX backends, and therefore no ``mlx_classification.py`` (``docs/architecture.md`` §5).
-
-**Apple silicon only** — the ``mlx`` extra carries the platform marker, and CI on Linux can
-never run this. Its tests skip there.
-
-Minimal flat YAML::
-
-    runnable: !class:sonair.MlxClassifier
-      model: !lazy:sonair.MlxConvNet
-    train_set: !class:recordstream.Stream { source: ..., ops: !ref:preprocess }
-    batch_size: 32
-    max_epochs: 3
+**Apple silicon ONLY** — the extra's platform marker keeps ``pip install sonair[mlx]``
+succeeding (and empty) elsewhere.
 """
 
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Union, cast
+from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union, cast
 
 import mlx.core as mx
 import mlx.nn as nn
-import mlx.optimizers as optim
 import numpy as np
-from confluid import Fluid, Lazy, Mandatory, configurable, flow, output
+from confluid import Lazy, Mandatory, configurable, flow
 from loggair import get_logger
-from matrainer.artifacts import load_class_names, save_class_names, write_metrics_sidecar
+from matrainer.artifacts import save_class_names
 from matrainer.metric_functions import accumulate_confusion, macro_f1, zero_confusion
-from matrainer.metric_names import MetricNames, as_metric_names
+from matrainer.metric_names import MetricNames
 from matrainer.metric_slots import merge_metric_specs
-from matrainer.run_names import generate_run_name, run_prefix
-from matrainer.tracking.base import Tracker, as_tracker_list
-from matrainer.tracking.provenance import capture_log_file, log_run_context
-from recordstream import (
-    ClassificationOutput,
-    LabelMap,
-    PredictionsSink,
-    RecordSource,
-    batch_metadata,
-    batch_values,
-    class_names,
-    ensure_record_dataset,
-    first_value,
-    is_class_id,
-    iter_key,
-    multi_hot,
-)
-from recordstream.keras import RecordSequence
-from recordstream.runnable import ProgressReporting, entrypoint, run_entrypoint
+from matrainer.mlx.loop import EpochCallback, MlxLoopRunnable, MlxLoss, MlxMetric, MlxOptimizer
+from matrainer.tracking.base import Tracker
+from recordstream import ClassificationOutput, LabelMap, RecordSource, batch_values, multi_hot
 
-# NOTE: no `MlxConvNet` import. This module used to need it because the `model` slot was typed
-# as that concrete class; the slot is `mlx.nn.Module` now, so the default convnet is reached the
-# way any other model is — through the config (`!lazy:sonair.MlxConvNet`).
+from sonair.classification_base import ClassificationBase
 
 logger = get_logger(__name__)
 
-#: Which entry point :meth:`MlxClassifier.run` dispatches to — the same vocabulary every other
-#: backend uses, because the verb is a property of the TASK, not of the engine.
+#: Which entry point :meth:`MlxClassifier.run` dispatches to.
 ClassifierTask = Literal["fit", "evaluate", "test", "predict"]
-
-#: What the ``loss`` / ``metrics`` / ``optimizer`` slots accept: a NAME resolved against
-#: ``mlx.nn.losses`` / ``mlx.optimizers``, or the callable itself. Spelled out rather than left
-#: as ``Any`` so ``to_pydantic`` has a real type to build from.
-MlxLoss = Union[str, Callable[..., Any]]
-MlxMetric = Union[str, Callable[..., Any]]
-MlxOptimizer = Union[str, Callable[..., Any]]
-
-#: What the ``callbacks`` slot holds. There is no MLX callback CLASS to name — this backend
-#: owns its loop, so a callback is a plain callable invoked once per epoch with the epoch index
-#: and that epoch's metric logs (see :meth:`MlxClassifier.fit`). Spelling the signature out is
-#: what makes the slot checkable; the framework backends name their engine's class instead.
-EpochCallback = Callable[[int, Dict[str, float]], None]
 
 __all__ = ["ClassifierTask", "EpochCallback", "MlxClassifier"]
 
@@ -103,26 +55,22 @@ def _accuracy(logits: Any, labels: Any) -> Any:
 
 
 def _accuracy_multi(logits: Any, labels: Any) -> Any:
-    """Element-wise accuracy for a multi-label target, thresholded in LOGIT space.
-
-    ``0.0`` rather than ``0.5`` because the head emits raw logits — the same choice every other
-    backend's thresholded metric makes.
-    """
+    """Element-wise accuracy for a multi-label target, thresholded in LOGIT space at 0.0."""
     return mx.mean((logits > 0.0).astype(labels.dtype) == labels)
 
 
-#: Metric names this backend resolves PER BATCH. Plain functions, so nothing for confluid to tag.
+#: Metric names this backend resolves PER BATCH. Plain functions — nothing for confluid to tag.
 _METRICS: Dict[str, Callable[..., Any]] = {"accuracy": _accuracy, "accuracy_multi": _accuracy_multi}
 
-#: Metric names resolved from the split's CONFUSION MATRIX instead, because averaging them over
-#: batches gives a systematically different number — the JAX backend's twin of this table carries
-#: the measurement, and ``matrainer.metric_functions`` the arithmetic. Single-label only.
+#: Metric names resolved from the split's CONFUSION MATRIX rather than per batch — averaging
+#: them over batches gives a systematically worse number (``matrainer.metric_functions``).
+#: Single-label only: a multi-hot row has no single cell to land in.
 _CONFUSION_METRICS: Dict[str, Callable[[Any], float]] = {"f1_macro": macro_f1}
 
 
 @configurable(task="classification", role="trainer", framework="mlx")
-class MlxClassifier(ProgressReporting):
-    """Train, evaluate or predict an image classifier with MLX on Apple silicon.
+class MlxClassifier(ClassificationBase, MlxLoopRunnable):
+    """Train, evaluate or predict an image classifier with MLX.
 
     Args:
         model: The classification model — wire ``!lazy:sonair.MlxConvNet`` so ``initialize()``
@@ -134,29 +82,20 @@ class MlxClassifier(ProgressReporting):
         task: Which entry point ``run()`` dispatches to.
         max_epochs: Training epochs.
         batch_size: Rows per batch.
-        trackers: matrainer trackers — one or a list. This run's ONLY output wiring:
-            metrics, provenance and the run manifest all go to them.
-        callbacks: Callables invoked as ``callback(epoch, logs)`` after each epoch —
-            MLX ships no callback protocol, so this is the plainest thing that works.
-        experiment_name: Run identity, recorded in artifacts and tracking.
-        run_name: Run identity; a random ``adjective_noun`` when omitted.
-        input_key: Record key holding the image.
-        target_key: Record key holding the label.
+        trackers: matrainer trackers — one or a list.
+        callbacks: Callables invoked as ``callback(epoch, logs)`` after each epoch.
+        experiment_name / run_name: tracking identity.
+        input_key / target_key: Record keys for the image and the label.
         label_map: Pin the name-to-id encoding instead of fitting it from the train targets.
-        learning_rate: Peak LR for the optimizer.
-        optimizer: An ``mlx.optimizers`` name (``"Adam"``, ``"SGD"``, ``"AdamW"``) or a
-            ready-made optimizer instance.
-        loss: An ``mlx.nn.losses`` name or a callable over ``(logits, labels)``. ``None`` picks
-            by target shape, like every other backend's sentinel.
+        learning_rate: Learning rate for the optimizer.
+        optimizer: An ``mlx.optimizers`` CLASS name (``"Adam"``, ``"AdamW"``, ``"SGD"``).
+        loss: An ``mlx.nn.losses`` name or callable. ``None`` picks by target shape.
         metrics: Metric names (``"accuracy"``, ``"accuracy_multi"``, ``"f1_macro"``) or
             callables. ``None`` picks by target shape.
         train_metrics / val_metrics / test_metrics: That split's OWN metrics, merged over
-            ``metrics``. The training pass scores its metrics from the logits the gradient step
-            already computed, so ``train_metrics`` costs no second forward pass.
-        metric_names: How recorded metrics are named — see
-            :class:`~matrainer.metric_names.MetricNames`. This loop already writes the canonical
-            ``<split>/<name>``, so the default translates nothing; wiring ``target:`` is what
-            makes it record in another engine's spelling.
+            ``metrics``.
+        metric_names: How recorded metrics are named — this loop already writes the canonical
+            ``<split>/<name>``, so the default translates nothing.
     """
 
     def __init__(
@@ -185,163 +124,58 @@ class MlxClassifier(ProgressReporting):
         test_metrics: Optional[Sequence[MlxMetric]] = None,
         metric_names: Optional[Lazy[MetricNames]] = None,
     ) -> None:
-        super().__init__()
-        # `nn.Module`, not `Lazy[nn.Module]`: the deferred-ness is declared once, on the ctor
-        # param above. The slot takes ANY `mlx.nn.Module` — `MlxConvNet` is one, and so is a
-        # network a user brings. That is new as of 2026-08-01: this used to be typed as the
-        # concrete `MlxConvNet` because the loop reached the trainable network through
-        # `self.model.model`, so only the wrapper worked. `MlxConvNet` is now an `nn.Module`
-        # itself, so `nn.value_and_grad` / `optimizer.update` take the slot value directly.
-        self.model: nn.Module = cast(nn.Module, model)
-        self.train_set: Optional[Lazy[RecordSource]] = train_set
-        self.val_set: Optional[Lazy[RecordSource]] = val_set
-        self.test_set: Optional[Lazy[RecordSource]] = test_set
-        self.task: ClassifierTask = task
-        self.num_classes = int(num_classes) if num_classes is not None else None
-        self.max_epochs = max_epochs
-        self.batch_size = batch_size
-        # Internal only: this backend's own tracking callback is appended at run time.
-        # Stored VERBATIM like `trackers` (lazy-init): entries may be deferred `Fluid`
-        # markers, and they are flowed where they are used.
-        self.callbacks: Optional[List[Lazy[EpochCallback]]] = callbacks
-        self.experiment_name = experiment_name
-        self.run_name = run_name if run_name is not None else generate_run_name(prefix=run_prefix(task))
-        self.input_key = str(input_key)
-        self.target_key = str(target_key)
-        self.label_map = label_map
-        self.learning_rate = learning_rate
-        self.optimizer: MlxOptimizer = optimizer
-        # Sentinels, for the same reason every other backend uses them: the right loss and
-        # metric depend on whether the targets are single- or multi-label, which is only known
-        # once `initialize()` has peeked the data.
-        self.loss: Optional[MlxLoss] = loss
-        self.metrics: Optional[Sequence[MlxMetric]] = metrics
-        # Per-split ADDITIONS, merged over `metrics` by the shared rule. `train_metrics` is
-        # served here — the loop is ours, so the training pass scores the logits its gradient
-        # step already produced (`nn.value_and_grad` returns them as an aux output), never a
-        # second forward pass, which would cost a pass AND measure the network in eval mode.
-        self.train_metrics: Optional[Sequence[MlxMetric]] = train_metrics
-        self.val_metrics: Optional[Sequence[MlxMetric]] = val_metrics
-        self.test_metrics: Optional[Sequence[MlxMetric]] = test_metrics
-        self.multilabel: bool = False
-        self.predictions_sink: Optional[Lazy[PredictionsSink]] = None
-        self.metrics_sidecar_path: Optional[str] = None
-        # Stored VERBATIM (lazy-init mandate: the constructor does no work). It may hold a
-        # single tracker, a list, or deferred `Fluid` markers; `_live_trackers()` normalizes
-        # and flows it at run time.
-        self.trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = trackers
-        # Stored VERBATIM for the same reason `trackers` is: wired from YAML it arrives as a
-        # deferred marker, and `as_metric_names()` builds it where the metrics are reported.
-        self.metric_names: Optional[Lazy[MetricNames]] = metric_names
-        self._class_names: Optional[List[str]] = None
-        self._computed_metrics: Dict[str, float] = {}
-
-    # ---- run dispatch ------------------------------------------------------- #
-    def run(self) -> None:
-        self.initialize()
-        # The `@entrypoint` markers below ARE the dispatch table (recordstream docs/runnable.md).
-        run_entrypoint(self, self.task)
-
-    # ---- setup -------------------------------------------------------------- #
-    def initialize(self) -> None:
-        """Resolve labels and ``num_classes``, then build the model at that width."""
-        logger.info(f"MLX device: {mx.default_device()} (unified memory — no host/device copies)")
-        if self.task == "fit":
-            self._initialize_fit()
-        else:
-            self._initialize_eval()
-        self._resolve_task_defaults()
-        self.model = flow(self.model, num_classes=self.num_classes)
-
-    def _initialize_fit(self) -> None:
-        self.train_set = ensure_record_dataset(self.train_set)
-        if self.val_set is not None:
-            self.val_set = ensure_record_dataset(self.val_set)
-        if self.test_set is not None:
-            self.test_set = ensure_record_dataset(self.test_set)
-
-        first = first_value(self.train_set, self.target_key)
-        self.multilabel = isinstance(first, (list, tuple, set))
-        probe = next(iter(first), None) if self.multilabel else first
-        targets_are_names = probe is not None and not is_class_id(probe)
-
-        if targets_are_names and self.label_map is None:
-            self.label_map = LabelMap.fit(iter_key(self.train_set, self.target_key))
-            logger.info(f"Fitted LabelMap with {self.label_map.num_classes} classes from train targets.")
-        if targets_are_names and self.label_map is not None:
-            self.train_set = self.label_map.encode(self.train_set)
-            if self.val_set is not None:
-                self.val_set = self.label_map.encode(self.val_set)
-            if self.test_set is not None:
-                self.test_set = self.label_map.encode(self.test_set)
-
-        if self.num_classes is None:
-            if self.label_map is not None:
-                self.num_classes = self.label_map.num_classes
-            else:
-                ids = [i for t in iter_key(self.train_set, self.target_key) for i in LabelMap().to_ids(t)]
-                self.num_classes = max(ids) + 1 if ids else None
-        if not self.num_classes:
-            raise RuntimeError("could not determine num_classes — set it, or wire a labelled dataset.")
-        self._class_names = class_names(self.train_set, self.val_set, self.test_set)
-
-    def _initialize_eval(self) -> None:
-        self.model = flow(self.model)
-        count = getattr(self.model, "num_classes", None)
-        if not count:
-            raise RuntimeError("could not determine num_classes from the model (it must expose `num_classes`).")
-        self.num_classes = int(count)
-        if self.test_set is None:
-            return
-        dataset = ensure_record_dataset(self.test_set)
-        first = first_value(dataset, self.target_key)
-        self.multilabel = isinstance(first, (list, tuple, set))
-        probe = next(iter(first), None) if self.multilabel else first
-        if probe is not None and not is_class_id(probe):
-            label_map = self.label_map or load_class_names(getattr(self.model, "checkpoint_path", None))
-            if label_map is None:
-                raise RuntimeError("eval dataset has string targets but no label_map and no class_names.json found.")
-            self.label_map = label_map
-            dataset = label_map.encode(dataset)
-        self.test_set = dataset
-        self._class_names = class_names(dataset)
-
-    def _resolve_task_defaults(self) -> None:
-        """Fill the unset (``None``) task-shaped slots. Idempotent; never overwrites.
-
-        Both defaults take LOGITS, which is what the head emits: ``cross_entropy`` in MLX
-        accepts logits directly, and ``binary_cross_entropy`` takes a ``with_logits`` flag that
-        :func:`_as_loss` binds for the multi-label case.
-        """
-        if self.loss is None:
-            self.loss = "binary_cross_entropy" if self.multilabel else "cross_entropy"
-        if self.metrics is None:
-            self.metrics = ["accuracy_multi"] if self.multilabel else ["accuracy"]
-
-    # ---- data --------------------------------------------------------------- #
-    def _sequence(self, source: Any, shuffle: bool = False, with_targets: bool = True) -> RecordSequence:
-        """recordstream's batching adapter, wearing THIS task's batch shape.
-
-        The same engine-neutral adapter the Keras and JAX backends use — it knows nothing about
-        classification or about MLX. ``_to_arrays`` is handed to it exactly as a ``collate_fn``
-        is handed to a ``DataLoader``.
-        """
-        return RecordSequence(
-            source,
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            transform=partial(self._to_arrays, with_targets=with_targets),
+        super().__init__(
+            model=model,
+            train_set=train_set,
+            test_set=test_set,
+            task=task,
+            max_epochs=max_epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            optimizer=optimizer,
+            loss=loss,
+            metrics=metrics,
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            trackers=trackers,
+            callbacks=callbacks,
+            experiment_name=experiment_name,
+            run_name=run_name,
+            input_key=input_key,
+            target_key=target_key,
+            metric_names=metric_names,
         )
+        self.val_set = val_set
+        self.num_classes = int(num_classes) if num_classes is not None else None
+        self.label_map = label_map
+        self.multilabel: bool = False
+        # Balancing is a loss-side convention the MLX functions do not carry — the task base's
+        # capability probe answers no.
+        self.balance_classes = False
+        self._class_names: Optional[List[str]] = None
+
+    # ---- the task hooks ---------------------------------------------------------------------- #
+    def _default_mlx_loss(self) -> Optional[MlxLoss]:
+        return "binary_cross_entropy" if self.multilabel else "cross_entropy"
+
+    def _default_mlx_metrics(self) -> Optional[List[Any]]:
+        return ["accuracy_multi"] if self.multilabel else ["accuracy"]
+
+    def _loss_fn(self) -> Callable[..., Any]:
+        """The resolved loss, meaned — with the multi-label ``with_logits`` binding."""
+        chosen = self.loss if self.loss is not None else self._default_mlx_loss()
+        loss = _as_loss(chosen, self.multilabel)
+
+        def compute(outputs: Any, targets: Any) -> Any:
+            return mx.mean(loss(outputs, targets))
+
+        return compute
 
     def _to_arrays(self, batch: Any, with_targets: bool = True) -> Any:
-        """One collated record batch → the numpy ``(x, y)`` this loop consumes.
+        """float32 image; ``multi_hot`` for a multi-label target, else int32 ids.
 
-        The Keras backend's method verbatim, and for the same reason: recordstream hands over
-        NUMPY (``batch_values`` / ``multi_hot`` are not torch-typed), and ``mx.array`` takes
-        numpy directly. On unified memory there is no transfer to make, so this is the one
-        backend where the batch path is genuinely shorter rather than merely different.
-
-        Channels-LAST — MLX's native layout, so the preprocessing chain is the Keras one.
+        int32, not int64: MLX indexes with int32 and its ``cross_entropy`` expects it.
         """
         x = np.asarray(batch_values(batch, self.input_key), dtype="float32")
         if not with_targets:
@@ -350,44 +184,13 @@ class MlxClassifier(ProgressReporting):
             if not self.num_classes:
                 raise RuntimeError("MlxClassifier: a multi-label target needs num_classes.")
             return x, multi_hot(batch, self.target_key, self.num_classes)
-        # int32, not int64: MLX indexes with int32 and `cross_entropy` expects it.
         return x, np.asarray(batch_values(batch, self.target_key), dtype="int32")
 
-    # ---- the loop ----------------------------------------------------------- #
-    def _loss_and_grad(self) -> Any:
-        """The step: a loss over ``(model, x, y)``, differentiated by ``nn.value_and_grad``.
-
-        ``compute`` returns ``(loss, logits)`` rather than the bare loss — MLX differentiates
-        the FIRST element of a returned tuple and hands the rest back untouched (verified), so
-        the training metrics are scored from the very tensor the gradient was taken through.
-        """
-        loss_fn = _as_loss(self.loss, multilabel=self.multilabel)
-
-        def compute(model: Any, x: Any, y: Any) -> Any:
-            logits = model(x)
-            return mx.mean(loss_fn(logits, y)), logits
-
-        return nn.value_and_grad(self.model, compute)
-
-    def _split_metrics(self, split: str) -> Sequence[MlxMetric]:
-        """The metric list for one split — its own slot merged over the shared ``metrics``.
-
-        The combination rule is the workspace-wide one
-        (:func:`~matrainer.metric_slots.merge_metric_specs`), so a config moving between backends
-        keeps its shape. All three splits have a slot: this loop is ours, so the training pass
-        can score the logits its gradient step already produced.
-        """
-        return merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or []
-
+    # ---- the metric state: batchwise sums + ONE confusion matrix per split ------------------- #
     def _partition_metrics(self, split: str) -> Any:
-        """One split's metrics, split into the per-batch ones and the confusion-matrix ones.
-
-        Partitioned by NAME before resolution, so only a NAMED metric can be confusion-based —
-        nothing here can know what a user-supplied callable would want accumulated.
-        """
         batchwise: List[MlxMetric] = []
         confusion: Dict[str, Callable[[Any], float]] = {}
-        for metric in self._split_metrics(split):
+        for metric in merge_metric_specs(self.metrics, getattr(self, f"{split}_metrics")) or []:
             name = flow(metric)
             if isinstance(name, str) and name in _CONFUSION_METRICS:
                 confusion[name] = _CONFUSION_METRICS[name]
@@ -396,12 +199,7 @@ class MlxClassifier(ProgressReporting):
         return batchwise, confusion
 
     def _split_confusion(self, confusion: Dict[str, Callable[[Any], float]]) -> Optional[np.ndarray]:
-        """A zeroed accumulator when this split wants one, else ``None``.
-
-        A multi-label run gets ``None`` even with a confusion metric wired: a row with two true
-        labels has no single cell to land in, so the metric is DROPPED with a warning rather
-        than approximated into a number that means something else.
-        """
+        """A zeroed accumulator when this split wants one; a multi-label run DROPS it loudly."""
         if not confusion or self.multilabel:
             if confusion and self.multilabel:
                 logger.warning(
@@ -413,213 +211,54 @@ class MlxClassifier(ProgressReporting):
             raise RuntimeError("MlxClassifier: a confusion-matrix metric needs num_classes.")
         return zero_confusion(self.num_classes)
 
-    def _metric_values(self, logits: Any, labels: Any, metrics: Sequence[MlxMetric]) -> Dict[str, float]:
-        out: Dict[str, float] = {}
-        for metric in metrics:
+    def _new_split_state(self, split: str) -> Any:
+        batchwise, confusion = self._partition_metrics(split)
+        return {
+            "batchwise": batchwise,
+            "confusion": confusion,
+            "matrix": self._split_confusion(confusion),
+            "sums": {},
+            "batches": 0,
+        }
+
+    def _score_batch(self, state: Any, outputs: Any, arrays: Tuple[Any, ...], split: str) -> None:
+        labels = arrays[1]
+        state["batches"] += 1
+        for metric in state["batchwise"]:
             fn = _as_metric(metric)
-            out[getattr(fn, "__name__", str(metric)).lstrip("_")] = float(fn(logits, labels))
+            name = getattr(fn, "__name__", str(metric)).lstrip("_")
+            state["sums"][name] = state["sums"].get(name, 0.0) + float(fn(outputs, labels))
+        if state["matrix"] is not None:
+            accumulate_confusion(state["matrix"], np.asarray(outputs), np.asarray(labels))
+
+    def _split_scores(self, state: Any, split: str, step: Optional[int] = None) -> Dict[str, float]:
+        if not state["batches"]:
+            return {}
+        out = {name: value / state["batches"] for name, value in state["sums"].items()}
+        if state["matrix"] is not None:
+            out.update({name: fn(state["matrix"]) for name, fn in state["confusion"].items()})
         return out
 
-    def _evaluate(self, sequence: RecordSequence, split: str = "val") -> Dict[str, float]:
-        """One pass in EVAL mode, returning ``{"loss": …, **metrics}``."""
-        loss_fn = _as_loss(self.loss, multilabel=self.multilabel)
-        batchwise, confusion = self._partition_metrics(split)
-        matrix = self._split_confusion(confusion)
-        total, batches = 0.0, 0
-        sums: Dict[str, float] = {}
-        # MLX carries train/eval as module STATE, so the mode is set ONCE here rather than
-        # passed per call — which is what lets this slot hold any `nn.Module`, not just one
-        # whose `__call__` happens to accept a `training=` keyword. `fit()` sets it back to
-        # True at the top of each epoch, so a mid-fit validation pass cannot leak eval mode.
-        self.model.train(False)
-        for index in range(len(sequence)):
-            x, y = sequence[index]
-            xa, ya = mx.array(x), mx.array(y)
-            logits = self.model(xa)
-            loss = mx.mean(loss_fn(logits, ya))
-            mx.eval(loss, logits)  # lazy arrays: nothing has been computed until here
-            total += float(loss)
-            batches += 1
-            for key, value in self._metric_values(logits, ya, batchwise).items():
-                sums[key] = sums.get(key, 0.0) + value
-            if matrix is not None:
-                accumulate_confusion(matrix, np.asarray(logits), np.asarray(ya))
-        if not batches:
-            return {"loss": float("nan")}
-        reduced = {} if matrix is None else {name: fn(matrix) for name, fn in confusion.items()}
-        return {"loss": total / batches, **{k: v / batches for k, v in sums.items()}, **reduced}
+    # ---- artifacts ---------------------------------------------------------------------------- #
+    def _fit_epilogue(self) -> None:
+        """Persist the run's label vocabulary beside the sidecar and onto the trackers."""
+        save_class_names(self._class_names, self._artifact_dir(), self._live_trackers())
 
-    # ---- the four entry points ---------------------------------------------- #
-    @entrypoint("fit", role="trainer", primary=True)
-    def fit(self) -> None:
-        logger.info(f"sonair mlx training: {self.experiment_name} ({self.run_name})")
-        if self.train_set is None:
-            raise ValueError("MlxClassifier.fit() requires a 'train_set'.")
-        # Provenance through matrainer's plain FUNCTIONS — `runnable=self` so the
-        # hyperparameters and the resolved config come from matrainer's ONE derivation
-        # rather than a dict this backend transcribes for itself.
-        trackers = self._live_trackers()
-        names = as_metric_names(self.metric_names)
-        manifest = log_run_context(trackers, runnable=self)
-        network = self.model
-        optimizer = _as_optimizer(self.optimizer, self.learning_rate)
-        step = self._loss_and_grad()
-        train_seq = self._sequence(self.train_set, shuffle=True)
-        val_seq = self._sequence(self.val_set) if self.val_set is not None else None
-
-        # Resolved ONCE, outside the epoch loop: the partition depends only on the config, while
-        # the accumulator is zeroed per epoch.
-        train_batchwise, train_confusion = self._partition_metrics("train")
-
-        logs: Dict[str, float] = {}
-        for epoch in range(self.max_epochs):
-            network.train(True)
-            total, batches = 0.0, 0
-            sums: Dict[str, float] = {}
-            matrix = self._split_confusion(train_confusion)
-            for index in range(len(train_seq)):
-                x, y = train_seq[index]
-                ya = mx.array(y)
-                (loss, logits), grads = step(network, mx.array(x), ya)
-                optimizer.update(network, grads)
-                # MLX is LAZY: without this the graph grows every step until memory runs out,
-                # and nothing warns — the run just gets slower and then dies. One eval per step,
-                # over the parameters AND the optimizer state, is what forces the work. The
-                # logits join it because the training metrics below read them.
-                mx.eval(network.parameters(), optimizer.state, loss, logits)
-                total += float(loss)
-                batches += 1
-                # Measured on the network AS IT TRAINED (dropout and batch norm in train mode),
-                # so a gap against the validation numbers is expected rather than a defect.
-                for key, value in self._metric_values(logits, ya, train_batchwise).items():
-                    sums[key] = sums.get(key, 0.0) + value
-                if matrix is not None:
-                    accumulate_confusion(matrix, np.asarray(logits), np.asarray(ya))
-            # Named `<split>/<name>` here rather than translated later: this loop is ours, so
-            # there is no engine convention to preserve — and the dict goes to the `callbacks`
-            # below as well, which would otherwise see different names from the trackers.
-            logs = {"train/loss": total / batches if batches else float("nan")}
-            if batches:
-                logs.update({f"train/{k}": v / batches for k, v in sums.items()})
-                if matrix is not None:
-                    logs.update({f"train/{name}": fn(matrix) for name, fn in train_confusion.items()})
-            if val_seq is not None:
-                logs.update({f"val/{k}": v for k, v in self._evaluate(val_seq).items()})
-            # A `fit()` would have done this; a hand-written loop must. Forgetting it is
-            # INVISIBLE — training silently runs on one fixed row order forever.
-            train_seq.on_epoch_end()
-            for callback in self.callbacks or []:
-                flow(callback)(epoch, logs)
-            # Trackers are the other per-epoch consumer. A `fit()` forwards its logs to every
-            # attached logger; a hand-written loop reaches them the same way it reaches callbacks.
-            for tracker in trackers:
-                tracker.log_metrics(names(logs), step=epoch)
-            logger.info(f"epoch {epoch + 1}/{self.max_epochs}: " + ", ".join(f"{k}={v:.4f}" for k, v in logs.items()))
-
-        self._computed_metrics = names(logs)
-        logger.info("Training complete.")
-        save_class_names(self._class_names, self._artifact_dir(), trackers)
-        write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
-        # Uploads the log file AND stamps the manifest's terminal status. Not optional once a
-        # manifest exists: left unfinished it stays `running`, and matrainer's atexit hook then
-        # calls a successful run `interrupted`.
-        capture_log_file(trackers, manifest=manifest, status="success")
-
-    @entrypoint("evaluate", role="evaluator")
-    def evaluate(self) -> None:
-        self.test()
-
-    @entrypoint("test", role="evaluator", primary=True)
-    def test(self) -> None:
-        if self.test_set is None:
-            raise ValueError("MlxClassifier.test() requires a 'test_set'.")
-        scored = self._evaluate(self._sequence(self.test_set), "test")
-        self._computed_metrics = as_metric_names(self.metric_names)({f"test/{k}": v for k, v in scored.items()})
-        logger.info(f"Evaluation complete: {self._computed_metrics}")
-        write_metrics_sidecar(self.metrics_sidecar_path, self._computed_metrics, self.experiment_name, self.run_name)
-
-    @entrypoint("predict", role="predictor", primary=True)
-    def predict(self) -> None:
-        """Stream per-record predictions to the sink.
-
-        Walks ``sequence.batches()`` — the COLLATED RECORD batches — rather than the arrays,
-        because the sink needs the metadata that lives beside the image and ``_to_arrays`` has
-        already dropped it. One walk, so output and metadata cannot desync.
-        """
-        if self.test_set is None:
-            raise ValueError("MlxClassifier.predict() requires a 'test_set'.")
-        sink = flow(self.predictions_sink)
-        sequence = self._sequence(self.test_set, with_targets=False)
-        self.model.train(False)  # module STATE, not a per-call flag — see `_evaluate`
-        for index, batch in enumerate(sequence.batches()):
-            logits = self.model(mx.array(sequence[index][0]))
-            mx.eval(logits)
-            if sink is not None:
-                self._write_predictions(np.asarray(logits), batch, cast(PredictionsSink, sink))
-        if sink is not None and hasattr(sink, "close"):
-            sink.close()
-        logger.info("Prediction complete.")
-
-    # ---- predictions -------------------------------------------------------- #
-    def _write_predictions(self, logits: np.ndarray, batch: Any, sink: PredictionsSink) -> None:
-        """One :class:`~recordstream.ClassificationOutput` per record, paired with its metadata.
-
-        The contract is recordstream's and framework-neutral — generic in its array type, so the
-        SAME sink consumes this numpy output and every other backend's.
-        """
-        probs = _softmax(logits)
-        per_record_meta = batch_metadata(batch, exclude=(self.input_key, self.target_key))
-        for i in range(len(logits)):
-            out: ClassificationOutput[np.ndarray] = {
-                "logits": logits[i],
-                "probs": probs[i],
-                "class_idx": np.asarray(np.argmax(logits[i])),
-            }
-            meta = per_record_meta[i] if per_record_meta and i < len(per_record_meta) else {}
-            sink.write(out, meta)
-
-    # ---- artifacts + tracking ----------------------------------------------- #
     def _artifact_dir(self) -> Optional[str]:
-        """Where run artifacts land — beside the sidecar when one is configured."""
         if self.metrics_sidecar_path:
             return str(Path(self.metrics_sidecar_path).expanduser().parent)
         return None
 
-    def _live_trackers(self) -> List[Tracker]:
-        """Normalize and flow the wired trackers ONCE, writing the result back to the slot.
-
-        Written back rather than returned fresh each call: ``flow()`` on a LIVE object returns
-        that same object (idempotent), but a deferred ``Fluid`` would be REBUILT on every call —
-        two MLflow runs for one training run. One attribute, flowed in place, is the same idiom
-        this class already uses for ``model`` / ``loss_fn`` / ``predictions_sink``.
-        """
-        # `flow()` resolves a marker to the live object, which the Lazy-typed slot cannot
-        # express — the cast says what the call guarantees.
-        self.trackers = [flow(t) for t in as_tracker_list(self.trackers) or []]
-        return cast(List[Tracker], self.trackers)
-
-    # ---- @outputs ------------------------------------------------------------ #
-    @property
-    @output
-    def trained_model(self) -> Any:
-        """The live trained model (post-run ``@output``). Raises while still deferred."""
-        if isinstance(self.model, Fluid):
-            raise RuntimeError("trained_model is only available after run() — the model is still deferred.")
-        return self.model
-
-    @property
-    @output
-    def computed_metrics(self) -> Dict[str, float]:
-        """Final scalar metrics from the last fit/evaluate."""
-        return dict(self._computed_metrics)
-
-    @property
-    @output
-    def class_names(self) -> List[str]:
-        """Resolved class names for the run (post-run ``@output``), or ``[]``."""
-        if self.label_map is not None:
-            return list(self.label_map.class_names)
-        return list(self._class_names or [])
+    # ---- predictions -------------------------------------------------------------------------- #
+    def _prediction_output(self, preds: Any) -> Any:
+        """The batched :class:`~recordstream.ClassificationOutput` — the machinery slices it."""
+        logits = np.asarray(preds)
+        out: ClassificationOutput[np.ndarray] = {
+            "logits": logits,
+            "probs": _softmax(logits),
+            "class_idx": np.argmax(logits, axis=-1),
+        }
+        return out
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:
@@ -631,9 +270,6 @@ def _softmax(logits: np.ndarray) -> np.ndarray:
 
 def _as_loss(value: Optional[MlxLoss], multilabel: bool = False) -> Callable[..., Any]:
     """An MLX loss from a callable or its NAME in ``mlx.nn.losses``.
-
-    The string form is not sugar: MLX's losses are plain FUNCTIONS, so there is no class for a
-    ``!class:`` tag to name or for confluid's registry to tag — the fastai and JAX situation.
 
     ``binary_cross_entropy`` is bound with ``with_logits=True`` for the multi-label case,
     because the head emits raw logits and the MLX default expects probabilities. That is the
@@ -658,9 +294,9 @@ def _as_loss(value: Optional[MlxLoss], multilabel: bool = False) -> Callable[...
 def _as_metric(value: MlxMetric) -> Callable[..., Any]:
     """A PER-BATCH metric from a callable or its NAME (``"accuracy"`` / ``"accuracy_multi"``).
 
-    A confusion-matrix name (``"f1_macro"``) never arrives here — ``_partition_metrics`` removes
-    those first — but it is listed in the error, so a typo next to a supported name does not
-    read as "this backend has no such metric".
+    A confusion-matrix name (``"f1_macro"``) never reaches here — ``_partition_metrics`` takes
+    those out first — but it is listed in the error, because "unknown metric" for a name the
+    backend does support would send the reader looking in the wrong place.
     """
     built = flow(value)
     if callable(built):
@@ -670,20 +306,3 @@ def _as_metric(value: MlxMetric) -> Callable[..., Any]:
         known = sorted({*_METRICS, *_CONFUSION_METRICS})
         raise ValueError(f"Unknown metric {built!r}. Known names: {', '.join(known)}.")
     return metric
-
-
-def _as_optimizer(value: MlxOptimizer, learning_rate: float) -> Any:
-    """An ``mlx.optimizers`` optimizer from an instance, a class, or its NAME.
-
-    Unlike optax (factories) MLX ships CLASSES, so a name is resolved and INSTANTIATED with the
-    learning rate — keeping the shared ``learning_rate`` knob the one place an LR is written.
-    """
-    built = flow(value)
-    if isinstance(built, optim.Optimizer):
-        return built
-    if isinstance(built, type) and issubclass(built, optim.Optimizer):
-        return built(learning_rate=learning_rate)  # type: ignore[call-arg]  # each concrete optimizer takes it
-    factory = getattr(optim, str(built), None)
-    if factory is None:
-        raise ValueError(f"Unknown MLX optimizer {built!r}. Names come from `mlx.optimizers` — e.g. Adam, AdamW, SGD.")
-    return factory(learning_rate=learning_rate)

@@ -97,7 +97,10 @@ def test_every_backend_uses_the_shared_combination_rule(stem: str) -> None:
     moving between them would silently change which metrics it computes.
     """
     source = (SOURCE_DIR / f"{stem}.py").read_text()
-    if "LightningRunnable" in source or "TorchLoopRunnable" in source or "FastaiRunnable" in source:
+    if any(
+        m in source
+        for m in ("LightningRunnable", "TorchLoopRunnable", "FastaiRunnable", "KerasRunnable", "TensorFlowRunnable")
+    ):
         # Built on a shared machinery base (2026-08-06), whose `_build_split_metrics` /
         # `_learner_metrics` applies the shared combination rule — pinned in matrainer's
         # own suite; the module must not shadow it with an inline re-derivation.

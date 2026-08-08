@@ -40,7 +40,8 @@ def built_on_shared_base(source: str) -> bool:
     `capture_log_file` in `fit` (the owned loop), metric forwarding, the naming knob's
     application — all pinned in matrainer's own suite. What such a module must not do is
     SHADOW that wiring."""
-    return "LightningRunnable" in source or "TorchLoopRunnable" in source or "FastaiRunnable" in source
+    markers = ("LightningRunnable", "TorchLoopRunnable", "FastaiRunnable", "KerasRunnable", "TensorFlowRunnable")
+    return any(marker in source for marker in markers)
 
 
 def assert_does_not_shadow_the_tracking(stem: str, source: str) -> None:
@@ -331,18 +332,24 @@ def test_no_tracker_write_is_sequenced_after_the_run_ends(stem: str) -> None:
     MLflow tolerates it (the file lands, status stays FINISHED); `WandbTracker.finish()` drops
     the run handle, so the next access starts a NEW run and the artifact lands there instead.
 
-    Read as SOURCE ORDER rather than by running: neither backend's engine is installed on every
-    machine, and the ordering is a property of the code either way.
+    Since P5 the ordering is STRUCTURAL: the artifact write lives in the task hooks'
+    `_before_fit`, and the machinery bases call that hook BEFORE the training pass — so the
+    check reads the hook's body here and the call order in matrainer's source.
     """
-    order = _statement_order(stem, {"save_class_names", "fit", "on_train_end"})
-    end_of_training = order.get("fit") or order.get("on_train_end")
+    import inspect
 
-    assert end_of_training is not None, f"{stem}: found neither model.fit() nor callbacks.on_train_end()"
-    assert "save_class_names" in order, f"{stem}: no save_class_names call in fit()"
-    assert order["save_class_names"] < end_of_training, (
-        f"{stem} logs the class-names artifact at line {order['save_class_names']}, after the "
-        f"training call at line {end_of_training} — by then the tracking callback has ended the run."
-    )
+    from matrainer.keras.trainer import KerasRunnable
+    from matrainer.tensorflow.loop import TensorFlowRunnable
+
+    from sonair.classification_keras import ClassificationKerasHooks
+
+    source = (SOURCE_DIR / f"{stem}.py").read_text()
+    assert "def fit" not in source and "def _before_fit" not in source, f"{stem} shadows the machinery ordering"
+    assert "save_class_names" in inspect.getsource(ClassificationKerasHooks._before_fit)
+    machinery = KerasRunnable if stem == "keras_classifier" else TensorFlowRunnable
+    body = inspect.getsource(machinery.fit)
+    training_call = body.index("model.fit(" if stem == "keras_classifier" else "_run_epoch(")
+    assert body.index("_before_fit()") < training_call, "the hook must run BEFORE the training pass"
 
 
 @pytest.mark.parametrize("stem", ["fastai_classifier", "huggingface_classifier"])

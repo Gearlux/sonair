@@ -292,11 +292,13 @@ def _dense_model(keras: Any, num_classes: int = 3) -> Any:
 @requires_tensorflow
 def test_the_backend_check_names_the_engine_it_found(monkeypatch: pytest.MonkeyPatch) -> None:
     """Wrong engine -> a message naming the fix, not a failure inside the tape."""
-    import sonair.tensorflow_classifier as module
+    import matrainer.tensorflow.loop as machinery
 
-    monkeypatch.setattr(module, "keras_backend", lambda: "torch")
+    monkeypatch.setattr(machinery, "keras_backend", lambda: "torch")
     with pytest.raises(RuntimeError, match="KERAS_BACKEND"):
-        module.TensorFlowClassifier._require_tensorflow_backend()
+        from sonair.tensorflow_classifier import TensorFlowClassifier
+
+        TensorFlowClassifier._require_tensorflow_backend()
 
 
 @requires_tensorflow
@@ -412,11 +414,19 @@ def test_an_explicitly_wired_loss_is_never_replaced(keras_module: Any) -> None:
     assert clf.loss is chosen
 
 
+def _as_metric(value: Any, multilabel: bool) -> Any:
+    """The task's alias resolution, driven the way the loop drives it (an instance method
+    on the shared hooks since P5)."""
+    from sonair.tensorflow_classifier import TensorFlowClassifier
+
+    clf = TensorFlowClassifier.__new__(TensorFlowClassifier)
+    clf.multilabel = multilabel
+    return clf._as_metric(value)
+
+
 @requires_tensorflow
 def test_the_accuracy_alias_resolves_the_way_compile_would(keras_module: Any) -> None:
     """``keras.metrics.get("accuracy")`` is elementwise equality — 0.0 forever on a logits head."""
-    from sonair.tensorflow_classifier import _as_metric
-
     assert isinstance(_as_metric("accuracy", multilabel=False), keras_module.metrics.SparseCategoricalAccuracy)
     assert isinstance(_as_metric("accuracy", multilabel=True), keras_module.metrics.BinaryAccuracy)
     # ...and it is NAMED after what the caller wrote, not after the class picked for them: the
@@ -431,15 +441,11 @@ def test_the_accuracy_alias_resolves_the_way_compile_would(keras_module: Any) ->
 )
 @requires_tensorflow
 def test_other_metric_aliases_still_resolve_to_metric_objects(keras_module: Any, value: str) -> None:
-    from sonair.tensorflow_classifier import _as_metric
-
     assert isinstance(_as_metric(value, multilabel=False), keras_module.metrics.Metric)
 
 
 @requires_tensorflow
 def test_a_metric_class_is_instantiated(keras_module: Any) -> None:
-    from sonair.tensorflow_classifier import _as_metric
-
     resolved = _as_metric(keras_module.metrics.SparseCategoricalAccuracy, multilabel=False)
     assert isinstance(resolved, keras_module.metrics.SparseCategoricalAccuracy)
 
@@ -447,7 +453,7 @@ def test_a_metric_class_is_instantiated(keras_module: Any) -> None:
 @requires_tensorflow
 @pytest.mark.parametrize("value", ["adam", "Adam"], ids=["lowercase", "class-name"])
 def test_optimizer_aliases_resolve_to_instances(keras_module: Any, value: str) -> None:
-    from sonair.tensorflow_classifier import _as_optimizer
+    from matrainer.tensorflow.loop import _as_optimizer
 
     assert isinstance(_as_optimizer(value), keras_module.optimizers.Optimizer)
 
@@ -455,7 +461,7 @@ def test_optimizer_aliases_resolve_to_instances(keras_module: Any, value: str) -
 @requires_tensorflow
 def test_the_output_signature_follows_the_real_batch() -> None:
     """Derived from batch zero so the batch SHAPE stays defined only in ``_to_arrays``."""
-    from sonair.tensorflow_classifier import _output_signature
+    from matrainer.tensorflow.loop import _output_signature
 
     specs = _output_signature((np.zeros((4, 8, 8, 3), dtype="float32"), np.zeros((4,), dtype="int64")))
     assert [tuple(s.shape) for s in specs] == [(None, 8, 8, 3), (None,)]
@@ -551,7 +557,7 @@ def test_fit_without_a_train_set_is_a_clear_error(keras_module: Any) -> None:
     from sonair.tensorflow_classifier import TensorFlowClassifier
 
     clf = TensorFlowClassifier(model=_Shim(_dense_model(keras_module), 3), num_classes=3)
-    clf._compile()
+    clf._build_live_objects()
     with pytest.raises(ValueError, match="train_set"):
         clf.fit()
 
@@ -562,7 +568,7 @@ def test_eval_verbs_without_a_test_set_are_clear_errors(keras_module: Any, metho
     from sonair.tensorflow_classifier import TensorFlowClassifier
 
     clf = TensorFlowClassifier(model=_Shim(_dense_model(keras_module), 3), num_classes=3)
-    clf._compile()
+    clf._build_live_objects()
     with pytest.raises(ValueError, match="test_set"):
         getattr(clf, method)()
 

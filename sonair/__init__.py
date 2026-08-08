@@ -19,8 +19,7 @@ nor the reverse. Touching a name whose backend is missing raises an :class:`Impo
 the exact extra, instead of a traceback from three libraries down.
 """
 
-import importlib
-from typing import Any
+from matrainer._exports import lazy_exports
 
 __version__ = "0.2.0"
 
@@ -74,25 +73,6 @@ _BACKEND_NAMES = {
 
 __all__ = [*_BACKEND_NAMES]
 
-
-def __getattr__(name: str) -> Any:
-    """Resolve a backend-owned name on first use, or explain which extra is missing."""
-    entry = _BACKEND_NAMES.get(name)
-    if entry is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    module_path, extra = entry
-    try:
-        return getattr(importlib.import_module(module_path), name)
-    except ImportError as exc:
-        # The failure is a MISSING BACKEND, not a broken sonair — say so, and say what to run.
-        # Chained (`from exc`) so the underlying "No module named 'timm'" stays visible.
-        raise ImportError(
-            f"sonair.{name} needs the {extra!r} backend, which is not installed.\n"
-            f"  pip install 'sonair[{extra}]'\n"
-            f"(underlying import error: {exc})"
-        ) from exc
-
-
-def __dir__() -> Any:
-    """Advertise the lazy names to ``dir()`` / tab-completion."""
-    return sorted({*globals(), *_BACKEND_NAMES})
+# The resolver is matrainer's `lazy_exports` (the machinery was identical in every training
+# project's root); the `_BACKEND_NAMES` table above is the project DATA it runs on.
+__getattr__, __dir__ = lazy_exports(__name__, _BACKEND_NAMES)

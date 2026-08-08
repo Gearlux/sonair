@@ -5,12 +5,11 @@ subcommand. These tests pin the seams that make that honest:
 
 1. Three verbs, each binding the config's ``runnable:`` key and forcing the
    verb's task (the verb wins over the YAML).
-2. ``--framework`` normalizes to the ``--scope framework=…`` liquifai reads, in
-   every spelling, so the flag means one thing whatever the config declares.
-3. The two things that must happen BEFORE the config is loaded — pinning
-   ``KERAS_BACKEND`` and importing a backend's loss/metric registrations — read
-   the framework from ``argv``, which is the only source available that early.
-4. The shipped example resolves to a complete runnable under EVERY framework it
+2. The registrations pre-step imports THIS project's modules (the machinery —
+   the ``--framework`` rewrite, the keras engine pin, the dispatch guard, their
+   ORDER — is `matrainer.cli`'s since 2026-08-07 and is pinned in matrainer's
+   own `tests/test_cli.py`; what stays here is sonair's half of each seam).
+3. The shipped example resolves to a complete runnable under EVERY framework it
    declares. That is the regression pin for the bug this shape was built to
    remove: a scope block swapping ``runnable:`` used to take the ``model:``
    nested under it, and ``--framework torch`` died with
@@ -18,7 +17,6 @@ subcommand. These tests pin the seams that make that honest:
 """
 
 import inspect
-import os
 import tomllib
 from pathlib import Path
 from typing import Any, Dict, List, Set
@@ -26,9 +24,10 @@ from typing import Any, Dict, List, Set
 import confluid
 import pytest
 from confluid import configurable
+from matrainer.cli import VERB_TASKS, Framework, default_dispatch, register_frameworks, registration_modules
 
 from sonair import cli
-from sonair.cli import FRAMEWORKS, VERB_TASKS, Framework
+from sonair.cli import FRAMEWORKS
 
 VERBS = ("train", "evaluate", "predict")
 
@@ -80,10 +79,8 @@ def test_every_framework_names_a_real_registration_module(framework: str) -> Non
     """
     import importlib.util
 
-    module = FRAMEWORKS[framework].registrations
-    if module is None:
-        return
-    assert importlib.util.find_spec(module) is not None, f"{framework} names a missing module {module!r}"
+    for module in registration_modules(FRAMEWORKS[framework]):
+        assert importlib.util.find_spec(module) is not None, f"{framework} names a missing module {module!r}"
 
 
 def test_tensorflow_shares_the_keras_registrations() -> None:
@@ -122,11 +119,6 @@ def test_verb_overrides_the_configured_task(verb: str, task: str) -> None:
     assert runnable.ran
 
 
-def test_dispatch_without_a_runnable_is_a_clear_error() -> None:
-    with pytest.raises(ValueError, match="runnable:"):
-        cli._dispatch(None, "fit")
-
-
 @configurable
 class _ConfigRunnable:
     """A runnable with the ergonomic-knob shape a flat sonair config drives."""
@@ -160,7 +152,7 @@ def test_dispatch_builds_with_the_flat_configs_top_level_keys(monkeypatch: pytes
     try:
         built: dict = {}
         monkeypatch.setattr(_ConfigRunnable, "run", lambda self: built.update(vars(self)))
-        cli._dispatch(document["runnable"], "predict")
+        default_dispatch(document["runnable"], "predict")
     finally:
         set_context(previous)
 
@@ -169,108 +161,9 @@ def test_dispatch_builds_with_the_flat_configs_top_level_keys(monkeypatch: pytes
     assert built["task"] == "predict", "the verb still wins over the config"
 
 
-def test_dispatch_uses_the_shared_materialize_helper(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pins the seam itself: `_dispatch` delegates building to recordstream's helper."""
-    import recordstream.cli as rs_cli
-
-    seen: list = []
-    runnable = _FakeRunnable(task="something-else")
-
-    def _spy(node: Any) -> Any:
-        seen.append(node)
-        return node
-
-    monkeypatch.setattr(rs_cli, "materialize_runnable", _spy)
-    cli._dispatch(runnable, "fit")
-
-    assert seen == [runnable], "_dispatch must build through materialize_runnable, not a bare flow()"
-    assert runnable.task == "fit" and runnable.ran
-
-
 # ---------------------------------------------------------------------------
-# `--framework` is the scope flag, spelled ergonomically
+# The registrations pre-step, against THIS project's table
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("flag", [["--framework", "keras"], ["--framework=keras"]])
-def test_the_framework_flag_normalizes_to_a_scope(flag: List[str]) -> None:
-    """liquifai binds `--KEY VAL` only for dimensions the config DECLARES; against a config
-    with no `!scope:framework=…` block a bare `--framework keras` would be read as an
-    override instead. Rewriting makes the flag mean one thing either way."""
-    argv = ["sonair", "train", "cfg.yaml", *flag]
-    cli._normalize_framework_flag(argv)
-    assert argv == ["sonair", "train", "cfg.yaml", "--scope", "framework=keras"]
-
-
-@pytest.mark.parametrize(
-    "explicit",
-    [["--scope", "framework=keras"], ["--scope=framework=keras"], ["-s", "framework=keras"]],
-)
-def test_an_explicit_scope_spelling_is_left_alone(explicit: List[str]) -> None:
-    argv = ["sonair", "train", "cfg.yaml", *explicit]
-    before = list(argv)
-    cli._normalize_framework_flag(argv)
-    assert argv == before
-
-
-def test_argv_without_a_framework_is_untouched() -> None:
-    argv = ["sonair", "train", "cfg.yaml", "--max_epochs", "3"]
-    before = list(argv)
-    cli._normalize_framework_flag(argv)
-    assert argv == before
-
-
-@pytest.mark.parametrize(
-    "spelling",
-    [
-        ["--framework", "keras"],
-        ["--framework=keras"],
-        ["--scope", "framework=keras"],
-        ["--scope=framework=keras"],
-        ["-s", "framework=keras"],
-        ["-s=framework=keras"],
-    ],
-)
-def test_the_requested_framework_is_read_from_every_spelling(spelling: List[str]) -> None:
-    """Both pre-load steps read argv, so every spelling a user may type must be seen."""
-    assert cli._requested_framework(["sonair", "train", "cfg.yaml", *spelling]) == "keras"
-
-
-def test_no_framework_flag_reads_as_none() -> None:
-    assert cli._requested_framework(["sonair", "train", "cfg.yaml"]) is None
-    assert cli._requested_framework(["sonair", "--help"]) is None
-
-
-# ---------------------------------------------------------------------------
-# The two pre-load steps
-# ---------------------------------------------------------------------------
-
-
-def test_tensorflow_pins_keras_backend_before_anything_imports_keras(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keras reads KERAS_BACKEND once, at import time, and `recordstream.keras` defaults it to
-    the first backend INSTALLED — torch, on a machine that also has sonair[lightning]. The
-    handler is too late to fix that: liquifai resolves the config first, and a
-    `!class:sonair.TensorFlowClassifier` tag imports keras during that resolution."""
-    monkeypatch.delenv("KERAS_BACKEND", raising=False)
-    cli._pin_keras_backend(cli._requested_framework(["sonair", "train", "c.yaml", "--framework", "tensorflow"]))
-
-    assert os.environ.get("KERAS_BACKEND") == "tensorflow"
-
-
-def test_an_explicit_keras_backend_is_never_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`setdefault`, so a deliberate choice survives — `initialize()` then reports the mismatch."""
-    monkeypatch.setenv("KERAS_BACKEND", "jax")
-    cli._pin_keras_backend("tensorflow")
-
-    assert os.environ["KERAS_BACKEND"] == "jax"
-
-
-@pytest.mark.parametrize("framework", ["lightning", "torch", "keras", "fastai", "jax", "mlx", None])
-def test_no_other_framework_touches_keras_backend(monkeypatch: pytest.MonkeyPatch, framework: Any) -> None:
-    monkeypatch.delenv("KERAS_BACKEND", raising=False)
-    cli._pin_keras_backend(framework)
-
-    assert "KERAS_BACKEND" not in os.environ
 
 
 def test_registration_imports_the_frameworks_own_module(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -278,7 +171,7 @@ def test_registration_imports_the_frameworks_own_module(monkeypatch: pytest.Monk
 
     seen: List[str] = []
     monkeypatch.setattr(importlib, "import_module", lambda name: seen.append(name))
-    cli._register_classification("keras")
+    register_frameworks("keras", FRAMEWORKS)
 
     assert seen == ["sonair.keras_classification"]
 
@@ -293,20 +186,9 @@ def test_registration_imports_nothing_when_there_is_nothing_to_import(
 
     seen: List[str] = []
     monkeypatch.setattr(importlib, "import_module", lambda name: seen.append(name))
-    cli._register_classification(framework)
+    register_frameworks(framework, FRAMEWORKS)
 
     assert seen == []
-
-
-def test_a_missing_backend_is_skipped_rather_than_raised(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A partial install is normal; its absent registrations are the correct outcome."""
-    import importlib
-
-    def _boom(name: str) -> None:
-        raise ImportError(f"No module named {name!r}")
-
-    monkeypatch.setattr(importlib, "import_module", _boom)
-    cli._register_classification("keras")  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -395,8 +277,9 @@ def test_an_undeclared_framework_is_rejected_with_the_real_values() -> None:
 
 
 def test_framework_is_a_two_field_record_of_data() -> None:
-    """No per-backend BEHAVIOUR in the table: `_pin_keras_backend` would be a third
-    column that is None seven times out of eight, which is what keeps it in main()."""
+    """No per-backend BEHAVIOUR in the table: the keras engine pin would be a third
+    column that is None seven times out of eight, which is what keeps it in the
+    shared machinery (`matrainer.cli.pin_keras_backend`)."""
     assert Framework._fields == ("description", "registrations")
     assert all(isinstance(spec, Framework) for spec in FRAMEWORKS.values())
 

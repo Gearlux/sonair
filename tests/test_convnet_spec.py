@@ -188,7 +188,27 @@ def test_every_implementation_takes_the_same_constructor_knobs() -> None:
         classes.append(TensorFlowConvNet)
 
     assert len(classes) >= 2, "need two installed implementations to compare"
-    shared = {"num_classes", "input_shape", "widths", "dropout"}
+    # `seed` joined the shared set on 2026-08-08, when KerasConvNet — the ONE implementation
+    # without it — gained the knob: its sweep rows were the only ones moving between identical
+    # runs (the raidar KerasFcos story replayed, and the same fix).
+    shared = {"num_classes", "input_shape", "widths", "dropout", "seed"}
     for cls in classes:
         params = set(inspect.signature(cls.__init__).parameters) - {"self"}
         assert shared <= params, f"{cls.__name__} is missing {shared - params}"
+
+
+def test_the_keras_seed_actually_reproduces_the_weights() -> None:
+    """The knob is only worth having if it BINDS — assert on the built weights, not the API."""
+    if not _usable("keras", "keras"):
+        pytest.skip("keras is not installed")
+    import numpy as np
+
+    from sonair.convnet.keras_convnet import KerasConvNet
+
+    def first_kernel(seed: int) -> Any:
+        model = KerasConvNet(num_classes=NUM_CLASSES, input_shape=INPUT, seed=seed)
+        return np.asarray(model.solidify().get_weights()[0])
+
+    a, b, other = first_kernel(0), first_kernel(0), first_kernel(1)
+    assert np.array_equal(a, b), "the same seed must rebuild the same weights"
+    assert not np.array_equal(a, other), "a different seed must not — else it is seeding nothing"

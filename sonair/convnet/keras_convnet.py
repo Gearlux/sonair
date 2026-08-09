@@ -41,6 +41,9 @@ class KerasConvNet(keras.Model):
         widths: Channels per conv block. Changing it breaks comparability with the other
             implementations — see :mod:`sonair.convnet.spec`.
         dropout: Dropout before the head; ``0.0`` disables it.
+        seed: Seed applied before the build, so a config reproduces its weights — the same knob
+            its four sibling implementations carry, and the reason this engine was the one whose
+            sweep rows moved between identical runs.
     """
 
     def __init__(
@@ -49,6 +52,7 @@ class KerasConvNet(keras.Model):
         input_shape: Tuple[int, int, int] = INPUT_SHAPE,
         widths: Tuple[int, ...] = CONV_WIDTHS,
         dropout: float = 0.0,
+        seed: int = 0,
     ) -> None:
         # Lazy: store only, and `super().__init__()` first — a `keras.Layer` refuses attribute
         # assignment before it. Same contract as `KerasModel`.
@@ -57,6 +61,7 @@ class KerasConvNet(keras.Model):
         self.input_shape = tuple(input_shape)
         self.widths = tuple(widths)
         self.dropout = dropout
+        self.seed = int(seed)
         self._model: Optional[Any] = None
 
     def solidify(self) -> Any:
@@ -68,6 +73,11 @@ class KerasConvNet(keras.Model):
                 "KerasConvNet.num_classes is not set — a classifier flows the dataset-derived "
                 "count in at run time, or set it explicitly."
             )
+        # Seeded like every sibling implementation, and for the same reason: an unseeded run is
+        # not comparable to itself, so a refactor cannot be checked by re-running it. Keras owns
+        # no per-layer seed argument the way raw TF does, so this is the global call its own
+        # docs prescribe — it covers the initializers of every layer built below.
+        keras.utils.set_random_seed(self.seed)
         inputs = keras.Input(shape=self.input_shape)
         x = inputs
         for width in self.widths:

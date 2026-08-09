@@ -90,6 +90,13 @@ class TimmModel(nn.Module):
             torch state-dict) saved by a previous training run, loaded after the
             backbone is built (so checkpoint values win). ``""`` (default) =
             none. The Lightning ``"model."`` prefix is stripped automatically.
+        seed: Seed for torch's global RNG, set when the backbone is BUILT — the same knob the
+            five shared-spec convnets carry, so ``seed`` means one thing across every model
+            here. A pretrained load still initializes the fresh ``num_classes`` head randomly,
+            so an unseeded run is not comparable to itself. Deliberately NOT restored after the
+            build (the restoration project measured a save-and-restore version: it reproduces
+            the MODEL inside a run that still does not reproduce) — seeding at build is a
+            run-level seed applied at the earliest useful moment.
 
     Attributes:
         checkpoint_strict: Whether to enforce strict key matching when loading
@@ -112,6 +119,7 @@ class TimmModel(nn.Module):
         num_classes: int = 0,
         pretrained: bool = True,
         checkpoint_path: str = "",
+        seed: int = 0,
     ) -> None:
         super().__init__()
         # Store config ONLY — no functional work (no timm.create_model, no
@@ -127,6 +135,7 @@ class TimmModel(nn.Module):
         self.in_channels: int = 3
         self.drop_rate: float = 0.0
         self.checkpoint_path = checkpoint_path
+        self.seed = int(seed)
         self.checkpoint_strict: bool = False
         # Lazy cache for the timm backbone — built once by solidify(). Registered
         # under the public name `classifier` so the state_dict round-trips as
@@ -181,6 +190,12 @@ class TimmModel(nn.Module):
                     f"TimmModel.num_classes must be >= 1 to build the backbone (got {self.num_classes}) — "
                     "set it explicitly, or let the classification trainer inject it from the dataset."
                 )
+            # Seeded at build like the shared-spec convnets and for the same reason: even a
+            # pretrained load initializes the fresh `num_classes` head randomly, so an unseeded
+            # run is not comparable to itself. The global RNG is deliberately not restored — the
+            # build happens once, before any training randomness is drawn, so this is a
+            # run-level seed applied at the earliest useful moment.
+            torch.manual_seed(self.seed)
             self.classifier = timm.create_model(
                 self.model_name,
                 pretrained=self.pretrained,

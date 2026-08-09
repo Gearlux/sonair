@@ -60,6 +60,10 @@ class TensorFlowModel(tf.Module):
         trainable: Whether the loaded variables take gradients. A SavedModel exported for
             inference may carry none at all; see :meth:`solidify`.
         tags: The MetaGraph tags to load. TensorFlow's default is ``serve``.
+
+    There is deliberately NO ``seed`` knob, unlike every other model here: the build is pure
+    deserialization — every weight comes from the artifact, no head is attached, and nothing
+    random is drawn — so a seed would seed nothing and read as a promise the class cannot keep.
     """
 
     def __init__(

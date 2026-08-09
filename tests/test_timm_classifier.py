@@ -219,3 +219,24 @@ def test_logits_are_differentiable() -> None:
     loss = logits.sum()
     loss.backward()
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.parameters())
+
+
+# --- Seed ------------------------------------------------------------------
+
+
+def test_the_seed_actually_reproduces_the_weights() -> None:
+    """The knob is only worth having if it BINDS — assert on the built weights, not the API.
+
+    Even a pretrained load initializes the fresh `num_classes` head randomly, so the sweep's
+    zoo rows moved between identical runs until the wrapper seeded its build (2026-08-09, the
+    restoration project's 2026-08-06 wrapper-seeding precedent).
+    """
+
+    def first_param(seed: int) -> torch.Tensor:
+        model = _make_model(num_classes=4, seed=seed)
+        model.solidify()
+        return next(model.parameters()).detach().clone()
+
+    a, b, other = first_param(0), first_param(0), first_param(1)
+    assert torch.equal(a, b), "the same seed must rebuild the same weights"
+    assert not torch.equal(a, other), "a different seed must not — else it is seeding nothing"

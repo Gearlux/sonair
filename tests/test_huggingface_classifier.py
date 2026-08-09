@@ -11,6 +11,7 @@ Skipped when transformers is not installed — it is a selectable backend
 (``sonair[huggingface]``), not a core dependency.
 """
 
+import inspect
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
@@ -586,3 +587,26 @@ def test_there_is_no_train_metrics_slot_and_that_is_the_trainers_doing() -> None
 
     assert "train_metrics" not in inspect.signature(HuggingFaceClassifier.__init__).parameters
     assert {"val_metrics", "test_metrics"} <= set(inspect.signature(HuggingFaceClassifier.__init__).parameters)
+
+
+class TestTheSeedCoversTheModelBuild:
+    """The seed must be applied BEFORE the model is built, which is the whole point of the knob.
+
+    `transformers.Trainer` applies `TrainingArguments.seed` (42 by default) when TRAINING
+    starts — by which time this classifier has already constructed the network and randomly
+    reinitialized its `num_labels` head, so that init was never covered. The detection project
+    measured a 3.4x metric spread from exactly this ordering before its 2026-08-06 fix; this is
+    the same fix (default 42, so nobody's behaviour changed).
+    """
+
+    def test_initialize_seeds_BEFORE_it_builds_the_model(self) -> None:
+        body = inspect.getsource(HuggingFaceClassifier.initialize)
+        code = body.split('"""')[-1]
+        assert "set_seed(self.seed)" in code, "initialize() must apply the declared seed"
+        assert code.index("set_seed(self.seed)") < code.index(
+            "super().initialize()"
+        ), "the seed is applied AFTER the model is built — the head init is uncovered"
+
+    def test_the_argument_floor_carries_the_same_seed(self) -> None:
+        clf = HuggingFaceClassifier(model=_NO_MODEL, seed=7)
+        assert clf._argument_floor()["seed"] == 7

@@ -164,6 +164,10 @@ class HuggingFaceClassifier(ClassificationBase, HuggingFaceRunnable):
             :class:`~matrainer.metric_names.MetricNames`. A ``Trainer`` writes ``train_*`` and
             ``eval_*``; the default translates those to the canonical ``train/*`` and ``val/*``
             on the way to the trackers and the sidecar.
+        seed: Seed applied BEFORE the model is built and passed on into ``TrainingArguments``
+            (default 42 — the transformers default, so nobody's behaviour changed). The
+            Trainer's own seed comes too late to cover the randomly reinitialized head; see
+            :meth:`initialize`.
 
     Post-construction slots (YAML / broadcasting): ``training_arguments`` (every
     ``transformers.TrainingArguments`` knob the ctor does not restate — gradient accumulation,
@@ -199,6 +203,7 @@ class HuggingFaceClassifier(ClassificationBase, HuggingFaceRunnable):
         val_metrics: Optional[Sequence[HuggingFaceMetric]] = None,
         test_metrics: Optional[Sequence[HuggingFaceMetric]] = None,
         metric_names: Optional[Lazy[MetricNames]] = None,
+        seed: int = 42,
     ) -> None:
         super().__init__(
             model=model,
@@ -225,6 +230,7 @@ class HuggingFaceClassifier(ClassificationBase, HuggingFaceRunnable):
         )
         self.val_set = val_set
         self.num_classes = int(num_classes) if num_classes is not None else None
+        self.seed = int(seed)
         self.label_map = label_map
         self.multilabel: bool = False
         # Balancing is a loss-side convention and this backend has no loss slot — the model
@@ -232,17 +238,33 @@ class HuggingFaceClassifier(ClassificationBase, HuggingFaceRunnable):
         self.balance_classes = False
         self._class_names: Optional[List[str]] = None
 
-    # ---- setup: the label pipeline is the task base's; the problem_type is ours ------------- #
+    # ---- setup: the label pipeline is the task base's; the seed + problem_type are ours ----- #
     def initialize(self) -> None:
-        """Resolve labels and ``num_classes`` (task base), then route the loss choice.
+        """Seed, resolve labels and ``num_classes`` (task base), then route the loss choice.
 
-        ``problem_type`` is what an ``AutoModelForImageClassification`` reads in ``forward``
-        to pick BCE-with-logits over cross-entropy. Set here rather than on the model wrapper
-        because only the classifier has peeked the targets — the wrapper never sees the data.
+        The seed goes FIRST — ``transformers.Trainer`` applies ``TrainingArguments.seed``
+        (42 by default) when the TRAINING starts, by which time the wrapper has already
+        constructed the network and randomly reinitialized its ``num_labels`` head, so that
+        init was never covered (the detection project measured a 3.4x metric spread from
+        exactly this ordering before its 2026-08-06 fix; this is the same fix, default 42 so
+        nobody's behaviour changed). ``problem_type`` is what an
+        ``AutoModelForImageClassification`` reads in ``forward`` to pick BCE-with-logits over
+        cross-entropy — set here rather than on the model wrapper because only the classifier
+        has peeked the targets.
         """
+        from transformers import set_seed
+
+        set_seed(self.seed)
         super().initialize()
         if self.multilabel:
             self._network().config.problem_type = "multi_label_classification"
+
+    def _argument_floor(self) -> Dict[str, Any]:
+        floor = super()._argument_floor()
+        # The SAME seed `initialize()` already applied — one value, so the head's
+        # initialization and the Trainer's data order cannot disagree about the run.
+        floor["seed"] = self.seed
+        return floor
 
     def _default_hf_metrics(self) -> Optional[List[Any]]:
         """A multi-label target needs an element-wise, logit-thresholded accuracy."""

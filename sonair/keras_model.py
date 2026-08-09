@@ -63,6 +63,10 @@ class KerasModel(keras.Model):
         pooling: How the backbone's feature map is reduced before the head — ``"avg"`` or
             ``"max"``.
         dropout: Dropout applied before the head; ``0.0`` disables it.
+        seed: Seed applied before the build — the head is ALWAYS freshly initialized (and with
+            ``pretrained=False`` the whole backbone is), so an unseeded run is not comparable
+            to itself. The same knob every other model here carries; Keras owns no per-layer
+            seed argument, so this is the global ``set_random_seed`` its own docs prescribe.
     """
 
     def __init__(
@@ -73,6 +77,7 @@ class KerasModel(keras.Model):
         input_shape: Tuple[int, int, int] = (224, 224, 3),
         pooling: str = "avg",
         dropout: float = 0.0,
+        seed: int = 0,
     ) -> None:
         # Lazy: store only. No network build — see the module docstring. `super().__init__()`
         # comes first because a `keras.Layer` refuses attribute assignment before it.
@@ -83,6 +88,7 @@ class KerasModel(keras.Model):
         self.input_shape = tuple(input_shape)
         self.pooling = pooling
         self.dropout = dropout
+        self.seed = int(seed)
         self._model: Optional[Any] = None
 
     @property
@@ -120,6 +126,11 @@ class KerasModel(keras.Model):
             available = ", ".join(sorted(n for n in dir(keras.applications) if n[:1].isupper())[:8])
             raise ValueError(f"Unknown keras.applications model {self.model_name!r} (e.g. {available}, …).")
 
+        # Seeded like every sibling model, and for the same reason: the head below is always a
+        # fresh random init (the backbone too when pretrained=False), so an unseeded run is not
+        # comparable to itself. Keras owns no per-layer seed argument, so this is the global
+        # call its own docs prescribe — it covers every layer built below.
+        keras.utils.set_random_seed(self.seed)
         backbone = factory(
             input_shape=self.input_shape,
             include_top=False,

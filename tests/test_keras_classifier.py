@@ -394,3 +394,19 @@ def test_the_multilabel_default_is_also_from_logits() -> None:
     clf.initialize()
 
     assert isinstance(clf.loss, keras.losses.BinaryCrossentropy) and clf.loss.from_logits is True
+
+
+def test_the_model_seed_actually_reproduces_the_weights() -> None:
+    """The knob is only worth having if it BINDS — assert on the built weights, not the API.
+
+    The head is ALWAYS a fresh random init (the backbone too with pretrained=False), so the
+    sweep's keras_zoo row moved between identical runs until the wrapper seeded its build
+    (2026-08-09, the restoration project's 2026-08-06 wrapper-seeding precedent)."""
+
+    def first_kernel(seed: int) -> np.ndarray:
+        model = KerasModel(model_name="MobileNetV3Small", input_shape=INPUT, num_classes=3, seed=seed)
+        return np.asarray(model.solidify().get_weights()[0])
+
+    a, b, other = first_kernel(0), first_kernel(0), first_kernel(1)
+    assert np.array_equal(a, b), "the same seed must rebuild the same weights"
+    assert not np.array_equal(a, other), "a different seed must not — else it is seeding nothing"

@@ -447,7 +447,7 @@ expose. It contains exactly that and nothing else:
 
 ```yaml
 runnable: !class:sonair.TensorFlowClassifier
-  export_dir: ./exported/mnist      # writes saved_model.pb + variables/ after fit
+  export_dir: ./runs/exported/mnist      # writes saved_model.pb + variables/ after fit
   jit_compile: false                # XLA: faster on fixed shapes, real first-batch cost
   prefetch: true                    # tf.data.AUTOTUNE
 ```
@@ -929,7 +929,7 @@ the run trains, the tracker records, and nothing appears in the UI you are watch
 ```yaml
 trackers:
   - !class:matrainer.TensorBoardTracker      # a local directory, no service
-    save_dir: ./lightning_logs
+    save_dir: ./runs
 
   - !class:matrainer.AimTracker              # a local repository the UI serves
     save_dir: $AIM_REPO

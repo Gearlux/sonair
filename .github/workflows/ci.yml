@@ -43,7 +43,7 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/matrainer.git@main
-        uv pip install --system -e ".[dev,lightning,keras]"
+        uv pip install --system -e ".[dev,lightning,torch,keras,huggingface]"
     - name: Run Isort
       run: isort --check-only .
     - name: Run Black
@@ -84,7 +84,7 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/matrainer.git@main
-        uv pip install --system -e ".[dev,lightning,keras]"
+        uv pip install --system -e ".[dev,lightning,torch,keras,huggingface]"
     - name: Run Tests
       run: |
         if [ -d tests ] && find tests -name '*.py' | grep -q .; then
@@ -130,7 +130,7 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/matrainer.git@main
-        uv pip install --system -e ".[dev,lightning,keras]"
+        uv pip install --system -e ".[dev,lightning,torch,keras,huggingface]"
     - name: Run Examples
       run: |
         for f in examples/*.py; do
@@ -180,7 +180,7 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/matrainer.git@main
-        uv pip install --system -e ".[dev,lightning,keras]"
+        uv pip install --system -e ".[dev,lightning,torch,keras,huggingface]"
         # Notebook-only dependencies live in the optional `[notebook]` extra
         # when a project ships notebooks; absence is not an error.
         uv pip install --system -e ".[notebook]" 2>/dev/null || echo "No [notebook] extras declared; continuing with defaults."

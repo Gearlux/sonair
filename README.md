@@ -168,11 +168,12 @@ MNIST from a minimal flat config. A signal-domain pipeline (e.g. a drone-type
 classifier over RFUAV spectrograms) follows the same shape and demonstrates the
 typical stages:
 
-1. `RegionsJsonSource` reads per-window annotations.
+1. `waivefront.sources.RFUAVSource` windows the IQ straight from the RFUAV
+   archives; each record carries its drone-type `Label`.
 2. Waivefront ops render the IQ → spectrogram → image tensor.
 3. For a raw-spectrogram pipeline, `recordstream.ops.torch.ToTensor` tensorizes
-   the image and `recordstream.ops.target.MetadataToTargetOp` → `EncodeTargetOp`
-   turn the metadata label into a scalar int64 class id (the declarative
+   the image and `recordstream.ops.target.EncodeTarget` maps the class-name
+   `Label` to its class id (the declarative
    scikit-`LabelEncoder` analogue — there is no sonair/waivefront target op).
    The `recordstream.sources.huggingface.HuggingFaceSource` path skips step 3 entirely: HF's
    `ClassLabel` feature already yields an integer label.

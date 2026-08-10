@@ -192,7 +192,7 @@ trackers:
   - !class:matrainer.TensorBoardTracker
     experiment_name: mnist_classification
     run_name: efficientvit_b0_mnist
-    save_dir: ./lightning_logs
+    save_dir: ./runs
 
 # The other backends, and how each finds its server. Note the three DIFFERENT ways, because
 # a wrong guess here fails silently — the run trains, the tracker records, nothing appears in
@@ -227,7 +227,7 @@ trackers:
 #   keras: !scope:framework=keras
 #     callbacks:
 #       - !class:keras.callbacks.EarlyStopping { patience: 3 }
-#       - !class:keras.callbacks.CSVLogger { filename: ./keras_logs/history.csv }
+#       - !class:keras.callbacks.CSVLogger { filename: ./runs/keras_logs/history.csv }
 
 # ---------------------------------------------------------------------------
 # The framework blocks
@@ -270,7 +270,7 @@ torch: !scope:framework=torch
   runnable: !class:sonair.TorchClassifier
   # Bare-torch-only knobs: where to run, where the state_dict lands, optional clipping.
   #   device: auto            # auto | cpu | cuda | mps
-  #   checkpoint_dir: ./torch_runs/mnist
+  #   checkpoint_dir: ./runs/torch/mnist
   #   grad_clip: 1.0
 
 keras: !scope:framework=keras
@@ -336,7 +336,7 @@ keras: !scope:framework=keras
 #
 # tensorflow: !scope:framework=tensorflow
 #   runnable: !class:sonair.TensorFlowClassifier
-#     export_dir: ./exported/mnist_mobilenetv3
+#     export_dir: ./runs/exported/mnist_mobilenetv3
 #     jit_compile: false
 #   # THE MODEL SLOT TAKES FOUR THINGS HERE — one active, three alternatives. They differ
 #   # in what they wrap, not in how they are wired, which is the point:
@@ -359,7 +359,7 @@ keras: !scope:framework=keras
 #   # model: !lazy:sonair.KerasConvNet
 #   #   input_shape: [224, 224, 3]
 #   # model: !lazy:sonair.TensorFlowModel
-#   #   saved_model: ./exported/mnist_mobilenetv3
+#   #   saved_model: ./runs/exported/mnist_mobilenetv3
 #   #   num_classes: 10
 #   metrics: null                    # torchmetrics again — back to the sentinel, as in `keras`
 #   val_metrics: null

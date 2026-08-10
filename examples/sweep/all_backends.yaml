@@ -83,21 +83,21 @@ tensorboard: !scope:tracker=tensorboard
     - !class:matrainer.TensorBoardTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
-      save_dir: ./sweep_logs/tensorboard
+      save_dir: ./runs/tensorboard
 
 csv: !scope:tracker=csv
   trackers:
     - !class:matrainer.CsvTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
-      save_dir: ./sweep_logs/csv
+      save_dir: ./runs/csv
 
 aim: !scope:tracker=aim
   trackers:
     - !class:matrainer.AimTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
-      save_dir: ./sweep_logs/aim
+      save_dir: ./runs/aim
 
 clearml: !scope:tracker=clearml
   trackers:
@@ -112,7 +112,7 @@ wandb: !scope:tracker=wandb
     - !class:matrainer.WandbTracker
       experiment_name: !ref:experiment_name
       run_name: !ref:run_name
-      save_dir: ./sweep_logs/wandb
+      save_dir: ./runs/wandb
 
 # ===========================================================================
 # What the results are CALLED — nothing to set, and here is why it is mentioned
@@ -186,7 +186,7 @@ keras: !scope:framework=keras
 # IS Keras 3), and picking the tf-native one is what makes the comparison a comparison.
 tensorflow: !scope:framework=tensorflow
   runnable: !class:sonair.TensorFlowClassifier
-    export_dir: ./sweep_logs/exported/mnist_mobilenetv3
+    export_dir: ./runs/exported/mnist_mobilenetv3
     jit_compile: false
   model: !lazy:sonair.KerasModel
     model_name: MobileNetV3Small
@@ -238,7 +238,7 @@ huggingface: !scope:framework=huggingface
     # Deliberately not paid — see AGENTS.md.
     learning_rate: 0.00005
     metrics: [accuracy, f1_macro]
-    output_dir: ./sweep_logs/hf_runs
+    output_dir: ./runs/hf_runs
   model: !lazy:sonair.HuggingFaceModel
     model_name: microsoft/resnet-18
     pretrained: true

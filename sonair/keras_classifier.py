@@ -85,7 +85,7 @@ class KerasClassifier(ClassificationKerasHooks, KerasRunnable):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[keras.Model]],
+        model: Optional[Mandatory[Lazy[keras.Model]]] = None,
         train_set: Optional[Lazy[RecordSource]] = None,
         test_set: Optional[Lazy[RecordSource]] = None,
         num_classes: Optional[int] = None,

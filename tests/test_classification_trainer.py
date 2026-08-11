@@ -1315,7 +1315,9 @@ def test_entrypoint_markers_cover_every_task_literal_value() -> None:
 @pytest.mark.parametrize("task", get_args(ClassifierTask))
 def test_run_dispatches_to_the_entry_point_declaring_the_task(task: str) -> None:
     calls: List[str] = []
-    trainer = LightningClassifier(model=cast(Any, None), task=cast(Any, task))
+    # A non-empty stand-in: this test drives DISPATCH only, but run() guards the
+    # Mandatory model slot first (matrainer TrainerRunnable._require_model).
+    trainer = LightningClassifier(model=cast(Any, object()), task=cast(Any, task))
     trainer.initialize = lambda: None  # type: ignore[method-assign]
     for name in get_args(ClassifierTask):  # instance attrs win over the class's bound methods
         setattr(trainer, name, lambda n=name: calls.append(n))

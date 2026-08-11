@@ -179,7 +179,7 @@ class HuggingFaceClassifier(ClassificationBase, HuggingFaceRunnable):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[HuggingFaceNetwork]],
+        model: Optional[Mandatory[Lazy[HuggingFaceNetwork]]] = None,
         train_set: Optional[Lazy[RecordSource]] = None,
         val_set: Optional[Lazy[RecordSource]] = None,
         test_set: Optional[Lazy[RecordSource]] = None,

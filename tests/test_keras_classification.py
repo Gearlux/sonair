@@ -290,13 +290,13 @@ num_classes: 3
 def test_a_yaml_wired_loss_and_metric_reach_compile_built(tmp_path: Path) -> None:
     """The registrations only pay off if a chosen class survives into ``compile()``.
 
-    A nested ``!class:`` in a CONSTRUCTOR slot stays a deferred `Class` marker (only the
-    instance form ``!class:X()`` builds eagerly), so the slots are flowed at USE — the same
-    thing ``_callbacks()`` does for the ``logger`` slot. Without it Keras took the unbuilt
-    marker for a custom callable and failed inside ``compile``.
+    ``loss`` is declared ``Lazy[KerasLoss]``, so the slot keeps its marker at load whatever
+    the value spells — deferral is the receiver's declared contract. ``_compile()`` is what
+    flows it, and ``flow()`` is idempotent, so that one unconditional line is equally correct
+    for a marker and for a live object an operator assigned directly.
     """
     clf = _materialize(_WIRED, tmp_path)
-    assert isinstance(clf.loss, Fluid)  # deferred as materialized...
+    assert isinstance(clf.loss, Fluid)  # a `Lazy[T]` slot stays deferred until `_compile()`
     clf._compile()
 
     # `clf.model` IS the compiled `keras.Model` — `KerasModel` subclasses it, so `_compile()`
@@ -310,10 +310,16 @@ def test_a_yaml_wired_loss_and_metric_reach_compile_built(tmp_path: Path) -> Non
 
 
 def test_the_instance_form_with_parens_works_too(tmp_path: Path) -> None:
-    """`!class:X()` builds at materialize time — both spellings must reach the same place."""
+    """The trailing ``()`` is INERT — both spellings must reach the same place.
+
+    Confluid merged its eager and deferred markers (2026-08-11), so ``X()`` and ``X`` are the
+    same target: neither builds here, because the ``Lazy[KerasLoss]`` slot defers it either way.
+    This pins that the parens spelling did not survive as a second construction mode.
+    """
     clf = _materialize(_WIRED.replace("SparseCategoricalCrossentropy\n", "SparseCategoricalCrossentropy()\n"), tmp_path)
-    assert isinstance(clf.loss, keras.losses.SparseCategoricalCrossentropy)
+    assert isinstance(clf.loss, Fluid)
     clf._compile()
+    assert isinstance(clf.model.loss, keras.losses.SparseCategoricalCrossentropy)
     assert clf.model.loss.from_logits is True
 
 

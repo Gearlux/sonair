@@ -394,7 +394,9 @@ def test_flat_broadcasting_wires_trainer_attributes_from_top_level_keys() -> Non
     t = flow(t) if isinstance(t, Fluid) else t
 
     assert t.model == "MODEL_SENTINEL"
-    assert isinstance(t.train_set, Stream)  # train_set is typed Dataset[Any] — a real Dataset, not a sentinel
+    # `train_set` is declared `Lazy[RecordSource]`, so the slot keeps its marker until flowed —
+    # what this asserts is that the real dataset reached it, not a "VAL_SENTINEL"-style string.
+    assert isinstance(flow(_stub(t.train_set)), Stream)
     assert t.val_set == "VAL_SENTINEL"
     # max_epochs broadcasts into the stored attribute...
     assert t.max_epochs == 7

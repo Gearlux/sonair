@@ -138,7 +138,7 @@ runnable:
 # num_classes (10).
 model:
   _target_: sonair.TimmModel
-  _partial_: true                # num_classes is injected at run time
+  _partial_: true
   model_name: efficientvit_b0
   pretrained: true
 
@@ -147,7 +147,7 @@ model:
 # model does: a block nested in `runnable:` would die with the runnable it was
 # written under.
 convnet:
-  _scope_: model=convnet
+  _scope_: {model: convnet}
   model:
     _target_: sonair.convnet.torch_convnet.TorchConvNet
     _partial_: true
@@ -240,11 +240,10 @@ trackers:
 # directory created, because Keras and fastai both open the path without doing so and the
 # failure otherwise lands minutes into a fit.
 #
-#   keras:
-#     _scope_: framework=keras
+#   keras: !scope:framework=keras
 #     callbacks:
-#       - {_target_: keras.callbacks.EarlyStopping, patience: 3}
-#       - {_target_: keras.callbacks.CSVLogger, filename: ./runs/keras_logs/history.csv}
+#       - !class:keras.callbacks.EarlyStopping { patience: 3 }
+#       - !class:keras.callbacks.CSVLogger { filename: ./runs/keras_logs/history.csv }
 
 # ---------------------------------------------------------------------------
 # The framework blocks
@@ -270,7 +269,7 @@ trackers:
 # empty — re-splicing the same class is idempotent, and an empty block would declare a
 # value with nothing to read.
 lightning:
-  _scope_: framework=lightning
+  _scope_: {framework: lightning}
   runnable:
     _target_: sonair.LightningClassifier
 
@@ -286,7 +285,7 @@ lightning:
 #   sonair train examples/train_efficientvit_b0_mnist.yaml --framework torch
 #
 torch:
-  _scope_: framework=torch
+  _scope_: {framework: torch}
   runnable:
     _target_: sonair.TorchClassifier
   # Bare-torch-only knobs: where to run, where the state_dict lands, optional clipping.
@@ -295,7 +294,7 @@ torch:
   #   grad_clip: 1.0
 
 keras:
-  _scope_: framework=keras
+  _scope_: {framework: keras}
   # Everything above this line is shared verbatim — dataset, splits, batch size, epochs,
   # run identity, trackers. What a backend swap actually costs is THIS block.
   runnable:

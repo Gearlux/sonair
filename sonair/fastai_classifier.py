@@ -106,7 +106,7 @@ class FastaiClassifier(ClassificationTorchHooks, FastaiRunnable):
 
     def __init__(
         self,
-        model: Mandatory[Lazy[torch.nn.Module]],
+        model: Optional[Mandatory[Lazy[torch.nn.Module]]] = None,
         train_set: Optional[Lazy[RecordSource]] = None,
         val_set: Optional[Lazy[RecordSource]] = None,
         test_set: Optional[Lazy[RecordSource]] = None,

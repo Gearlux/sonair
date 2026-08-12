@@ -7,7 +7,7 @@ import pytest
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
-from confluid import Class
+from confluid import Target
 from confluid.fluid import Fluid
 from recordstream import Label, Record, Stream
 from torchmetrics import MetricCollection
@@ -16,9 +16,9 @@ from sonair.lightning_classifier import LightningClassifier
 
 
 def _stub(slot: Any) -> Fluid:
-    """The deferred Fluid behind a ``Lazy[T]`` slot — asserts it is STILL deferred, and narrows.
+    """The deferred Fluid behind a ``Partial[T]`` slot — asserts it is STILL deferred, and narrows.
 
-    ``Lazy[T]`` is ``Union[T, Fluid]``, so reading ``.kwargs`` needs the Fluid arm. Going through
+    ``Partial[T]`` is ``Union[T, Fluid]``, so reading ``.kwargs`` needs the Fluid arm. Going through
     this helper means every such read also asserts the slot has not been eagerly built, which is
     the property these tests actually care about.
     """
@@ -140,8 +140,8 @@ def test_run_executes_test_loop(tmp_path: Any) -> None:
     # _make_stream yields records with BARE-tensor "image" values, so collate them with the test-only
     # pre-stacking collate; the classifier's step functions read the batch dict through the same
     # batch_tensor / _batch_target accessors.
-    ev.test_loader = Class(DataLoader, batch_size=8, collate_fn=_stack_collate)
-    ev.lightning = Class(
+    ev.test_loader = Target(DataLoader, batch_size=8, collate_fn=_stack_collate)
+    ev.lightning = Target(
         L.Trainer,
         max_epochs=1,
         limit_test_batches=1,

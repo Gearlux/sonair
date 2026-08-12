@@ -9,7 +9,7 @@ than re-testing Keras itself.
 
 import numpy as np
 import pytest
-from confluid import LazyClass
+from confluid import PartialClass
 from recordstream import ClassificationPredictionsSink, Image, Label, MultiLabel, Stream
 
 from sonair._keras import keras
@@ -47,7 +47,7 @@ def _capture(sink: list) -> object:
 
 def _classifier(**kw: object) -> KerasClassifier:
     defaults = dict(
-        model=LazyClass(KerasModel, model_name="MobileNetV3Small", input_shape=INPUT),
+        model=PartialClass(KerasModel, model_name="MobileNetV3Small", input_shape=INPUT),
         max_epochs=1,
         batch_size=4,
         experiment_name="test",

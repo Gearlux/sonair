@@ -28,7 +28,7 @@ from typing import Any, Iterable, List, Optional, Union
 import pytorch_lightning as L
 import torch
 import torch.nn as nn
-from confluid import Lazy, Mandatory, configurable
+from confluid import Mandatory, Partial, configurable
 from loggair import get_logger
 from matrainer.artifacts import save_class_names
 from matrainer.lightning import LightningRunnable, checkpoint_dir
@@ -94,15 +94,15 @@ class LightningClassifier(ClassificationTorchHooks, LightningRunnable):
 
     def __init__(
         self,
-        model: Optional[Mandatory[Lazy[nn.Module]]] = None,
-        train_set: Optional[Lazy[RecordSource]] = None,
-        test_set: Optional[Lazy[RecordSource]] = None,
+        model: Optional[Mandatory[Partial[nn.Module]]] = None,
+        train_set: Optional[Partial[RecordSource]] = None,
+        test_set: Optional[Partial[RecordSource]] = None,
         num_classes: Optional[int] = None,
         task: ClassifierTask = "fit",
         max_epochs: int = 10,
         batch_size: int = 32,
         num_workers: int = 0,
-        trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
+        trackers: Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -114,7 +114,7 @@ class LightningClassifier(ClassificationTorchHooks, LightningRunnable):
         val_metrics: MetricsSpec = None,
         test_metrics: MetricsSpec = None,
         plot_metrics: bool = False,
-        metric_names: Optional[Lazy[MetricNames]] = None,
+        metric_names: Optional[Partial[MetricNames]] = None,
     ) -> None:
         super().__init__(
             model=model,

@@ -256,7 +256,7 @@ def test_a_confusion_matrix_is_rendered_rather_than_dropped(monkeypatch: pytest.
     shared-base consolidation (the `_report_nonscalars` hook hands the computed mapping to
     matrainer's `report_matrices`).
     """
-    from confluid import LazyClass
+    from confluid import PartialClass
     from torchmetrics import Metric
     from torchmetrics.classification import MulticlassConfusionMatrix
 
@@ -270,7 +270,7 @@ def test_a_confusion_matrix_is_rendered_rather_than_dropped(monkeypatch: pytest.
     )
 
     clf = _clf(train_set=Stream(source=_records(16)), num_classes=NUM_CLASSES)
-    clf.metrics = {"confusion": LazyClass[Metric](MulticlassConfusionMatrix)}
+    clf.metrics = {"confusion": PartialClass[Metric](MulticlassConfusionMatrix)}
     clf.initialize()
     collection = clf.train_metrics
     assert collection is not None
@@ -286,7 +286,7 @@ def test_a_rendered_matrix_reaches_every_wired_tracker(monkeypatch: pytest.Monke
     Without it a tracked run records the scalars and nothing else, which reads as a complete
     record rather than a missing one.
     """
-    from confluid import LazyClass
+    from confluid import PartialClass
     from torchmetrics import Metric
     from torchmetrics.classification import MulticlassConfusionMatrix
 
@@ -299,7 +299,7 @@ def test_a_rendered_matrix_reaches_every_wired_tracker(monkeypatch: pytest.Monke
 
     tracker = _Recorder()
     clf = _clf(train_set=Stream(source=_records(16)), num_classes=NUM_CLASSES)
-    clf.metrics = {"confusion": LazyClass[Metric](MulticlassConfusionMatrix)}
+    clf.metrics = {"confusion": PartialClass[Metric](MulticlassConfusionMatrix)}
     clf.initialize()
     collection = clf.val_metrics
     assert collection is not None
@@ -316,15 +316,15 @@ def test_a_rendered_matrix_reaches_every_wired_tracker(monkeypatch: pytest.Monke
 
 def test_a_split_slot_adds_to_the_shared_set_for_that_split_only() -> None:
     """Same rule as the Lightning backend — a config moving between them must not change shape."""
-    from confluid import LazyClass
+    from confluid import PartialClass
     from torchmetrics import Metric
     from torchmetrics.classification import MulticlassAccuracy, MulticlassConfusionMatrix
 
     clf = _clf(
         train_set=Stream(source=_records(16)),
         num_classes=NUM_CLASSES,
-        metrics={"accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1)},
-        val_metrics={"confusion": LazyClass[Metric](MulticlassConfusionMatrix)},
+        metrics={"accuracy_top1": PartialClass[Metric](MulticlassAccuracy, top_k=1)},
+        val_metrics={"confusion": PartialClass[Metric](MulticlassConfusionMatrix)},
     )
     clf.initialize()
 
@@ -367,7 +367,7 @@ def test_grad_clipping_is_applied_when_configured(monkeypatch: pytest.MonkeyPatc
 
 
 def test_the_deferred_loader_slots_drive_the_run() -> None:
-    """`batch_size` reaches the DataLoader through the `LazyClass`, so a config can override any
+    """`batch_size` reaches the DataLoader through the `PartialClass`, so a config can override any
     loader knob this class never enumerates."""
     clf = _clf(train_set=Stream(source=_records(12)), batch_size=3, num_classes=NUM_CLASSES)
     clf.initialize()
@@ -497,9 +497,9 @@ def test_a_checkpoint_dir_gets_the_weights_and_the_class_names(tmp_path: Path) -
 
 
 def test_the_outputs_raise_before_the_run() -> None:
-    from confluid import LazyClass
+    from confluid import PartialClass
 
-    clf = TorchClassifier(model=LazyClass(_Tiny))
+    clf = TorchClassifier(model=PartialClass(_Tiny))
     with pytest.raises(RuntimeError, match="only available after run"):
         _ = clf.trained_model
 

@@ -203,13 +203,13 @@ def _records(n: int = 12, labels: str = "ids") -> list:
 
 
 def _classifier(**kw: Any) -> Any:
-    from confluid import LazyClass
+    from confluid import PartialClass
 
     from sonair.convnet.mlx_convnet import MlxConvNet
     from sonair.mlx_classifier import MlxClassifier
 
     defaults: dict = dict(
-        model=LazyClass(MlxConvNet, input_shape=INPUT),
+        model=PartialClass(MlxConvNet, input_shape=INPUT),
         max_epochs=1,
         batch_size=4,
         experiment_name="test",
@@ -389,14 +389,14 @@ class _CaptureSink:
 
 @requires_mlx
 def test_predict_writes_one_entry_per_record_with_its_metadata() -> None:
-    from confluid import LazyClass
+    from confluid import PartialClass
     from recordstream import Stream
 
     from sonair.convnet.mlx_convnet import MlxConvNet
 
     sink = _CaptureSink()
     clf = _classifier(
-        model=LazyClass(MlxConvNet, input_shape=INPUT, num_classes=3),
+        model=PartialClass(MlxConvNet, input_shape=INPUT, num_classes=3),
         test_set=Stream(source=_records(7)),
         task="predict",
         batch_size=3,
@@ -486,7 +486,7 @@ def test_f1_macro_does_not_depend_on_the_batch_SIZE() -> None:
     A confusion matrix summed over the split gives one answer whatever the batching; a mean of
     per-batch F1s is biased downward the smaller the batches.
     """
-    from confluid import LazyClass
+    from confluid import PartialClass
     from recordstream import Stream
 
     from sonair.convnet.mlx_convnet import MlxConvNet
@@ -495,7 +495,7 @@ def test_f1_macro_does_not_depend_on_the_batch_SIZE() -> None:
     scores = []
     for batch_size in (3, 12):
         clf = _classifier(
-            model=LazyClass(MlxConvNet, input_shape=INPUT, num_classes=3, seed=0),
+            model=PartialClass(MlxConvNet, input_shape=INPUT, num_classes=3, seed=0),
             test_set=Stream(source=records),
             batch_size=batch_size,
             metrics=["accuracy", "f1_macro"],

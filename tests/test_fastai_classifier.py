@@ -18,7 +18,7 @@ import pytest
 pytest.importorskip("fastai", reason="the fastai backend needs sonair[fastai]")
 
 import torch  # noqa: E402 - after the skip, so a fastai-less install never imports it for this file
-from confluid import Fluid, LazyClass, flow, lazy_param_names  # noqa: E402
+from confluid import Fluid, PartialClass, flow, partial_param_names  # noqa: E402
 from matrainer.fastai import as_opt_func as _as_opt_func  # noqa: E402
 from matrainer.fastai import named_values as _named_values  # noqa: E402
 from matrainer.metric_names import MetricNames  # noqa: E402
@@ -56,9 +56,9 @@ class _Tiny(torch.nn.Module):
         return cast(torch.Tensor, self.fc(x.flatten(1)))
 
 
-#: What a test wires when it never touches the model slot. `model` is `Mandatory[Lazy[nn.Module]]`
+#: What a test wires when it never touches the model slot. `model` is `Mandatory[Partial[nn.Module]]`
 #: — it must be wired, and it must be a module — so these tests wire the cheapest legal thing
-#: rather than `None`, which only type-checked while the slot was `Lazy[Any]`.
+#: rather than `None`, which only type-checked while the slot was `Partial[Any]`.
 _NO_MODEL = torch.nn.Identity()
 
 
@@ -192,8 +192,8 @@ def test_the_loader_slots_match_the_lightning_backends() -> None:
     from sonair.lightning_classifier import LightningClassifier
 
     slots = {"train_loader", "val_loader", "test_loader"}
-    assert slots <= lazy_param_names(FastaiClassifier)
-    assert slots <= lazy_param_names(LightningClassifier)
+    assert slots <= partial_param_names(FastaiClassifier)
+    assert slots <= partial_param_names(LightningClassifier)
 
     clf = FastaiClassifier(model=_NO_MODEL, batch_size=8, num_workers=2)
     for name in slots:
@@ -216,7 +216,7 @@ def test_the_only_divergence_from_lightning_is_the_collate() -> None:
 def test_a_wired_loader_replaces_the_baked_stub() -> None:
     """What the alignment buys: the loader is a post-construction slot, as in Lightning."""
     clf = FastaiClassifier(model=_NO_MODEL, num_classes=3)
-    clf.train_loader = LazyClass(DataLoader, batch_size=1, drop_last=True, collate_fn=clf._to_tuple)
+    clf.train_loader = PartialClass(DataLoader, batch_size=1, drop_last=True, collate_fn=clf._to_tuple)
 
     loader = flow(clf.train_loader, dataset=_records(4))
 
@@ -253,7 +253,7 @@ def test_predict_gets_record_batches_from_the_SAME_slot() -> None:
 
 
 def test_the_fastai_objects_are_deferred_slots() -> None:
-    assert {"dataloaders", "learner"} <= lazy_param_names(FastaiClassifier)
+    assert {"dataloaders", "learner"} <= partial_param_names(FastaiClassifier)
 
     clf = FastaiClassifier(model=_NO_MODEL, learning_rate=0.02, weight_decay=0.01)
 
@@ -270,7 +270,7 @@ def test_a_wired_dataloaders_knob_reaches_the_built_object() -> None:
     from fastai.data.core import DataLoaders
 
     clf = FastaiClassifier(model=_NO_MODEL, num_classes=3, train_set=_records(4), batch_size=2)
-    clf.dataloaders = LazyClass(DataLoaders, path="artifacts")
+    clf.dataloaders = PartialClass(DataLoaders, path="artifacts")
 
     built = clf._dataloaders()
 
@@ -285,7 +285,7 @@ def test_a_wired_learner_knob_reaches_the_built_object() -> None:
 
     clf = FastaiClassifier(model=_Tiny(), num_classes=3, train_set=_records(4), batch_size=2)
     clf._resolve_task_defaults()  # what `initialize()` does: fill the loss sentinel
-    clf.learner = LazyClass(Learner, lr=0.05, model_dir="weights", train_bn=False)
+    clf.learner = PartialClass(Learner, lr=0.05, model_dir="weights", train_bn=False)
 
     learner = clf._build_learner(clf._dataloaders())
 
@@ -301,7 +301,7 @@ def test_the_run_supplied_arguments_still_win_over_the_slot() -> None:
     model = _Tiny()
     clf = FastaiClassifier(model=model, num_classes=3, train_set=_records(4), batch_size=2)
     clf._resolve_task_defaults()
-    clf.learner = LazyClass(Learner, model=_Tiny(num_classes=99))
+    clf.learner = PartialClass(Learner, model=_Tiny(num_classes=99))
 
     learner = clf._build_learner(clf._dataloaders())
 
@@ -565,9 +565,9 @@ def test_a_non_module_model_is_a_clear_error() -> None:
 
 
 def test_outputs_raise_while_the_model_is_still_deferred() -> None:
-    from confluid import LazyClass
+    from confluid import PartialClass
 
-    clf = FastaiClassifier(model=LazyClass(_Tiny))
+    clf = FastaiClassifier(model=PartialClass(_Tiny))
     with pytest.raises(RuntimeError, match="after run"):
         _ = clf.trained_model
 

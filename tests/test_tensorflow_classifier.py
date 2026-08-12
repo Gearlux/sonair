@@ -235,9 +235,9 @@ def keras_module() -> Any:
 def _no_model() -> Any:
     """What a test wires when it never touches the model slot.
 
-    `model` is `Mandatory[Lazy[TensorFlowNetwork]]`, and `@configurable` validates constructor
+    `model` is `Mandatory[Partial[TensorFlowNetwork]]`, and `@configurable` validates constructor
     kwargs at RUNTIME against `to_pydantic(cls)` (confluid's `validate_kwargs`, strict mode), so
-    `None` is now REJECTED — it only ever passed while the slot was `Lazy[Any]`. A bare
+    `None` is now REJECTED — it only ever passed while the slot was `Partial[Any]`. A bare
     `tf.Module` is the cheapest value the union admits. A function rather than a module-level
     constant because the source-only tests above must keep running where TensorFlow is absent.
     """

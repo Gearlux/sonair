@@ -57,13 +57,13 @@ class TimmModel(nn.Module):
     outside the model, so the Trainer's standard ``loss_fn(preds, target)``
     call works without a batch wrapper.
 
-    **Lazy construction (Lazy-Init / Zero-Arg mandate).** ``__init__`` does NO
+    **Partial construction (Partial-Init / Zero-Arg mandate).** ``__init__`` does NO
     functional work — it only stores config. The timm backbone (and any
     pretrained-weight download) is built on first use by :meth:`solidify` (called by
     :meth:`forward`, by confluid's auto-solidify on ``flow``, or explicitly) and cached
     in ``self.classifier``, so ``TimmModel()`` is cheap and does no network I/O. Tagged
     ``lazy=True`` so a config wires it ``!lazy:`` and StreamStudio emits a deferred
-    ``LazyClass`` the trainer flows with the derived ``num_classes``. ``model_name`` and
+    ``PartialClass`` the trainer flows with the derived ``num_classes``. ``model_name`` and
     ``num_classes`` default to the unset sentinels ``""`` / ``0`` and are validated lazily
     when the backbone is built — not in ``__init__``.
 
@@ -103,7 +103,7 @@ class TimmModel(nn.Module):
             checkpoint. Defaults to ``False`` so incompatible keys (e.g., a
             different ``num_classes``) don't reject the load. Set to ``True``
             to require exact key match.
-        classifier: Lazy cache for the built timm backbone (``None`` until
+        classifier: Partial cache for the built timm backbone (``None`` until
             :meth:`solidify`). Public submodule name so state_dict keys are ``classifier.*``.
         in_channels: Input channel count. Fixed to ``3`` for RGB spectrograms.
             Stored as an attribute for state_dict round-trip compatibility;
@@ -128,7 +128,7 @@ class TimmModel(nn.Module):
         # (all share the one cache) — so TimmModel works whether or not it is
         # flowed. model_name and num_classes are validated at build time, NOT
         # here, so TimmModel() is cheap and zero-arg construction works
-        # (Lazy-Init / Zero-Arg mandate).
+        # (Partial-Init / Zero-Arg mandate).
         self.model_name: str = model_name
         self.num_classes: int = num_classes
         self.pretrained: bool = pretrained
@@ -137,7 +137,7 @@ class TimmModel(nn.Module):
         self.checkpoint_path = checkpoint_path
         self.seed = int(seed)
         self.checkpoint_strict: bool = False
-        # Lazy cache for the timm backbone — built once by solidify(). Registered
+        # Partial cache for the timm backbone — built once by solidify(). Registered
         # under the public name `classifier` so the state_dict round-trips as
         # `classifier.*` through matrainer's Lightning checkpoint loading.
         self.classifier: Optional[nn.Module] = None

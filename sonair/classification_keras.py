@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, List, Optional, cast
 
 import numpy as np
-from confluid import Lazy
+from confluid import Partial
 from loggair import get_logger
 from matrainer.artifacts import save_class_names
 from matrainer.keras.runnable import KerasLoss, KerasMetric
@@ -53,14 +53,14 @@ __all__ = ["ClassificationKerasHooks"]
 class ClassificationKerasHooks(ClassificationBase):
     """The keras-typed classification hooks, shared by the Keras and TensorFlow concretes."""
 
-    def _default_keras_loss(self) -> Optional[Lazy[KerasLoss]]:
+    def _default_keras_loss(self) -> Optional[Partial[KerasLoss]]:
         return (
             keras.losses.BinaryCrossentropy(from_logits=True)
             if self.multilabel
             else keras.losses.SparseCategoricalCrossentropy(from_logits=True)
         )
 
-    def _default_keras_metrics(self) -> Optional[List[Lazy[KerasMetric]]]:
+    def _default_keras_metrics(self) -> Optional[List[Partial[KerasMetric]]]:
         return [
             (
                 keras.metrics.BinaryAccuracy(threshold=0.0, name="accuracy")

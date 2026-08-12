@@ -30,7 +30,7 @@ Keras 3 picks its engine from ``KERAS_BACKEND``; this module never sets it.
 
 from typing import Iterable, List, Literal, Optional, Union
 
-from confluid import Lazy, Mandatory, configurable
+from confluid import Mandatory, Partial, configurable
 from loggair import get_logger
 from matrainer.keras.runnable import KerasLoss, KerasMetric, KerasOptimizer
 from matrainer.keras.trainer import KerasRunnable
@@ -85,27 +85,27 @@ class KerasClassifier(ClassificationKerasHooks, KerasRunnable):
 
     def __init__(
         self,
-        model: Optional[Mandatory[Lazy[keras.Model]]] = None,
-        train_set: Optional[Lazy[RecordSource]] = None,
-        test_set: Optional[Lazy[RecordSource]] = None,
+        model: Optional[Mandatory[Partial[keras.Model]]] = None,
+        train_set: Optional[Partial[RecordSource]] = None,
+        test_set: Optional[Partial[RecordSource]] = None,
         num_classes: Optional[int] = None,
         task: ClassifierTask = "fit",
         max_epochs: int = 10,
         batch_size: int = 32,
-        trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
-        callbacks: Optional[List[Lazy[keras.callbacks.Callback]]] = None,
+        trackers: Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]] = None,
+        callbacks: Optional[List[Partial[keras.callbacks.Callback]]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
         target_key: str = "class",
         label_map: Optional[LabelMap] = None,
-        optimizer: Lazy[KerasOptimizer] = "adam",
-        loss: Optional[Lazy[KerasLoss]] = None,
-        metrics: Optional[List[Lazy[KerasMetric]]] = None,
-        train_metrics: Optional[List[Lazy[KerasMetric]]] = None,
-        val_metrics: Optional[List[Lazy[KerasMetric]]] = None,
-        test_metrics: Optional[List[Lazy[KerasMetric]]] = None,
-        metric_names: Optional[Lazy[MetricNames]] = None,
+        optimizer: Partial[KerasOptimizer] = "adam",
+        loss: Optional[Partial[KerasLoss]] = None,
+        metrics: Optional[List[Partial[KerasMetric]]] = None,
+        train_metrics: Optional[List[Partial[KerasMetric]]] = None,
+        val_metrics: Optional[List[Partial[KerasMetric]]] = None,
+        test_metrics: Optional[List[Partial[KerasMetric]]] = None,
+        metric_names: Optional[Partial[MetricNames]] = None,
     ) -> None:
         super().__init__(
             model=model,

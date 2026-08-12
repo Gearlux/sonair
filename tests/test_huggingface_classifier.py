@@ -21,7 +21,7 @@ import pytest
 pytest.importorskip("transformers", reason="the huggingface backend needs sonair[huggingface]")
 
 import torch  # noqa: E402 - after the skip
-from confluid import Fluid, lazy_param_names  # noqa: E402
+from confluid import Fluid, partial_param_names  # noqa: E402
 from recordstream import Stream  # noqa: E402
 from transformers.modeling_outputs import ImageClassifierOutput  # noqa: E402
 
@@ -79,9 +79,9 @@ class _TinyHF(torch.nn.Module):
 
 
 #: What a test wires when it never touches the model slot. `model` is
-#: `Mandatory[Lazy[HuggingFaceNetwork]]` — it must be wired, and it must be the wrapper or a live
+#: `Mandatory[Partial[HuggingFaceNetwork]]` — it must be wired, and it must be the wrapper or a live
 #: torch model — so these tests wire the cheapest legal thing rather than `None`, which only
-#: type-checked while the slot was `Lazy[Any]`.
+#: type-checked while the slot was `Partial[Any]`.
 _NO_MODEL = torch.nn.Identity()
 
 
@@ -138,7 +138,7 @@ def test_zero_arg_construction_does_no_work() -> None:
 
 def test_the_deferred_slots_are_declared_lazy() -> None:
     """`model`/`train_set`/... are flowed at run time, so they must declare it."""
-    assert {"model", "train_set", "test_set"} <= lazy_param_names(HuggingFaceClassifier)
+    assert {"model", "train_set", "test_set"} <= partial_param_names(HuggingFaceClassifier)
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +239,7 @@ def test_reporting_is_off_by_default() -> None:
 
 
 def test_the_transformers_objects_are_deferred_slots() -> None:
-    assert {"test_loader", "training_arguments", "trainer"} <= lazy_param_names(HuggingFaceClassifier)
+    assert {"test_loader", "training_arguments", "trainer"} <= partial_param_names(HuggingFaceClassifier)
 
     clf = HuggingFaceClassifier(model=_NO_MODEL)
 
@@ -270,15 +270,15 @@ def test_declaring_the_slots_does_not_import_transformers() -> None:
         line for line in machinery_source.splitlines() if line.startswith(("import transformers", "from transformers"))
     ]
     assert not machinery_top, f"module-level transformers import in the machinery: {machinery_top}"
-    assert 'LazyClass("transformers.TrainingArguments")' in machinery_source
+    assert 'PartialClass("transformers.TrainingArguments")' in machinery_source
 
 
 def test_a_wired_training_argument_reaches_the_built_object(tmp_path: Path) -> None:
     """Gradient accumulation, warmup, fp16 — none is a sonair knob, and none needs to be."""
-    from confluid import LazyClass
+    from confluid import PartialClass
 
     clf = HuggingFaceClassifier(model=_NO_MODEL, output_dir=str(tmp_path))
-    clf.training_arguments = LazyClass(
+    clf.training_arguments = PartialClass(
         "transformers.TrainingArguments",
         num_train_epochs=3,
         gradient_accumulation_steps=4,
@@ -299,14 +299,14 @@ def test_a_wired_trainer_slot_reaches_the_built_object(tmp_path: Path) -> None:
     ``Trainer`` signature and every run-supplied kwarg still lands.
     """
     import transformers
-    from confluid import LazyClass
+    from confluid import PartialClass
 
     class _CustomLossTrainer(transformers.Trainer):
         def compute_loss(self, model: Any, inputs: Any, *args: Any, **kwargs: Any) -> Any:
             return super().compute_loss(model, inputs, *args, **kwargs)
 
     clf = HuggingFaceClassifier(model=_TinyHF(), output_dir=str(tmp_path))
-    clf.trainer = LazyClass(_CustomLossTrainer)
+    clf.trainer = PartialClass(_CustomLossTrainer)
 
     trainer = clf._build_trainer(train=_records(4))
 
@@ -324,7 +324,7 @@ def test_a_trainer_subclass_that_overrides_init_with_kwargs_also_works(tmp_path:
     kwarg is a call argument, so it now passes through.
     """
     import transformers
-    from confluid import LazyClass
+    from confluid import PartialClass
 
     seen: Dict[str, Any] = {}
 
@@ -334,7 +334,7 @@ def test_a_trainer_subclass_that_overrides_init_with_kwargs_also_works(tmp_path:
             super().__init__(**kwargs)
 
     clf = HuggingFaceClassifier(model=_TinyHF(), output_dir=str(tmp_path))
-    clf.trainer = LazyClass(_ForwardingTrainer)
+    clf.trainer = PartialClass(_ForwardingTrainer)
 
     trainer = clf._build_trainer(train=_records(4))
 
@@ -344,12 +344,12 @@ def test_a_trainer_subclass_that_overrides_init_with_kwargs_also_works(tmp_path:
 
 def test_the_predict_loader_comes_from_the_deferred_slot() -> None:
     """The same construction every other torch backend uses — so `drop_last` is a knob here too."""
-    from confluid import LazyClass
+    from confluid import PartialClass
     from recordstream import collate_records
     from torch.utils.data import DataLoader
 
     clf = HuggingFaceClassifier(model=_NO_MODEL, batch_size=2)
-    clf.test_loader = LazyClass(DataLoader, batch_size=1, drop_last=True, collate_fn=collate_records)
+    clf.test_loader = PartialClass(DataLoader, batch_size=1, drop_last=True, collate_fn=collate_records)
 
     loader = clf._record_loader(_records(4))
 
@@ -478,9 +478,9 @@ def test_outputs_raise_before_the_run_and_answer_after() -> None:
 
 def _deferred() -> Any:
     """A still-deferred model slot, as a config leaves it before `initialize()`."""
-    from confluid import LazyClass
+    from confluid import PartialClass
 
-    return LazyClass(_TinyHF)
+    return PartialClass(_TinyHF)
 
 
 def test_computed_metrics_and_class_names_are_outputs() -> None:

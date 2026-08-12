@@ -54,7 +54,7 @@ class KerasConvNet(keras.Model):
         dropout: float = 0.0,
         seed: int = 0,
     ) -> None:
-        # Lazy: store only, and `super().__init__()` first — a `keras.Layer` refuses attribute
+        # Partial: store only, and `super().__init__()` first — a `keras.Layer` refuses attribute
         # assignment before it. Same contract as `KerasModel`.
         super().__init__()
         self.num_classes = num_classes

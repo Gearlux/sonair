@@ -21,7 +21,7 @@ pytest.importorskip("jax", reason="the jax backend needs sonair[jax]")
 
 import jax  # noqa: E402 - after the skip
 import jax.numpy as jnp  # noqa: E402
-from confluid import Fluid, LazyClass, lazy_param_names, output_specs  # noqa: E402
+from confluid import Fluid, PartialClass, output_specs, partial_param_names  # noqa: E402
 from flax import nnx  # noqa: E402
 from matrainer.jax.loop import as_optax_loss as _as_loss  # noqa: E402
 from matrainer.jax.loop import as_optax_optimizer as _as_optimizer  # noqa: E402
@@ -63,7 +63,7 @@ def _records(n: int = 12, labels: str = "ids") -> list:
 
 def _classifier(**kw: Any) -> JaxClassifier:
     defaults: dict = dict(
-        model=LazyClass(FlaxConvNet, input_shape=INPUT),
+        model=PartialClass(FlaxConvNet, input_shape=INPUT),
         max_epochs=1,
         batch_size=4,
         experiment_name="test",
@@ -295,7 +295,7 @@ def test_string_targets_are_encoded_through_a_fitted_label_map() -> None:
 def test_predict_writes_one_entry_per_record_with_its_metadata() -> None:
     sink = _CaptureSink()
     clf = _classifier(
-        model=LazyClass(FlaxConvNet, input_shape=INPUT, num_classes=3),
+        model=PartialClass(FlaxConvNet, input_shape=INPUT, num_classes=3),
         test_set=Stream(source=_records(7)),
         task="predict",
         batch_size=3,
@@ -324,7 +324,7 @@ def test_outputs_are_declared_and_raise_before_the_run() -> None:
 def test_discovery_tags_and_lazy_slots() -> None:
     assert JaxClassifier.__confluid_task__ == "classification"
     assert JaxClassifier.__confluid_framework__ == "jax"
-    assert {"model", "train_set", "test_set"} <= lazy_param_names(JaxClassifier)
+    assert {"model", "train_set", "test_set"} <= partial_param_names(JaxClassifier)
 
 
 @pytest.mark.parametrize("method", ["test", "predict"])
@@ -386,7 +386,7 @@ def test_f1_macro_does_not_depend_on_the_batch_SIZE() -> None:
         # An eval-only run over a PINNED model: same weights, same rows, only the batching
         # differs — which is what makes the two numbers comparable at all.
         clf = _classifier(
-            model=LazyClass(FlaxConvNet, input_shape=INPUT, num_classes=3, seed=0),
+            model=PartialClass(FlaxConvNet, input_shape=INPUT, num_classes=3, seed=0),
             test_set=Stream(source=records),
             batch_size=batch_size,
             metrics=["accuracy", "f1_macro"],

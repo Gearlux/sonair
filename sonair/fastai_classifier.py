@@ -24,7 +24,7 @@ Run it with ``sonair train cfg.yaml --framework fastai``.
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Union
 
 import torch
-from confluid import Lazy, Mandatory, configurable
+from confluid import Mandatory, Partial, configurable
 from fastai import metrics as fastai_metrics
 from fastai.callback.core import Callback as FastaiCallback
 from fastai.losses import BCEWithLogitsLossFlat, CrossEntropyLossFlat
@@ -106,17 +106,17 @@ class FastaiClassifier(ClassificationTorchHooks, FastaiRunnable):
 
     def __init__(
         self,
-        model: Optional[Mandatory[Lazy[torch.nn.Module]]] = None,
-        train_set: Optional[Lazy[RecordSource]] = None,
-        val_set: Optional[Lazy[RecordSource]] = None,
-        test_set: Optional[Lazy[RecordSource]] = None,
+        model: Optional[Mandatory[Partial[torch.nn.Module]]] = None,
+        train_set: Optional[Partial[RecordSource]] = None,
+        val_set: Optional[Partial[RecordSource]] = None,
+        test_set: Optional[Partial[RecordSource]] = None,
         num_classes: Optional[int] = None,
         task: ClassifierTask = "fit",
         max_epochs: int = 10,
         batch_size: int = 32,
         num_workers: int = 0,
-        trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
-        callbacks: Optional[List[Lazy[FastaiCallback]]] = None,
+        trackers: Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]] = None,
+        callbacks: Optional[List[Partial[FastaiCallback]]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -126,12 +126,12 @@ class FastaiClassifier(ClassificationTorchHooks, FastaiRunnable):
         one_cycle: bool = True,
         weight_decay: Optional[float] = None,
         opt_func: FastaiOptimizer = "Adam",
-        loss: Optional[Lazy[FastaiLoss]] = None,
+        loss: Optional[Partial[FastaiLoss]] = None,
         metrics: Optional[Sequence[FastaiMetric]] = None,
         train_metrics: Optional[Sequence[FastaiMetric]] = None,
         val_metrics: Optional[Sequence[FastaiMetric]] = None,
         test_metrics: Optional[Sequence[FastaiMetric]] = None,
-        metric_names: Optional[Lazy[MetricNames]] = None,
+        metric_names: Optional[Partial[MetricNames]] = None,
     ) -> None:
         super().__init__(
             model=model,

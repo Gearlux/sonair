@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional, Union, cast
 import numpy as np
 import torch
 import torch.nn as nn
-from confluid import Fluid, LazyClass, flow
+from confluid import Fluid, PartialClass, flow
 from confluid.registry import resolve_class
 from loggair import get_logger
 from matrainer.torch.metrics import MetricsSpec
@@ -70,16 +70,16 @@ class ClassificationTorchHooks(ClassificationBase, TorchTrainerRunnable):
     def _default_metrics(self) -> MetricsSpec:
         if self.multilabel:
             return {
-                "accuracy": LazyClass[Metric](MultilabelAccuracy),
-                "f1_macro": LazyClass[Metric](MultilabelF1Score, average="macro"),
+                "accuracy": PartialClass[Metric](MultilabelAccuracy),
+                "f1_macro": PartialClass[Metric](MultilabelF1Score, average="macro"),
             }
         return {
             # `accuracy`, not `accuracy_top1`: every other backend's accuracy metric is named
             # by its own engine (`fn.__name__`, a keras metric's `name=`) and none of them can
             # say `_top1`, so a sweep across engines would report one quantity in two columns.
             # `top_k=1` is in the template, where it belongs.
-            "accuracy": LazyClass[Metric](MulticlassAccuracy, top_k=1),
-            "f1_macro": LazyClass[Metric](MulticlassF1Score, average="macro"),
+            "accuracy": PartialClass[Metric](MulticlassAccuracy, top_k=1),
+            "f1_macro": PartialClass[Metric](MulticlassF1Score, average="macro"),
         }
 
     def _metric_flow_dims(self) -> Dict[str, Union[int, float]]:

@@ -40,7 +40,7 @@ from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Seque
 
 import numpy as np
 import torch
-from confluid import Lazy, Mandatory, configurable, flow
+from confluid import Mandatory, Partial, configurable, flow
 from loggair import get_logger
 from matrainer.artifacts import save_class_names
 from matrainer.huggingface.trainer import HuggingFaceCallback, HuggingFaceRunnable
@@ -179,16 +179,16 @@ class HuggingFaceClassifier(ClassificationBase, HuggingFaceRunnable):
 
     def __init__(
         self,
-        model: Optional[Mandatory[Lazy[HuggingFaceNetwork]]] = None,
-        train_set: Optional[Lazy[RecordSource]] = None,
-        val_set: Optional[Lazy[RecordSource]] = None,
-        test_set: Optional[Lazy[RecordSource]] = None,
+        model: Optional[Mandatory[Partial[HuggingFaceNetwork]]] = None,
+        train_set: Optional[Partial[RecordSource]] = None,
+        val_set: Optional[Partial[RecordSource]] = None,
+        test_set: Optional[Partial[RecordSource]] = None,
         num_classes: Optional[int] = None,
         task: ClassifierTask = "fit",
         max_epochs: int = 10,
         batch_size: int = 32,
         num_workers: int = 0,
-        trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
+        trackers: Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]] = None,
         callbacks: Optional[List[HuggingFaceCallback]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
@@ -202,7 +202,7 @@ class HuggingFaceClassifier(ClassificationBase, HuggingFaceRunnable):
         metrics: Optional[Sequence[HuggingFaceMetric]] = None,
         val_metrics: Optional[Sequence[HuggingFaceMetric]] = None,
         test_metrics: Optional[Sequence[HuggingFaceMetric]] = None,
-        metric_names: Optional[Lazy[MetricNames]] = None,
+        metric_names: Optional[Partial[MetricNames]] = None,
         seed: int = 42,
     ) -> None:
         super().__init__(

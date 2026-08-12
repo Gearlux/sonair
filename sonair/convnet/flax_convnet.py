@@ -93,7 +93,7 @@ class FlaxConvNet(nnx.Module):
         dropout: float = 0.0,
         seed: int = 0,
     ) -> None:
-        # Lazy: store only. No parameter allocation — see the module docstring.
+        # Partial: store only. No parameter allocation — see the module docstring.
         self.num_classes = num_classes
         self.input_shape = tuple(input_shape)
         self.widths = tuple(widths)

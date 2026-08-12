@@ -27,7 +27,7 @@ from typing import Any, Iterable, List, Optional, Union
 
 import torch
 import torch.nn as nn
-from confluid import Lazy, Mandatory, configurable
+from confluid import Mandatory, Partial, configurable
 from loggair import get_logger
 from matrainer.artifacts import save_class_names
 from matrainer.metric_names import MetricNames
@@ -95,9 +95,9 @@ class TorchClassifier(ClassificationTorchHooks, TorchLoopRunnable):
 
     def __init__(
         self,
-        model: Optional[Mandatory[Lazy[nn.Module]]] = None,
-        train_set: Optional[Lazy[RecordSource]] = None,
-        test_set: Optional[Lazy[RecordSource]] = None,
+        model: Optional[Mandatory[Partial[nn.Module]]] = None,
+        train_set: Optional[Partial[RecordSource]] = None,
+        test_set: Optional[Partial[RecordSource]] = None,
         num_classes: Optional[int] = None,
         task: ClassifierTask = "fit",
         max_epochs: int = 10,
@@ -117,8 +117,8 @@ class TorchClassifier(ClassificationTorchHooks, TorchLoopRunnable):
         device: Device = "auto",
         checkpoint_dir: Optional[str] = None,
         grad_clip: Optional[float] = None,
-        trackers: Optional[Union[Lazy[Tracker], Iterable[Lazy[Tracker]]]] = None,
-        metric_names: Optional[Lazy[MetricNames]] = None,
+        trackers: Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]] = None,
+        metric_names: Optional[Partial[MetricNames]] = None,
     ) -> None:
         super().__init__(
             model=model,

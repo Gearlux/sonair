@@ -48,11 +48,11 @@ def test_forward_handles_single_image_batch_in_eval_mode() -> None:
     assert logits.shape == (1, 3)
 
 
-# --- Lazy construction -----------------------------------------------------
+# --- Partial construction -----------------------------------------------------
 
 
 def test_zero_arg_construction_is_cheap_and_does_no_build() -> None:
-    """``TimmModel()`` must be cheap — no backbone, no network (Lazy-Init mandate)."""
+    """``TimmModel()`` must be cheap — no backbone, no network (Partial-Init mandate)."""
     model = TimmModel()
     assert "classifier" not in model._modules  # backbone not built
     assert list(model.parameters()) == []  # nothing materialised yet

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
-from confluid import LazyClass
+from confluid import PartialClass
 from confluid.fluid import Fluid
 from recordstream import Image, Label, Record, Stream, inverse_frequency_weights
 from recordstream.runnable import runnable_entrypoints
@@ -16,9 +16,9 @@ from sonair.lightning_classifier import ClassifierTask, LightningClassifier
 
 
 def _stub(slot: Any) -> Fluid:
-    """The deferred Fluid behind a ``Lazy[T]`` slot — asserts it is STILL deferred, and narrows.
+    """The deferred Fluid behind a ``Partial[T]`` slot — asserts it is STILL deferred, and narrows.
 
-    ``Lazy[T]`` is ``Union[T, Fluid]``, so reading ``.kwargs`` needs the Fluid arm. Going through
+    ``Partial[T]`` is ``Union[T, Fluid]``, so reading ``.kwargs`` needs the Fluid arm. Going through
     this helper means every such read also asserts the slot has not been eagerly built, which is
     the property these tests actually care about.
     """
@@ -153,7 +153,7 @@ def test_default_metrics_have_no_top5() -> None:
 
 def test_top5_opt_in_via_metrics_dict() -> None:
     # top-5 is opt-in: add it to the `metrics` dict; initialize() flows it with num_classes.
-    from confluid import LazyClass
+    from confluid import PartialClass
     from torchmetrics.classification import MulticlassAccuracy
 
     trainer = LightningClassifier(
@@ -161,8 +161,8 @@ def test_top5_opt_in_via_metrics_dict() -> None:
         train_set=_make_records(16, num_classes=10),
         num_classes=10,
         metrics={
-            "accuracy_top1": LazyClass(MulticlassAccuracy, top_k=1),
-            "accuracy_top5": LazyClass(MulticlassAccuracy, top_k=5),
+            "accuracy_top1": PartialClass(MulticlassAccuracy, top_k=1),
+            "accuracy_top5": PartialClass(MulticlassAccuracy, top_k=5),
         },
     )
     trainer.initialize()
@@ -245,7 +245,7 @@ class _DimsDataset(torch.utils.data.Dataset):
 def test_omitted_num_classes_leaves_metrics_none_until_run() -> None:
     """With num_classes omitted, metrics stay None post-construction — sonair builds them
     in run() once it derives the count (see test_omitted_num_classes_derived_and_built_at_run),
-    rather than carrying a deferred Lazy fluid."""
+    rather than carrying a deferred Partial fluid."""
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=4),
         train_set=_make_records(16, num_classes=4),
@@ -257,9 +257,9 @@ def test_omitted_num_classes_leaves_metrics_none_until_run() -> None:
 
 
 def _cpu_lightning(tmp_path: object) -> Any:
-    """A test-friendly Lightning Trainer Class stub (cpu, 1 batch, no logger)."""
+    """A test-friendly Lightning Trainer Target stub (cpu, 1 batch, no logger)."""
     import pytorch_lightning as L
-    from confluid import Class as ConfluidClass
+    from confluid import Target as ConfluidClass
 
     return ConfluidClass(
         L.Trainer,
@@ -274,7 +274,7 @@ def _cpu_lightning(tmp_path: object) -> Any:
 
 
 def test_omitted_num_classes_derived_and_built_at_run(tmp_path: object) -> None:
-    from confluid import Class as ConfluidClass
+    from confluid import Target as ConfluidClass
     from torch.utils.data import DataLoader
 
     # Minimal constructor; everything else configured post-construction (the paradigm).
@@ -292,7 +292,7 @@ def test_omitted_num_classes_derived_and_built_at_run(tmp_path: object) -> None:
 
 
 def test_default_loader_uses_collate_records() -> None:
-    from confluid.fluid import Class as ConfluidClass
+    from confluid.fluid import Target as ConfluidClass
     from recordstream import collate_records
 
     trainer = LightningClassifier(
@@ -300,7 +300,7 @@ def test_default_loader_uses_collate_records() -> None:
         train_set=_make_records(16),
         num_classes=3,
     )
-    # The train_loader is a deferred Class stub; check its kwargs contain the collate_fn.
+    # The train_loader is a deferred Target stub; check its kwargs contain the collate_fn.
     assert isinstance(trainer.train_loader, ConfluidClass)
     assert _stub(trainer.train_loader).kwargs.get("collate_fn") is collate_records
 
@@ -312,10 +312,10 @@ def test_default_loader_uses_collate_records() -> None:
 
 
 def test_ergonomic_knobs_reach_loader_and_lightning_stubs() -> None:
-    from confluid import Class as ConfluidClass
+    from confluid import Target as ConfluidClass
 
     # batch_size / num_workers are ctor knobs baked into the deferred loader stub in
-    # __init__ (the constructor stays side-effect-free — LazyClass defers construction).
+    # __init__ (the constructor stays side-effect-free — PartialClass defers construction).
     trainer = LightningClassifier(
         model=_TinyClassifier(num_classes=3),
         train_set=_make_records(16),
@@ -346,7 +346,7 @@ def test_persistent_workers_guarded_when_num_workers_zero() -> None:
 
 
 def test_explicit_loader_override_is_respected() -> None:
-    from confluid import Class as ConfluidClass
+    from confluid import Target as ConfluidClass
     from torch.utils.data import DataLoader
 
     # __init__ bakes the ctor batch_size into the default loader stub...
@@ -394,7 +394,7 @@ def test_flat_broadcasting_wires_trainer_attributes_from_top_level_keys() -> Non
     t = flow(t) if isinstance(t, Fluid) else t
 
     assert t.model == "MODEL_SENTINEL"
-    # `train_set` is declared `Lazy[RecordSource]`, so the slot keeps its marker until flowed —
+    # `train_set` is declared `Partial[RecordSource]`, so the slot keeps its marker until flowed —
     # what this asserts is that the real dataset reached it, not a "VAL_SENTINEL"-style string.
     assert isinstance(flow(_stub(t.train_set)), Stream)
     assert t.val_set == "VAL_SENTINEL"
@@ -432,14 +432,14 @@ def test_a_list_valued_trackers_key_reaches_the_slot() -> None:
 
 
 def test_the_constructor_does_not_touch_the_trackers_it_was_given() -> None:
-    """Lazy-init: storing VERBATIM is what keeps a deferred marker deferred.
+    """Partial-init: storing VERBATIM is what keeps a deferred marker deferred.
 
     Normalizing in `__init__` would iterate the value, and a `Fluid` is not iterable —
-    `list(Class(...))` raises `'Class' object is not iterable`.
+    `list(Target(...))` raises `'Target' object is not iterable`.
     """
-    from confluid.fluid import Class
+    from confluid.fluid import Target
 
-    marker = Class("matrainer.CsvTracker")
+    marker = Target("matrainer.CsvTracker")
     trainer = LightningClassifier(model=_TinyClassifier(), trackers=marker)
     assert trainer.trackers is marker  # untouched, not wrapped, not built
 
@@ -535,10 +535,10 @@ def test_the_default_metric_set_names_accuracy_what_every_backend_can_name_it() 
 
 def test_flowing_twice_does_not_rebuild_a_deferred_tracker() -> None:
     """A re-flowed `Fluid` would be a SECOND tracker — two MLflow runs for one training run."""
-    from confluid.fluid import Class
+    from confluid.fluid import Target
 
     trainer = LightningClassifier(
-        model=_TinyClassifier(), trackers=[Class("matrainer.CsvTracker", save_dir="./_sonair_test_logs")]
+        model=_TinyClassifier(), trackers=[Target("matrainer.CsvTracker", save_dir="./_sonair_test_logs")]
     )
     first = trainer._live_trackers()
     second = trainer._live_trackers()
@@ -551,13 +551,13 @@ def test_flowing_twice_does_not_rebuild_a_deferred_tracker() -> None:
 
 
 def test_lazy_model_gets_num_classes_injected_at_run(tmp_path: object) -> None:
-    from confluid import Class as ConfluidClass
-    from confluid import LazyClass
+    from confluid import PartialClass
+    from confluid import Target as ConfluidClass
     from torch.utils.data import DataLoader
 
     # Model declared !lazy: WITHOUT num_classes -> derived from the dataset (4).
     trainer = LightningClassifier(
-        model=LazyClass(_TinyClassifier),  # no num_classes; default 3 would be wrong
+        model=PartialClass(_TinyClassifier),  # no num_classes; default 3 would be wrong
         train_set=_DimsDataset(16, num_classes=4),
     )
     trainer.train_loader = ConfluidClass(DataLoader, batch_size=8, collate_fn=_stack_collate)
@@ -726,7 +726,7 @@ def test_multilabel_fit_runs_end_to_end(tmp_path: object) -> None:
     The unit tests above pin each seam; this proves they compose — a `[N, C]` float target
     against `[N, C]` logits is exactly what a shape mismatch would blow up on.
     """
-    from confluid import Class as ConfluidClass
+    from confluid import Target as ConfluidClass
     from recordstream import MultiLabel, collate_records
     from torch.utils.data import DataLoader
 
@@ -920,8 +920,8 @@ def _confusion_trainer(num_classes: int = 3) -> LightningClassifier:
         num_classes=num_classes,
         balance_classes=False,
         metrics={
-            "accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1),
-            "confusion": LazyClass[Metric](MulticlassConfusionMatrix),
+            "accuracy_top1": PartialClass[Metric](MulticlassAccuracy, top_k=1),
+            "confusion": PartialClass[Metric](MulticlassConfusionMatrix),
         },
     )
 
@@ -934,7 +934,7 @@ def test_a_confusion_matrix_in_the_metric_set_does_not_kill_the_val_loop(tmp_pat
     matrix. Measured before the fix; this asserts the run now completes AND that the matrix
     really was computed (not quietly dropped from the collection).
     """
-    from confluid import Class as ConfluidClass
+    from confluid import Target as ConfluidClass
     from torch.utils.data import DataLoader
 
     trainer = _confusion_trainer()
@@ -1124,7 +1124,7 @@ def _split_trainer(**slots: Any) -> LightningClassifier:
         train_set=_make_records(16),
         num_classes=3,
         balance_classes=False,
-        metrics={"accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=1)},
+        metrics={"accuracy_top1": PartialClass[Metric](MulticlassAccuracy, top_k=1)},
         **slots,
     )
 
@@ -1138,7 +1138,7 @@ def test_a_split_slot_adds_to_the_shared_set_for_that_split_only() -> None:
     from torchmetrics import Metric
     from torchmetrics.classification import MulticlassConfusionMatrix
 
-    trainer = _split_trainer(val_metrics={"confusion": LazyClass[Metric](MulticlassConfusionMatrix)})
+    trainer = _split_trainer(val_metrics={"confusion": PartialClass[Metric](MulticlassConfusionMatrix)})
     trainer.initialize()
 
     assert sorted(str(k) for k in trainer.val_metrics.keys()) == ["val/accuracy_top1", "val/confusion"]
@@ -1151,7 +1151,7 @@ def test_a_split_slot_shadows_a_shared_entry_of_the_same_name() -> None:
     from torchmetrics import Metric
     from torchmetrics.classification import MulticlassAccuracy
 
-    trainer = _split_trainer(val_metrics={"accuracy_top1": LazyClass[Metric](MulticlassAccuracy, top_k=2)})
+    trainer = _split_trainer(val_metrics={"accuracy_top1": PartialClass[Metric](MulticlassAccuracy, top_k=2)})
     trainer.initialize()
 
     assert [str(k) for k in trainer.val_metrics.keys()] == ["val/accuracy_top1"]
@@ -1184,7 +1184,7 @@ def test_the_split_slots_are_built_once() -> None:
     from torchmetrics import Metric
     from torchmetrics.classification import MulticlassConfusionMatrix
 
-    trainer = _split_trainer(val_metrics={"confusion": LazyClass[Metric](MulticlassConfusionMatrix)})
+    trainer = _split_trainer(val_metrics={"confusion": PartialClass[Metric](MulticlassConfusionMatrix)})
     trainer.initialize()
     first = trainer.val_metrics
     trainer.initialize()
@@ -1274,7 +1274,7 @@ def test_trained_model_is_not_a_config_field() -> None:
 def test_trained_model_raises_before_run() -> None:
     # A lazy (!lazy:) model stays a deferred Fluid until run() flows it — the output guards this.
     trainer = LightningClassifier(
-        model=LazyClass(_TinyClassifier, num_classes=3),
+        model=PartialClass(_TinyClassifier, num_classes=3),
         train_set=_make_records(8, num_classes=3),
     )
     with pytest.raises(RuntimeError, match="only available after run"):

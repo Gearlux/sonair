@@ -79,7 +79,7 @@ class KerasModel(keras.Model):
         dropout: float = 0.0,
         seed: int = 0,
     ) -> None:
-        # Lazy: store only. No network build — see the module docstring. `super().__init__()`
+        # Partial: store only. No network build — see the module docstring. `super().__init__()`
         # comes first because a `keras.Layer` refuses attribute assignment before it.
         super().__init__()
         self.model_name = model_name

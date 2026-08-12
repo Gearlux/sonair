@@ -244,8 +244,8 @@ def test_every_backend_takes_the_metric_naming_knob(stem: str) -> None:
         if isinstance(node, ast.FunctionDef) and node.name == "__init__":
             annotations = {arg.arg: ast.unparse(arg.annotation) for arg in node.args.args if arg.annotation is not None}
             assert "metric_names" in annotations, f"{stem} cannot be told how to name what it records"
-            assert "Lazy[MetricNames]" in annotations["metric_names"], (
-                f"{stem}: the slot must be `Optional[Lazy[MetricNames]]` — wired from YAML it "
+            assert "Partial[MetricNames]" in annotations["metric_names"], (
+                f"{stem}: the slot must be `Optional[Partial[MetricNames]]` — wired from YAML it "
                 f"arrives as a deferred marker (got {annotations['metric_names']})"
             )
 
@@ -301,7 +301,7 @@ def test_a_list_valued_callbacks_key_reaches_the_slot(stem: str) -> None:
     `engine._classify_annotation`, which reports `list` for either), but only `List[X]`
     carries `X` through `to_pydantic` — an `Iterable[X]` field converts to a bare `Any`
     whatever `X` is, so the element type reaches no form spec. That is why these slots are
-    spelled `List[...]` while `trackers` keeps its `Union[Lazy[T], Iterable[Lazy[T]]]` shape:
+    spelled `List[...]` while `trackers` keeps its `Union[Partial[T], Iterable[Partial[T]]]` shape:
     there the single-tracker arm is what carries the type.
     """
     for node in ast.walk(ast.parse(module_source(stem))):

@@ -74,7 +74,7 @@ class TensorFlowModel(tf.Module):
         tags: Optional[Tuple[str, ...]] = None,
     ) -> None:
         super().__init__(name="sonair_saved_model")
-        # Lazy: store only. No disk read — the load happens in `solidify()`.
+        # Partial: store only. No disk read — the load happens in `solidify()`.
         self.saved_model = saved_model
         self.num_classes = num_classes
         self.trainable = trainable

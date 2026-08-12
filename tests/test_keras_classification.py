@@ -290,13 +290,13 @@ num_classes: 3
 def test_a_yaml_wired_loss_and_metric_reach_compile_built(tmp_path: Path) -> None:
     """The registrations only pay off if a chosen class survives into ``compile()``.
 
-    ``loss`` is declared ``Lazy[KerasLoss]``, so the slot keeps its marker at load whatever
+    ``loss`` is declared ``Partial[KerasLoss]``, so the slot keeps its marker at load whatever
     the value spells — deferral is the receiver's declared contract. ``_compile()`` is what
     flows it, and ``flow()`` is idempotent, so that one unconditional line is equally correct
     for a marker and for a live object an operator assigned directly.
     """
     clf = _materialize(_WIRED, tmp_path)
-    assert isinstance(clf.loss, Fluid)  # a `Lazy[T]` slot stays deferred until `_compile()`
+    assert isinstance(clf.loss, Fluid)  # a `Partial[T]` slot stays deferred until `_compile()`
     clf._compile()
 
     # `clf.model` IS the compiled `keras.Model` — `KerasModel` subclasses it, so `_compile()`
@@ -313,7 +313,7 @@ def test_the_instance_form_with_parens_works_too(tmp_path: Path) -> None:
     """The trailing ``()`` is INERT — both spellings must reach the same place.
 
     Confluid merged its eager and deferred markers (2026-08-11), so ``X()`` and ``X`` are the
-    same target: neither builds here, because the ``Lazy[KerasLoss]`` slot defers it either way.
+    same target: neither builds here, because the ``Partial[KerasLoss]`` slot defers it either way.
     This pins that the parens spelling did not survive as a second construction mode.
     """
     clf = _materialize(_WIRED.replace("SparseCategoricalCrossentropy\n", "SparseCategoricalCrossentropy()\n"), tmp_path)

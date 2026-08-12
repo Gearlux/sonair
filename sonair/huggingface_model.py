@@ -57,7 +57,7 @@ class HuggingFaceModel:
         pretrained: bool = True,
         trust_remote_code: bool = False,
     ) -> None:
-        # Lazy: store only. No Hub call, no download — see the module docstring.
+        # Partial: store only. No Hub call, no download — see the module docstring.
         self.model_name = model_name
         self.num_classes = num_classes
         self.pretrained = pretrained

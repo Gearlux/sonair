@@ -63,36 +63,32 @@ run_name: efficientvit_b0_mnist
 #     ALREADY standardized the pixels; leaving the default true would divide the
 #     standardized values by 255 again and squash them to ~[-0.01, 0.01].
 preprocess:
-  - _target_: recordstream.ops.image.ConvertToImage
+  - !class:recordstream.ops.image.ConvertToImage
     width: 224
     height: 224
-  - _target_: albumentations.Normalize
+  - !class:albumentations.Normalize
     mean: [0.485, 0.456, 0.406]
     std: [0.229, 0.224, 0.225]
-  - _target_: recordstream.ops.torch.ToTensor
+  - !class:recordstream.ops.torch.ToTensor
     normalize: false
 
 # Data: HuggingFace `ylecun/mnist`. It exposes `train` and `test` splits (no
 # `validation`), so the held-out split is `test`. The id is the NAMESPACED form:
 # current huggingface_hub rejects the legacy bare `mnist` (HfUriError) — a bare id
 # only "works" by silently falling back to a stale local cache.
-train_set:
-  _target_: recordstream.Stream
-  source:
-    _target_: recordstream.sources.huggingface.HuggingFaceSource
+train_set: !class:recordstream.Stream
+  source: !class:recordstream.sources.huggingface.HuggingFaceSource
     path: "ylecun/mnist"
     split: train
     count: 1000
-  ops: ${ref:preprocess}
+  ops: !ref:preprocess
 
-val_set:
-  _target_: recordstream.Stream
-  source:
-    _target_: recordstream.sources.huggingface.HuggingFaceSource
+val_set: !class:recordstream.Stream
+  source: !class:recordstream.sources.huggingface.HuggingFaceSource
     path: "ylecun/mnist"
     split: test
     count: 100
-  ops: ${ref:preprocess}
+  ops: !ref:preprocess
 
 batch_size: 32
 num_workers: 8
@@ -118,8 +114,7 @@ max_epochs: 3
 # paths. Set `task:` only to change what a BARE `recordstream run` does — e.g.
 # `task: test` in an eval-only config that ships without a verb.
 
-runnable:
-  _target_: sonair.LightningClassifier
+runnable: !class:sonair.LightningClassifier
 
 # THE MODEL SLOT TAKES TWO THINGS HERE — one active, one alternative. They differ
 # in what they WRAP, not in how they are wired, which is the whole point:
@@ -136,9 +131,7 @@ runnable:
 # key, and the three torch-backed backends (lightning / torch / fastai) all read
 # this one line. `!lazy:` so `initialize()` can inject the dataset-derived
 # num_classes (10).
-model:
-  _target_: sonair.TimmModel
-  _partial_: true
+model: !partial:sonair.TimmModel
   model_name: efficientvit_b0
   pretrained: true
 
@@ -146,11 +139,8 @@ model:
 # three torch-backed backends. It sits at the top level for the same reason the
 # model does: a block nested in `runnable:` would die with the runnable it was
 # written under.
-convnet:
-  _scope_: {model: convnet}
-  model:
-    _target_: sonair.convnet.torch_convnet.TorchConvNet
-    _partial_: true
+convnet: !scope:model=convnet
+  model: !partial:sonair.convnet.torch_convnet.TorchConvNet
     input_shape: [224, 224, 3]     # (H, W, C) in every implementation — the KNOB is
                                    # channels-last even though torch's TENSOR is NCHW,
                                    # so this one line is identical in all five blocks.
@@ -180,19 +170,13 @@ convnet:
 # (lightning / torch / fastai) all read these two keys, and a backend on another engine MUST
 # override them; see `metrics: null` in the keras block.
 metrics:
-  accuracy:
-    _target_: torchmetrics.classification.MulticlassAccuracy
-    _partial_: true
+  accuracy: !partial:torchmetrics.classification.MulticlassAccuracy
     top_k: 1
-  f1_macro:
-    _target_: torchmetrics.classification.MulticlassF1Score
-    _partial_: true
+  f1_macro: !partial:torchmetrics.classification.MulticlassF1Score
     average: macro
 
 val_metrics:
-  confusion:
-    _target_: torchmetrics.classification.MulticlassConfusionMatrix
-    _partial_: true
+  confusion: !partial:torchmetrics.classification.MulticlassConfusionMatrix
 
 # Where the run's output goes — ONE key for every backend, because a matrainer tracker is
 # engine-neutral (the Lightning backend adapts it to a `pytorch_lightning` logger, the others
@@ -205,7 +189,7 @@ val_metrics:
 # for TensorBoard is the Text tab with a per-epoch step slider. It is rendered into the log too,
 # so a run with no trackers wired still shows it.
 trackers:
-  - _target_: matrainer.TensorBoardTracker
+  - !class:matrainer.TensorBoardTracker
     experiment_name: mnist_classification
     run_name: efficientvit_b0_mnist
     save_dir: ./runs
@@ -268,10 +252,8 @@ trackers:
 # checkable value rather than a silent no-op. It restates the runnable instead of being
 # empty — re-splicing the same class is idempotent, and an empty block would declare a
 # value with nothing to read.
-lightning:
-  _scope_: {framework: lightning}
-  runnable:
-    _target_: sonair.LightningClassifier
+lightning: !scope:framework=lightning
+  runnable: !class:sonair.LightningClassifier
 
 # PyTorch with NO training framework at all — the control experiment. This is the
 # smallest block in the file and that is its entire point: it swaps
@@ -284,24 +266,18 @@ lightning:
 #
 #   sonair train examples/train_efficientvit_b0_mnist.yaml --framework torch
 #
-torch:
-  _scope_: {framework: torch}
-  runnable:
-    _target_: sonair.TorchClassifier
+torch: !scope:framework=torch
+  runnable: !class:sonair.TorchClassifier
   # Bare-torch-only knobs: where to run, where the state_dict lands, optional clipping.
   #   device: auto            # auto | cpu | cuda | mps
   #   checkpoint_dir: ./runs/torch/mnist
   #   grad_clip: 1.0
 
-keras:
-  _scope_: {framework: keras}
+keras: !scope:framework=keras
   # Everything above this line is shared verbatim — dataset, splits, batch size, epochs,
   # run identity, trackers. What a backend swap actually costs is THIS block.
-  runnable:
-    _target_: sonair.KerasClassifier
-  model:
-    _target_: sonair.KerasModel
-    _partial_: true
+  runnable: !class:sonair.KerasClassifier
+  model: !partial:sonair.KerasModel
     model_name: MobileNetV3Small
     input_shape: [224, 224, 3]
     pretrained: true
@@ -345,7 +321,7 @@ keras:
   #     defaults to True and expects raw pixels), so normalizing here would apply it twice.
   #     timm models do not, which is why the torch chain normalizes explicitly.
   preprocess:
-    - _target_: recordstream.ops.image.ConvertToImage
+    - !class:recordstream.ops.image.ConvertToImage
       width: 224
       height: 224
 

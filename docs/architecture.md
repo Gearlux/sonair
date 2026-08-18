@@ -175,11 +175,14 @@ sonair frameworks                           # was: what `sonair --help` listed
   the engine, and there is no safe guess: importing the default's set would drag
   torch into a keras-only install. The failure mode is a loud `UnknownClassError`
   on a bare registered name, not a wrong result.
-- **The default backend needs a block of its own.** The top level of a config
-  *is* the default, but `--framework lightning` must name something, so the
-  example ships `lightning: !scope:framework=lightning` restating the runnable.
-  This is the one cost of the confluid check, and it is the right one: a config
-  now states which backends it supports instead of leaving it to be inferred.
+- **The default backend is a block like every other, named by `default_scopes:`.**
+  `--framework lightning` must name something, and a bare run must pick
+  something, so the example carries `default_scopes: [framework=lightning]` and a
+  `lightning: !scope:framework=lightning` block holding the runnable (2026-08-18;
+  before confluid grew `default_scopes:` the top level *was* the default and the
+  block restated it). The confluid check binds the default too — a typo'd one is
+  the same error as a typo'd flag — so a config states which backends it
+  supports, and which one it means, instead of leaving either to be inferred.
 - **A breaking CLI change**, paid once — 18 files and ~61 command spellings, in
   the same style as the `FlaxModel` → `FlaxConvNet` rename.
 

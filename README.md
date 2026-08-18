@@ -190,10 +190,11 @@ recordstream run examples/train_efficientvit_b0_mnist.yaml
 ```
 
 That one config carries **every** backend: engine-agnostic keys (dataset, batch
-size, epochs) at the top level, and one `!scope:framework=<name>` block per
-alternative overriding only `runnable` / `model`. `--framework <name>`
-activates the matching block — the same flag on either runner, because it is a
-property of the config rather than of the CLI.
+size, epochs) at the top level, one `!scope:framework=<name>` block per backend
+holding its `runnable` (and overriding `model` / `metrics` where the engine
+needs it), and a `default_scopes: [framework=lightning]` line naming the block a
+bare run uses. `--framework <name>` picks another — the same flag on either
+runner, because it is a property of the config rather than of the CLI.
 
 The `sonair evaluate <cfg>` and `sonair predict <cfg>` verbs bind the same
 `LightningClassifier` with `task: test` / `predict` to measure quality on a
@@ -427,11 +428,11 @@ The block must come *after* the slot it overrides — an active block splices in
 position and the later write wins. `--model convnet` is the implicit per-dimension flag for
 the `model=` scope; `--scope model=convnet` is the explicit spelling of the same thing.
 
-Both `model:` and its alternative sit at the **top level**, as siblings of `runnable:` rather
-than nested inside it. That is what lets all three torch-backed backends (`lightning`,
-`torch`, `fastai`) read the same line: a `!scope:framework=…` block that swaps `runnable:`
-replaces that key and everything under it, so a nested `model:` would vanish for exactly the
-backends whose whole point is that they inherit it.
+Both `model:` and its alternative sit at the **top level**, never nested inside a block's
+`runnable:`. That is what lets all three torch-backed backends (`lightning`, `torch`, `fastai`)
+read the same line: a `!scope:framework=…` block that sets `runnable:` replaces that key and
+everything under it, so a nested `model:` would belong to one backend only — and vanish for
+exactly the backends whose whole point is that they inherit it.
 
 ### `tensorflow` — when to prefer it over `keras`
 

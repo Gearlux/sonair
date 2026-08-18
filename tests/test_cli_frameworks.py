@@ -201,13 +201,17 @@ def _declared_frameworks() -> Set[str]:
 
 
 def test_the_example_declares_its_frameworks_as_scope_values() -> None:
-    """Including the DEFAULT one. The top level is the lightning backend, but
-    `--framework lightning` must still be a declared, checkable value — confluid
-    rejects an activation that matches no block, so an undeclared default would
-    make naming it explicitly an error."""
+    """Including the DEFAULT one: every backend is a `!scope:framework=<name>` block,
+    `default_scopes:` names the one a bare run uses, and no top-level `runnable:` is
+    privileged — confluid rejects an activation that matches no block, and the
+    default goes through the same check."""
     declared = _declared_frameworks()
     assert "lightning" in declared, "the default backend must be nameable, not only implicit"
     assert declared <= set(FRAMEWORKS), f"the config declares a backend the CLI does not know: {declared}"
+    raw = confluid.load(EXAMPLE, until="raw")
+    assert raw["default_scopes"] == ["framework=lightning"]
+    assert "runnable" not in raw, "the runnable lives in each framework block, not at the top level"
+    assert confluid.load(EXAMPLE, until="document")["runnable"].target == "sonair.LightningClassifier"
 
 
 def test_every_declared_framework_resolves_to_a_complete_runnable() -> None:

@@ -253,13 +253,16 @@ a useful stress test of the claim that the config shape is engine-agnostic.
 ## One config, every backend
 
 The config shape is engine-agnostic, so a single file carries all of them:
-shared keys at the top level (which is also the **default** backend) and one
-`!scope:framework=<name>` block per alternative, overriding *only* the
-framework-specific keys. Confluid splices an active scope block into its parent
-in document order, last write wins — so the block overrides what the top level
-set.
+shared keys at the top level, one `!scope:framework=<name>` block per backend
+overriding *only* the framework-specific keys, and a `default_scopes:` line
+naming the block a bare run uses. Confluid splices an active scope block into
+its parent in document order, last write wins — so the block overrides what the
+top level set.
 
 ```yaml
+# the backend a bare run uses; `--framework <name>` wins over it
+default_scopes: [framework=lightning]
+
 # shared — identical for every backend
 train_set: !class:recordstream.sources.huggingface.HuggingFaceSource
   path: ylecun/mnist
@@ -267,12 +270,11 @@ train_set: !class:recordstream.sources.huggingface.HuggingFaceSource
 batch_size: 32
 max_epochs: 3
 
-# framework-specific — top level is the default (lightning)
-runnable: !class:sonair.LightningClassifier
+# framework-specific — the torch-family defaults every block inherits
 model: !lazy:sonair.TimmModel
   model_name: efficientvit_b0
 
-# the default, named — so `--framework lightning` is a checkable value, not a no-op
+# the default backend — the smallest block, because it inherits everything above
 lightning: !scope:framework=lightning
   runnable: !class:sonair.LightningClassifier
 
@@ -329,9 +331,10 @@ with: keras, lightning. Either use one of those values, or add a
 `!scope:framework=kears` block.
 ```
 
-This is why the default backend gets a block of its own. The top level already
-*is* lightning, so the block only restates the runnable — but without it,
-`--framework lightning` would name a value nothing declares and be rejected.
+The same check binds `default_scopes:` — its value must name a block, so a
+typo'd default is the same error as a typo'd flag, and `--framework lightning`
+and a bare run resolve to the one `lightning:` block rather than to a privileged
+top level.
 
 [`examples/train_efficientvit_b0_mnist.yaml`](../examples/train_efficientvit_b0_mnist.yaml)
 is built this way. Its `torch` and `keras` blocks are **live**; the rest stay

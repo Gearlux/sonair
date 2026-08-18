@@ -11,11 +11,11 @@
 # change when the training engine does — which is the claim sonair exists to
 # demonstrate, made checkable by putting both halves in one file.
 #
-# The top level is also the DEFAULT backend (lightning), so this config runs
-# as-is with no scope at all. An alternative backend is a
-# `!scope:framework=<name>` block that OVERRIDES only the framework-specific
-# keys (document order, last write wins). `--framework <name>` activates it,
-# and it is the SAME flag on either runner:
+# Every backend is a `!scope:framework=<name>` block that OVERRIDES only the
+# framework-specific keys (document order, last write wins), and
+# `default_scopes:` names the one a bare run uses (lightning), so this config
+# runs as-is with no scope at all. `--framework <name>` picks another, and it is
+# the SAME flag on either runner:
 #
 #   sonair train     examples/train_efficientvit_b0_mnist.yaml --framework keras
 #   recordstream run examples/train_efficientvit_b0_mnist.yaml --framework keras
@@ -46,6 +46,11 @@
 # ===========================================================================
 # Shared — identical for every backend
 # ===========================================================================
+
+# The backend a bare `sonair train` / `recordstream run` uses. A `--framework <name>`
+# wins over it; the value must name a block below (a typo is the same error a
+# typo'd flag gets); it is a static list — never a `${...}` value.
+default_scopes: [framework=lightning]
 
 experiment_name: mnist_classification
 run_name: efficientvit_b0_mnist
@@ -97,24 +102,23 @@ max_epochs: 3
 # ===========================================================================
 # Framework-specific — the ONLY part a backend swap touches
 # ===========================================================================
-# Top level = the default backend (lightning).
+# The `runnable:` lives in each framework block below; the keys HERE are the
+# torch-family defaults every block inherits unless it overrides them.
 #
-# EVERY framework-specific key sits at THIS level — `runnable`, `model`, `metrics`
-# — and an alternative backend overrides the ones it must. That flatness is not
-# cosmetic. A scope block replaces a KEY, taking its whole subtree with it, so a
-# `model:` nested INSIDE `runnable:` would vanish the moment a block swapped the
+# EVERY framework-specific key sits at THIS level — `model`, `metrics`,
+# `preprocess` — and a backend block overrides the ones it must. That flatness is
+# not cosmetic. A scope block replaces a KEY, taking its whole subtree with it, so
+# a `model:` nested INSIDE `runnable:` would vanish the moment a block swapped the
 # runnable: `--framework torch` used to die with `TorchClassifier.__init__()
 # missing 1 required positional argument: 'model'` for exactly that reason, while
 # the comment beside it claimed the model was inherited. Keep every slot a
 # sibling of the others and a block can override one without erasing another.
 #
-# No `task:` here on purpose. The classifier's constructor already defaults to
+# No `task:` anywhere on purpose. The classifier's constructor already defaults to
 # `fit`, and every `sonair <verb>` sets the task from the verb (train->fit,
 # evaluate->test, predict->predict), so a `task: fit` line would be dead in both
 # paths. Set `task:` only to change what a BARE `recordstream run` does — e.g.
 # `task: test` in an eval-only config that ships without a verb.
-
-runnable: !class:sonair.LightningClassifier
 
 # THE MODEL SLOT TAKES TWO THINGS HERE — one active, one alternative. They differ
 # in what they WRAP, not in how they are wired, which is the whole point:
@@ -247,11 +251,10 @@ trackers:
 # scope value matches nothing on a dimension the document declares, so a typo is an
 # error listing the real values instead of a silent fall-through to the default.
 
-# The default, named. Running with no `--framework` at all uses the keys above, which
-# ARE the lightning backend; this block exists so `--framework lightning` is a declared,
-# checkable value rather than a silent no-op. It restates the runnable instead of being
-# empty — re-splicing the same class is idempotent, and an empty block would declare a
-# value with nothing to read.
+# The default — `default_scopes:` at the top of the file names it, so a bare
+# `sonair train` runs this block and `--framework lightning` names the same one.
+# It is the smallest block possible because every other key it needs is the
+# torch-family default above.
 lightning: !scope:framework=lightning
   runnable: !class:sonair.LightningClassifier
 

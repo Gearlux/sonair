@@ -144,7 +144,7 @@ def test_dispatch_builds_with_the_flat_configs_top_level_keys(monkeypatch: pytes
         "max_epochs: 3\n"
         "experiment_name: from_the_flat_config\n"
     )
-    document = confluid.load(text, flow=False)
+    document = confluid.load(text, until="document")
     previous = get_context()
     ctx = LiquifyContext(name="test")
     ctx.config_data = document
@@ -197,7 +197,7 @@ def test_registration_imports_nothing_when_there_is_nothing_to_import(
 
 
 def _declared_frameworks() -> Set[str]:
-    return confluid.discover_dimension_values(confluid.load_config(EXAMPLE)).get("framework", set())
+    return confluid.discover_dimension_values(confluid.load(EXAMPLE, until="raw")).get("framework", set())
 
 
 def test_the_example_declares_its_frameworks_as_scope_values() -> None:
@@ -220,7 +220,7 @@ def test_every_declared_framework_resolves_to_a_complete_runnable() -> None:
     happens to be present.
     """
     for framework in sorted(_declared_frameworks()):
-        document = confluid.load(confluid.load_config(EXAMPLE), flow=False, scopes=[f"framework={framework}"])
+        document = confluid.load(EXAMPLE, until="document", scopes=[f"framework={framework}"])
         assert isinstance(document, dict)
         runnable = document.get("runnable")
         assert runnable is not None, f"--framework {framework}: no runnable"
@@ -242,7 +242,7 @@ def test_no_framework_inherits_a_metric_set_its_engine_cannot_consume() -> None:
     """
     torch_backed = {"lightning", "torch", "fastai"}
     for framework in sorted(_declared_frameworks()):
-        document = confluid.load(confluid.load_config(EXAMPLE), flow=False, scopes=[f"framework={framework}"])
+        document = confluid.load(EXAMPLE, until="document", scopes=[f"framework={framework}"])
         assert isinstance(document, dict)
         for key in ("metrics", "val_metrics"):
             value = document.get(key)
@@ -260,7 +260,7 @@ def test_no_framework_inherits_a_metric_set_its_engine_cannot_consume() -> None:
 
 def test_the_example_keeps_the_engine_agnostic_keys_shared() -> None:
     """One config for every backend: shared top level + scoped overrides."""
-    default = confluid.load(confluid.load_config(EXAMPLE), flow=False)
+    default = confluid.load(EXAMPLE, until="document")
     assert isinstance(default, dict)
     assert "runnable" in default, "no scope -> the default backend must still be complete"
     for shared in ("train_set", "val_set", "batch_size", "max_epochs", "experiment_name", "preprocess"):
@@ -271,7 +271,7 @@ def test_an_undeclared_framework_is_rejected_with_the_real_values() -> None:
     """The check the backend verb could never do — it named a backend nothing compared
     against the config, so a mismatch trained the default and said nothing."""
     with pytest.raises(confluid.ScopeError) as ei:
-        confluid.load(confluid.load_config(EXAMPLE), flow=False, scopes=["framework=kears"])
+        confluid.load(EXAMPLE, until="document", scopes=["framework=kears"])
 
     assert "keras" in str(ei.value), "the error must list the backends the config DOES declare"
 

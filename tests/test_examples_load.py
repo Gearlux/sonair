@@ -34,7 +34,7 @@ def test_examples_dir_is_not_empty() -> None:
 @pytest.mark.parametrize("config_path", EXAMPLE_CONFIGS, ids=lambda p: p.name)
 def test_example_config_loads_and_flows_to_a_runnable(config_path: Path) -> None:
     """The config binds a ``runnable:`` whose ``!class:`` resolves + constructs, with a valid task."""
-    document = confluid.load(config_path.read_text(), flow=True)
+    document = confluid.load(config_path.read_text())
     runnable = document["runnable"] if isinstance(document, dict) else getattr(document, "runnable", None)
     assert runnable is not None, f"{config_path.name}: no top-level 'runnable:' key"
 

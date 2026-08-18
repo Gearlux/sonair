@@ -268,8 +268,8 @@ def _materialize(yaml_text: str, tmp_path: Path) -> KerasClassifier:
     """Build a `runnable:` block the way `sonair train --framework keras` does (against its document)."""
     path = tmp_path / "cfg.yaml"
     path.write_text(yaml_text)
-    document = confluid.load_config(str(path))
-    return cast(KerasClassifier, confluid.materialize(document["runnable"], context=document))
+    document = confluid.load(str(path), until="raw")
+    return cast(KerasClassifier, confluid.load(document["runnable"], context=document))
 
 
 _WIRED = """

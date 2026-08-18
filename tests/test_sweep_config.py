@@ -59,11 +59,11 @@ TRACKERS = {
 }
 
 
-def resolve(framework: str, variant: str = "zoo", tracker: str = "mlflow") -> Dict[str, Any]:
+def load(framework: str, variant: str = "zoo", tracker: str = "mlflow", until="settled") -> Dict[str, Any]:
     scopes = [f"framework={framework}", f"tracker={tracker}"]
     if variant == "convnet":
         scopes.append("model=convnet")
-    document = confluid.load(confluid.load_config(SWEEP), flow=False, scopes=scopes)
+    document = confluid.load(SWEEP, until="document", scopes=scopes)
     assert isinstance(document, dict)
     return document
 
@@ -94,7 +94,7 @@ def test_every_backend_resolves_to_its_own_runnable_and_model(cell: Tuple[str, s
     """The regression pin for the replace-not-merge trap described in the module docstring."""
     framework, variant = cell
     expected_runnable, expected_model = MATRIX[cell]
-    document = resolve(framework, variant)
+    document = load(framework, variant, until="settled")
 
     assert target_name(document["runnable"]) == expected_runnable
     assert target_name(document.get("model")) == expected_model
@@ -106,13 +106,15 @@ def test_the_torch_backed_backends_share_one_convnet() -> None:
     If one of them ever resolves to something else, a per-backend block has been added where
     the shared one was doing the job, which is the duplication `convnet/spec.py` exists to avoid.
     """
-    names = {target_name(resolve(fw, "convnet")["model"]) for fw in ("lightning", "torch", "fastai")}
+    names = {target_name(load(fw, "convnet", until="settled")["model"]) for fw in ("lightning", "torch", "fastai")}
     assert names == {"TorchConvNet"}
 
 
 def test_each_non_torch_engine_gets_its_own_implementation_of_the_shared_spec() -> None:
     """The point of the sweep: the SAME architecture, in each framework's own module type."""
-    assert {fw: target_name(resolve(fw, "convnet")["model"]) for fw in ("keras", "tensorflow", "jax", "mlx")} == {
+    assert {
+        fw: target_name(load(fw, "convnet", until="settled")["model"]) for fw in ("keras", "tensorflow", "jax", "mlx")
+    } == {
         "keras": "KerasConvNet",
         "tensorflow": "TensorFlowConvNet",
         "jax": "FlaxConvNet",
@@ -122,7 +124,7 @@ def test_each_non_torch_engine_gets_its_own_implementation_of_the_shared_spec() 
 
 @pytest.mark.parametrize("tracker", sorted(TRACKERS))
 def test_each_tracker_scope_selects_exactly_that_backend(tracker: str) -> None:
-    trackers = resolve("lightning", tracker=tracker)["trackers"]
+    trackers = load("lightning", tracker=tracker, until="settled")["trackers"]
 
     assert [target_name(t) for t in trackers] == [TRACKERS[tracker]]
 
@@ -134,7 +136,7 @@ def test_the_tracker_takes_its_names_from_the_run(tracker: str) -> None:
     A literal here would drift from whatever the run is actually called — the one thing a sweep
     must not do, since the tracker is where the runs are compared.
     """
-    document = resolve("lightning", tracker=tracker)
+    document = load("lightning", tracker=tracker, until="settled")
     wired = document["trackers"][0]
 
     for key in ("experiment_name", "run_name"):
@@ -160,21 +162,23 @@ def test_a_metric_set_never_reaches_an_engine_that_cannot_consume_it() -> None:
     per-split metrics work, so an un-nulled key WOULD reach it.
     """
     for framework in ("keras", "tensorflow"):
-        wired = resolve(framework).get("metrics") or []
+        wired = load(framework, until="settled").get("metrics") or []
         assert wired, f"{framework} must state its own metric objects — the inherited ones are torchmetrics"
         targets = [str(getattr(m, "target", m)) for m in wired]
         assert not any("torchmetrics" in t for t in targets), f"{framework} inherited a torchmetrics entry: {targets}"
 
     for framework in ("fastai", "jax", "mlx", "huggingface"):
-        wired = resolve(framework)["runnable"].kwargs.get("metrics")
+        wired = load(framework, until="settled")["runnable"].kwargs.get("metrics")
         assert wired, f"{framework} must name its own metrics — the inherited ones are torchmetrics"
         assert all(isinstance(m, str) for m in wired), f"{framework}: engine metrics are NAMES, not classes"
 
     for framework in ("keras", "tensorflow", "fastai", "jax", "mlx", "huggingface"):
-        assert not resolve(framework).get("val_metrics"), f"{framework} inherited the torchmetrics val set"
+        assert not load(framework, until="settled").get(
+            "val_metrics"
+        ), f"{framework} inherited the torchmetrics val set"
 
     for framework in ("lightning", "torch"):
-        document = resolve(framework)
+        document = load(framework, until="settled")
         assert document["metrics"], f"{framework} runs on torch and should keep the shared metrics"
         assert "confusion" in document["val_metrics"]
 
@@ -192,15 +196,18 @@ def test_every_backend_reports_the_same_two_quantities() -> None:
     is exactly where a copy-pasted omission lands.
     """
     for framework in ("lightning", "torch"):
-        assert set(resolve(framework)["metrics"]) >= {"accuracy", "f1_macro"}
+        assert set(load(framework, until="settled")["metrics"]) >= {"accuracy", "f1_macro"}
 
     for framework in ("keras", "tensorflow"):
-        names = [m.kwargs.get("name") or str(m.target).rsplit(".", 1)[-1] for m in resolve(framework)["metrics"]]
+        names = [
+            m.kwargs.get("name") or str(m.target).rsplit(".", 1)[-1]
+            for m in load(framework, until="settled")["metrics"]
+        ]
         assert "accuracy" in names, f"{framework} must name its accuracy `accuracy`, not compile()'s expansion"
         assert any("F1" in n or n == "f1_macro" for n in names), f"{framework} reports no macro-F1: {names}"
 
     for framework in ("fastai", "jax", "mlx", "huggingface"):
-        wired = resolve(framework)["runnable"].kwargs["metrics"]
+        wired = load(framework, until="settled")["runnable"].kwargs["metrics"]
         assert {"accuracy", "f1_macro"} <= set(wired), f"{framework} reports {wired}"
 
 
@@ -213,7 +220,7 @@ def test_only_huggingface_goes_without_training_metrics() -> None:
     fastai) or from the logits its own gradient step already produced (jax / mlx).
     """
     for framework in ("jax", "mlx"):
-        wired = resolve(framework)["runnable"].kwargs.get("train_metrics")
+        wired = load(framework, until="settled")["runnable"].kwargs.get("train_metrics")
         assert wired, f"{framework} owns its loop and should score the training pass"
 
-    assert "train_metrics" not in resolve("huggingface")["runnable"].kwargs
+    assert "train_metrics" not in load("huggingface", until="settled")["runnable"].kwargs

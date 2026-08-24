@@ -180,7 +180,15 @@ _CLASSIFICATION_METRICS = (
     MultilabelExactMatch,
 )
 for _metric_cls in _CLASSIFICATION_METRICS:
-    register(_metric_cls, task="classification", role="metric", framework="torch")
+    # ``broadcast="declared"``: every torchmetrics constructor takes ``**kwargs``
+    # (flowing up to ``torchmetrics.Metric``, which consumes a fixed set and
+    # refuses the rest), and an open ``**kwargs`` accept-list is ``None`` =
+    # accept-EVERYTHING — so every bare trainer key in a config (``batch_size:``,
+    # ``max_epochs:``, ``run_name:``) cascaded into every metric. The closed list
+    # is parsed, not hand-written: signature params plus the ``Metric`` kwargs
+    # confluid's body-slot scan reads off ``self.x = kwargs.pop("x", …)`` — so
+    # ``average:`` / ``compute_on_cpu:`` sweeps still land, trainer keys do not.
+    register(_metric_cls, task="classification", role="metric", framework="torch", broadcast="declared")
 
 
 @configurable(task="classification", role="loss", framework="torch")

@@ -150,6 +150,21 @@ convnet: !scope:model=convnet
                                    # so this one line is identical in all five blocks.
 
 
+# macOS starts DataLoader workers with `spawn` — every worker re-imports the program
+# and re-materializes what it reads, and on a run this short the teardown can outlast
+# the training. `fork` is what this host wants.
+#
+# `os` is a scope liquifai passes on EVERY run from the machine it runs on
+# (`darwin` / `linux` / `windows`), so nothing is typed and a host this block does not
+# name keeps torch's default. The same fact reads inline as `${platform.os}` when a
+# value needs it (a path segment, a run name).
+#
+# This key reaches the three loader slots by broadcasting — the runnable does not
+# declare it, and nothing bakes it. `persistent_workers` DOES get baked, which is why
+# that one is a declared knob on the runnable instead.
+mac_loaders: !scope:os=darwin
+  multiprocessing_context: fork
+
 # TWO metric keys, and the difference between them IS the feature. `metrics:` is what EVERY
 # split measures; `<split>_metrics:` is what that one split measures on top, merged over the
 # shared set by name. So the confusion matrix below is computed for VALIDATION only — which is

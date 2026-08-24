@@ -107,9 +107,10 @@ The config roots at a top-level `runnable:` key carrying a `task:` — the same
 config serves training, evaluation, and prediction by switching the task (or by
 picking the matching `sonair` verb, which wins over the YAML's `task`).
 
-`train_loader` / `val_loader` / `test_loader` are deferred slots: `batch_size` and
-`num_workers` are the ergonomic knobs, but wiring the loader itself replaces it
-wholesale — that is how you reach `pin_memory`, `drop_last`, or a sampler. The
+`train_loader` / `val_loader` / `test_loader` are deferred slots: `batch_size`,
+`num_workers` and `persistent_workers` are the ergonomic knobs, but wiring the
+loader itself replaces it wholesale — that is how you reach `pin_memory`,
+`drop_last`, or a sampler. The
 **fastai** backend declares the same three slots under the same names (it consumes
 plain torch loaders), so this block drives either backend unchanged. Its only
 difference is the default `collate_fn`, which is `_to_tuple` rather than
@@ -195,6 +196,18 @@ holding its `runnable` (and overriding `model` / `metrics` where the engine
 needs it), and a `default_scopes: [framework=lightning]` line naming the block a
 bare run uses. `--framework <name>` picks another — the same flag on either
 runner, because it is a property of the config rather than of the CLI.
+
+It also carries one **host-scoped** block. macOS starts DataLoader workers with
+`spawn`, which re-imports the program in every worker, so:
+
+```yaml
+mac_loaders: !scope:os=darwin
+  multiprocessing_context: fork
+```
+
+Every other host keeps torch's default. The `os` scope comes from the app framework
+on every run, so nothing is typed; `--scope os=darwin` forces the block on another
+machine.
 
 The `sonair evaluate <cfg>` and `sonair predict <cfg>` verbs bind the same
 `LightningClassifier` with `task: test` / `predict` to measure quality on a

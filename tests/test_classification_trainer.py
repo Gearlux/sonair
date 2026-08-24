@@ -345,6 +345,23 @@ def test_persistent_workers_guarded_when_num_workers_zero() -> None:
     assert _stub(trainer.train_loader).kwargs["persistent_workers"] is False
 
 
+def test_persistent_workers_can_be_named_instead_of_derived() -> None:
+    """The HOST-scoped knob (`!scope:os=darwin` -> `persistent_workers: false`): the workers
+    stay, only their persistence goes. macOS terminates them slowly enough that a short run
+    spends longer stopping than training, which no derivation from `num_workers` can see."""
+    trainer = LightningClassifier(
+        model=_TinyClassifier(num_classes=3),
+        train_set=_make_records(16),
+        num_classes=3,
+        num_workers=2,
+        persistent_workers=False,
+    )
+    for split in ("train_loader", "val_loader", "test_loader"):
+        kwargs = _stub(getattr(trainer, split)).kwargs
+        assert kwargs["persistent_workers"] is False, split
+        assert kwargs["num_workers"] == 2, split
+
+
 def test_explicit_loader_override_is_respected() -> None:
     from confluid import Target as ConfluidClass
     from torch.utils.data import DataLoader

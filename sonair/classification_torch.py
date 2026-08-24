@@ -33,7 +33,15 @@ from torch import Tensor
 from torchmetrics import Metric
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MultilabelAccuracy, MultilabelF1Score
 
+import sonair.torch_classification  # noqa: F401 — the registration side effect, see the comment below
 from sonair.classification_base import ClassificationBase
+
+# The import above is load-bearing: a bare ``recordstream run`` materializes a
+# torch-family classifier through THIS module without ever touching the sonair
+# CLI (whose FRAMEWORKS map is what otherwise imports the registration module).
+# Without it the torchmetrics classes stay unregistered in such runs — their
+# ``broadcast="declared"`` accept-list closure never applies, and every bare
+# trainer key in the config cascades into every metric's ``**kwargs`` surface.
 
 logger = get_logger(__name__)
 

@@ -271,6 +271,11 @@ trackers:
 # It is the smallest block possible because every other key it needs is the
 # torch-family default above.
 lightning: !scope:framework=lightning
+  # Registers this engine's loss/metric set (confluid `register`, incl. the
+  # torchmetrics accept-list closure) DURING load, before any marker settles —
+  # so the config is self-sufficient whatever loads it: the sonair CLI with or
+  # without `--framework`, a bare `recordstream run`, or a plain confluid.load().
+  import: sonair.torch_classification
   runnable: !class:sonair.LightningClassifier
 
 # PyTorch with NO training framework at all — the control experiment. This is the
@@ -285,6 +290,7 @@ lightning: !scope:framework=lightning
 #   sonair train examples/train_efficientvit_b0_mnist.yaml --framework torch
 #
 torch: !scope:framework=torch
+  import: sonair.torch_classification  # same registration set as lightning — a loss does not care which loop calls it
   runnable: !class:sonair.TorchClassifier
   # Bare-torch-only knobs: where to run, where the state_dict lands, optional clipping.
   #   device: auto            # auto | cpu | cuda | mps
@@ -294,6 +300,7 @@ torch: !scope:framework=torch
 keras: !scope:framework=keras
   # Everything above this line is shared verbatim — dataset, splits, batch size, epochs,
   # run identity, trackers. What a backend swap actually costs is THIS block.
+  import: sonair.keras_classification
   runnable: !class:sonair.KerasClassifier
   model: !partial:sonair.KerasModel
     model_name: MobileNetV3Small
@@ -353,6 +360,7 @@ keras: !scope:framework=keras
 #   sonair train examples/train_efficientvit_b0_mnist.yaml --framework tensorflow
 #
 # tensorflow: !scope:framework=tensorflow
+#   import: sonair.keras_classification  # tf.keras IS Keras 3 — one shared set, never a duplicate
 #   runnable: !class:sonair.TensorFlowClassifier
 #     export_dir: ./runs/exported/mnist_mobilenetv3
 #     jit_compile: false
@@ -399,6 +407,7 @@ keras: !scope:framework=keras
 #   sonair train examples/train_efficientvit_b0_mnist.yaml --framework fastai
 #
 # fastai: !scope:framework=fastai
+#   import: sonair.fastai_classification
 #   runnable: !class:sonair.FastaiClassifier
 #     learning_rate: 0.001
 #     one_cycle: true

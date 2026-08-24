@@ -103,8 +103,10 @@ class TimmModel(nn.Module):
             checkpoint. Defaults to ``False`` so incompatible keys (e.g., a
             different ``num_classes``) don't reject the load. Set to ``True``
             to require exact key match.
-        classifier: Partial cache for the built timm backbone (``None`` until
-            :meth:`solidify`). Public submodule name so state_dict keys are ``classifier.*``.
+        classifier: Read-only property over the built timm backbone (``None`` until
+            :meth:`solidify`). Derived state — never dumped or configured; the
+            submodule registers under the public name so state_dict keys are
+            ``classifier.*``.
         in_channels: Input channel count. Fixed to ``3`` for RGB spectrograms.
             Stored as an attribute for state_dict round-trip compatibility;
             immutable via constructor.
@@ -137,10 +139,27 @@ class TimmModel(nn.Module):
         self.checkpoint_path = checkpoint_path
         self.seed = int(seed)
         self.checkpoint_strict: bool = False
-        # Partial cache for the timm backbone — built once by solidify(). Registered
-        # under the public name `classifier` so the state_dict round-trips as
-        # `classifier.*` through matrainer's Lightning checkpoint loading.
-        self.classifier: Optional[nn.Module] = None
+        # The built backbone is NOT assigned here: it lives in ``_modules["classifier"]``
+        # once solidify() builds it, read back through the ``classifier`` property below.
+
+    @property
+    def classifier(self) -> Optional[nn.Module]:
+        """The built timm backbone (``None`` until :meth:`solidify`) — DERIVED, never dumped.
+
+        A read-only property over the ``_modules["classifier"]`` entry
+        :meth:`solidify` registers. The setter-less property is what tells
+        confluid this is derived state (``dump()`` and ``configure()`` skip it —
+        the run document carries the recipe, ``model_name`` / ``pretrained`` /
+        ``checkpoint_path``, and a reload rebuilds the network through the same
+        :meth:`solidify`), while the ``_modules`` registration under the PUBLIC
+        name keeps state_dict keys ``classifier.*`` for matrainer's Lightning
+        checkpoint loading. ``solidify`` still writes ``self.classifier = …``:
+        ``nn.Module.__setattr__`` routes a Module value straight into
+        ``_modules`` without consulting class descriptors, so the write lands
+        while every read goes through this property (``add_module`` cannot be
+        used — the property makes its ``hasattr`` guard refuse the name).
+        """
+        return self._modules.get("classifier")
 
     @property
     def model_refs(self) -> List[ModelRef]:
@@ -196,7 +215,14 @@ class TimmModel(nn.Module):
             # build happens once, before any training randomness is drawn, so this is a
             # run-level seed applied at the earliest useful moment.
             torch.manual_seed(self.seed)
-            self.classifier = timm.create_model(
+            # The one write to the ``_modules["classifier"]`` entry the read-only
+            # ``classifier`` property reads back. It MUST be the attribute spelling:
+            # ``nn.Module.__setattr__`` routes a Module value into ``_modules`` without
+            # consulting class descriptors (measured), while ``add_module`` refuses a
+            # name any class attribute answers ``hasattr`` for — the property itself
+            # trips its "attribute 'classifier' already exists" guard. Mypy sees only
+            # the read-only property, hence the ignore.
+            self.classifier = timm.create_model(  # type: ignore[misc]
                 self.model_name,
                 pretrained=self.pretrained,
                 num_classes=self.num_classes,

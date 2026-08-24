@@ -68,7 +68,7 @@ flake8.txt
 mypy.txt
 coverage.xml
 coverage-sources.zip
-test-report.xml
+*test-report.xml
 
 # Pretrained model caches (downloaded by timm at first use)
 *.pt

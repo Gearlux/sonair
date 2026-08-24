@@ -349,17 +349,27 @@ def test_no_tracker_write_is_sequenced_after_the_run_ends(stem: str) -> None:
     """
     import inspect
 
-    from matrainer.keras.trainer import KerasRunnable
-    from matrainer.tensorflow.loop import TensorFlowRunnable
-
     from sonair.classification_keras import ClassificationKerasHooks
 
     source = (SOURCE_DIR / f"{stem}.py").read_text()
     assert "def fit" not in source and "def _before_fit" not in source, f"{stem} shadows the machinery ordering"
     assert "save_class_names" in inspect.getsource(ClassificationKerasHooks._before_fit)
-    machinery = KerasRunnable if stem == "keras_classifier" else TensorFlowRunnable
+    # Reading `fit`'s body needs the machinery module IMPORTED, and each one imports its own
+    # engine at import time — so the import is per-stem, and the TensorFlow half skips on a
+    # venv without that extra rather than failing the Keras half with it.
+    machinery: type
+    training_call_marker: str
+    if stem == "keras_classifier":
+        from matrainer.keras.trainer import KerasRunnable
+
+        machinery, training_call_marker = KerasRunnable, "model.fit("
+    else:
+        pytest.importorskip("tensorflow", reason="the TensorFlow machinery needs sonair[tensorflow]")
+        from matrainer.tensorflow.loop import TensorFlowRunnable
+
+        machinery, training_call_marker = TensorFlowRunnable, "_run_epoch("
     body = inspect.getsource(machinery.fit)
-    training_call = body.index("model.fit(" if stem == "keras_classifier" else "_run_epoch(")
+    training_call = body.index(training_call_marker)
     assert body.index("_before_fit()") < training_call, "the hook must run BEFORE the training pass"
 
 

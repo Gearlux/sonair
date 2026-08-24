@@ -67,7 +67,7 @@ A backend adds a module only when it adds a genuinely new wiring surface — see
 The last row is the one that keeps a backend small. Whatever a runnable
 *constructs* — a `pytorch_lightning.Trainer`, a fastai `DataLoaders` and
 `Learner`, a `transformers.TrainingArguments` and `Trainer`, every `DataLoader` —
-is held as a deferred `LazyClass(...)` slot rather than built inline, so the
+is held as a deferred `PartialClass(...)` slot rather than built inline, so the
 ergonomic knobs (`batch_size`, `max_epochs`, `learning_rate`) stay flat config
 keys *and* every knob the runnable does not restate is still reachable by
 replacing the slot. Nothing has to be enumerated twice, and a backend never

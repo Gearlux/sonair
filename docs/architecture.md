@@ -371,10 +371,10 @@ def _resolve_task_defaults(self) -> None:
         self.loss_fn = nn.BCEWithLogitsLoss() if self.multilabel else nn.CrossEntropyLoss()
     if self.metrics is None:
         self.metrics = (
-            {"accuracy": LazyClass[Metric](MultilabelAccuracy), ...}
+            {"accuracy": PartialClass[Metric](MultilabelAccuracy), ...}
             if self.multilabel
             # `accuracy`, the word EVERY engine can produce — see record 11.
-            else {"accuracy": LazyClass[Metric](MulticlassAccuracy, top_k=1), ...}
+            else {"accuracy": PartialClass[Metric](MulticlassAccuracy, top_k=1), ...}
         )
 ```
 
@@ -604,7 +604,7 @@ once, here, rather than left as a permanent footnote.
 the same decision as `TimmModel` being a `torch.nn.Module` (§7). `MlxConvNet` was the last holdout, a plain class
 whose network the MLX loop reached as `self.model.model`; that made
 `MlxClassifier.model` typed as the concrete wrapper, the only backend whose slot
-could not hold a network the user brought. It is `Lazy[nn.Module]` now.
+could not hold a network the user brought. It is `Partial[nn.Module]` now.
 
 Two MLX specifics that shape the subclass, both measured:
 
@@ -838,20 +838,20 @@ Two members remain hand-written, each for a measured reason:
   model slot, so the output now docks into a downstream classifier — a bare
   `keras.Model` never could.
 - The `getattr` had been doubling as a TYPE escape hatch (it returns `Any`), so
-  deleting it surfaced 14 mypy `union-attr` errors: `self.model: Lazy[Any]` is
+  deleting it surfaced 14 mypy `union-attr` errors: `self.model: Partial[Any]` is
   `Union[Any, Fluid]`, and a method call through the `Fluid` arm is rejected. The
   answer is not an accessor — one was written and thrown away — but the
   annotation: the ATTRIBUTE carries the real type (`self.model: keras.Model`)
-  while the CONSTRUCTOR param keeps the `Lazy[...]` marker, which is the only
-  place it is machine-read. Restating `Lazy` on the attribute bought nothing and
+  while the CONSTRUCTOR param keeps the `Partial[...]` marker, which is the only
+  place it is machine-read. Restating `Partial` on the attribute bought nothing and
   cost every direct call.
-- **The param's `T` was narrowed on 2026-08-01** — it read `Mandatory[Lazy[Any]]`
+- **The param's `T` was narrowed on 2026-08-01** — it read `Mandatory[Partial[Any]]`
   here and in five sibling backends, which declared the deferral and nothing
-  else. Each now names what it takes (`Lazy[keras.Model]` here), and the two
+  else. Each now names what it takes (`Partial[keras.Model]` here), and the two
   slots that genuinely admit two types name a union alias rather than falling
   back to `Any`: `TensorFlowNetwork = Union[keras.Model, tf.Module]` and
-  `HuggingFaceNetwork = Union[HuggingFaceModel, torch.nn.Module]`. `Lazy[T]`'s
-  own docstring blesses `Lazy[Any]` "when the target type is genuinely open" —
+  `HuggingFaceNetwork = Union[HuggingFaceModel, torch.nn.Module]`. `Partial[T]`'s
+  own docstring blesses `Partial[Any]` "when the target type is genuinely open" —
   none of these was. See §8.
 
 **Example.**
@@ -877,19 +877,19 @@ site seems to need it, the wrapper is missing a base class, not a fallback.
 
 ---
 
-## 8. A deferred slot names its type; `Lazy[Any]` is half a declaration
+## 8. A deferred slot names its type; `Partial[Any]` is half a declaration
 
 *2026-08-01*
 
 **Context.** Every backend's `model` is a deferred slot: a config wires
 `model: !lazy:sonair.TimmModel` and the classifier flows it at run time with the
-dataset-derived width (`flow(self.model, num_classes=…)`). `Lazy[T]` —
-`Annotated[Union[T, Fluid], "__confluid_lazy__"]` — is what declares that: the
-marker is machine-read by `confluid.lazy_param_names`, so liquifai's auto
+dataset-derived width (`flow(self.model, num_classes=…)`). `Partial[T]` —
+`Annotated[Union[T, Fluid], "__confluid_partial__"]` — is what declares that: the
+marker is machine-read by `confluid.partial_param_names`, so liquifai's auto
 deep-flow skips the slot instead of building a target that still needs a runtime
 kwarg, and the serializer emits `!lazy:` rather than `!class:`.
 
-Six of the seven backends that existed then spelled it `Mandatory[Lazy[Any]]`.
+Six of the seven backends that existed then spelled it `Mandatory[Partial[Any]]`.
 That declares the deferral and nothing else, and three arguments had accumulated
 for leaving it there: the ATTRIBUTE already carries the real type (§7), a
 narrower `T` buys nothing in the generated schema for a torch model, and some
@@ -900,12 +900,12 @@ slots really do admit two unrelated types. Only the first is a reason to keep
 
 | backend | slot type | why |
 | --- | --- | --- |
-| lightning, torch, fastai | `Lazy[torch.nn.Module]` | all three run on torch; fastai's `initialize()` already raised `TypeError` for a non-module |
-| keras | `Lazy[keras.Model]` | the class calls `compile`/`fit`/`export` through the slot |
-| tensorflow | `Lazy[TensorFlowNetwork]` | `Union[keras.Model, tf.Module]` — see below |
-| jax | `Lazy[nnx.Module]` | `nnx.Optimizer(model, …)` and `nnx.value_and_grad` require one |
-| mlx | `Lazy[nn.Module]` (`mlx.nn`) | `nn.value_and_grad(model, …)` / `optimizer.update(model, …)` take the module itself |
-| huggingface | `Lazy[HuggingFaceNetwork]` | `Union[HuggingFaceModel, torch.nn.Module]` — `_network()` unwraps either |
+| lightning, torch, fastai | `Partial[torch.nn.Module]` | all three run on torch; fastai's `initialize()` already raised `TypeError` for a non-module |
+| keras | `Partial[keras.Model]` | the class calls `compile`/`fit`/`export` through the slot |
+| tensorflow | `Partial[TensorFlowNetwork]` | `Union[keras.Model, tf.Module]` — see below |
+| jax | `Partial[nnx.Module]` | `nnx.Optimizer(model, …)` and `nnx.value_and_grad` require one |
+| mlx | `Partial[nn.Module]` (`mlx.nn`) | `nn.value_and_grad(model, …)` / `optimizer.update(model, …)` take the module itself |
+| huggingface | `Partial[HuggingFaceNetwork]` | `Union[HuggingFaceModel, torch.nn.Module]` — `_network()` unwraps either |
 
 Six of the eight name their framework's own module BASE rather than a concrete
 sonair class, and that is possible because of a second decision made the same day:
@@ -933,7 +933,7 @@ transformers` that this backend defers to the methods that need it.
 - What the narrowing buys differs by arm, and both halves were measured. For a
   torch model it changes NOTHING downstream: `confluid.pydantic_export`
   coerces `torch`/`numpy` types to `Any` (`_OPAQUE_TOP_MODULES`), so
-  `Lazy[nn.Module]` and `Lazy[Any]` generate the identical field. For the rest it
+  `Partial[nn.Module]` and `Partial[Any]` generate the identical field. For the rest it
   is real — `to_pydantic(HuggingFaceClassifier)` now offers the wrapper's own
   `HuggingFaceModelConfig` in the `model` field where it used to offer an open
   `{}`, because `HuggingFaceModel` is `@configurable` and the exporter recurses
@@ -942,7 +942,7 @@ transformers` that this backend defers to the methods that need it.
   `KerasClassifier.model` reports `$ref: FluidConfig` where it used to report
   `anyOf: [{}, FluidConfig]`. Pydantic still VALIDATES a live instance
   (`arbitrary_types_allowed`, verified for both a `keras.Sequential` and a
-  `LazyClass` marker); it is the JSON projection that drops the un-schemable arm.
+  `PartialClass` marker); it is the JSON projection that drops the un-schemable arm.
   A form-spec consumer therefore sees "wire a config here", which is what the
   slot is for.
 - `TensorFlowClassifier` is the only slot where two FRAMEWORKS meet (the
@@ -976,22 +976,22 @@ transformers` that this backend defers to the methods that need it.
 TensorFlowNetwork = Union[keras.Model, tf.Module]
 
 class TensorFlowClassifier(ProgressReporting):
-    def __init__(self, model: Mandatory[Lazy[TensorFlowNetwork]], ...) -> None:
-        # PARAM declares the deferral (machine-read by `lazy_param_names`);
+    def __init__(self, model: Mandatory[Partial[TensorFlowNetwork]], ...) -> None:
+        # PARAM declares the deferral (machine-read by `partial_param_names`);
         # ATTRIBUTE declares what it holds once flowed — see §7.
         self.model: TensorFlowNetwork = model
 
 # ...and everywhere else the type is simply the framework's own base:
 class TorchClassifier(TorchRunner, ProgressReporting):
-    def __init__(self, model: Mandatory[Lazy[nn.Module]], ...) -> None:
+    def __init__(self, model: Mandatory[Partial[nn.Module]], ...) -> None:
         self.model: nn.Module = cast(nn.Module, model)
 ```
 
 **What you may change.** A new backend picks the type its loop actually requires
 and says so; if it needs two, add a `<Backend>Network` union alias beside the
 other `#:`-documented ones. `TorchClassifier` was the first backend written after
-this record and it landed at `Lazy[nn.Module]` with no prompting, which is the
-evidence the rule costs nothing to follow. `Lazy[Any]` stays legal in confluid for
+this record and it landed at `Partial[nn.Module]` with no prompting, which is the
+evidence the rule costs nothing to follow. `Partial[Any]` stays legal in confluid for
 a genuinely open slot — no sonair `model` slot is one, and
 `tests/test_lazy_slots.py::test_no_classifier_declares_its_model_slot_as_lazy_any`
 reads the SOURCE (most backends need a framework a default install lacks, so an

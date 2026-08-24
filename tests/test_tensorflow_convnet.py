@@ -98,10 +98,13 @@ def test_the_class_is_exported() -> None:
     assert '__all__ = ["TensorFlowConvNet"]' in source
 
 
+@requires_tensorflow
 def test_the_classifier_branches_on_the_export_capability() -> None:
     """A `tf.Module` has no `keras.Model.export`, so the classifier must not call it blindly."""
     import inspect
 
+    # Reads the machinery's SOURCE, but the module imports tensorflow at import time —
+    # so this needs the extra installed even though it asserts nothing about a live graph.
     from matrainer.tensorflow.loop import TensorFlowRunnable
 
     source = (Path(__file__).resolve().parents[1] / "sonair" / "tensorflow_classifier.py").read_text()

@@ -59,6 +59,10 @@ class LightningClassifier(ClassificationTorchHooks, LightningRunnable):
         num_classes: Output class count; omit to resolve from the model or the dataset.
         task: Entry point :meth:`run` dispatches to — ``"fit"`` / ``"evaluate"`` / ``"test"`` / ``"predict"``.
         max_epochs / batch_size / num_workers: ergonomic flat-config knobs.
+        persistent_workers: Override the pairing derived from ``num_workers`` (``None`` derives
+            ``num_workers != 0``). An explicit value is for a HOST fact no derivation can see —
+            macOS terminates persistent workers slowly, so a config there sets ``false`` while
+            keeping its workers. ``True`` with ``num_workers=0`` is refused.
         trackers: matrainer trackers — one or a list. They ARE this run's metric sinks:
             each is adapted to Lightning's logger interface, so there is no separate
             `logger:` slot of `pytorch_lightning.loggers`.
@@ -102,6 +106,7 @@ class LightningClassifier(ClassificationTorchHooks, LightningRunnable):
         max_epochs: int = 10,
         batch_size: int = 32,
         num_workers: int = 0,
+        persistent_workers: Optional[bool] = None,
         trackers: Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
@@ -124,6 +129,7 @@ class LightningClassifier(ClassificationTorchHooks, LightningRunnable):
             max_epochs=max_epochs,
             batch_size=batch_size,
             num_workers=num_workers,
+            persistent_workers=persistent_workers,
             trackers=trackers,
             experiment_name=experiment_name,
             run_name=run_name,

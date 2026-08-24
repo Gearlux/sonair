@@ -60,8 +60,12 @@ class TorchClassifier(ClassificationTorchHooks, TorchLoopRunnable):
         task: Which entry point ``run()`` dispatches to.
         max_epochs: Training epochs.
         batch_size: Rows per batch.
-        num_workers: DataLoader worker processes. Persistent workers follow from this, exactly
-            as in the Lightning backend — there is no separate knob.
+        num_workers: DataLoader worker processes. Persistent workers follow from this unless
+            ``persistent_workers`` says otherwise.
+        persistent_workers: Override the pairing derived from ``num_workers`` (``None`` derives
+            ``num_workers != 0``). An explicit value is for a HOST fact no derivation can see —
+            macOS terminates persistent workers slowly, so a config there sets ``false`` while
+            keeping its workers. ``True`` with ``num_workers=0`` is refused.
         experiment_name: Run identity, recorded in artifacts and tracking.
         run_name: Run identity; a random ``adjective_noun`` when omitted.
         input_key: Record key holding the image.
@@ -103,6 +107,7 @@ class TorchClassifier(ClassificationTorchHooks, TorchLoopRunnable):
         max_epochs: int = 10,
         batch_size: int = 32,
         num_workers: int = 0,
+        persistent_workers: Optional[bool] = None,
         experiment_name: str = "sonair_classification",
         run_name: Optional[str] = None,
         input_key: str = "image",
@@ -128,6 +133,7 @@ class TorchClassifier(ClassificationTorchHooks, TorchLoopRunnable):
             max_epochs=max_epochs,
             batch_size=batch_size,
             num_workers=num_workers,
+            persistent_workers=persistent_workers,
             trackers=trackers,
             experiment_name=experiment_name,
             run_name=run_name,

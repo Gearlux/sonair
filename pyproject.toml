@@ -23,7 +23,9 @@ dependencies = [
     # time in sonair/torch_classification.py + sonair/keras_classification.py —
     # against 0.2.0 every registration raises TypeError at import.
     "confluid>=0.3.0",
-    "recordstream>=0.1.0",
+    # recordstream ships as a pre-release (0.1.0a1). Under PEP 440 a plain `>=0.1.0`
+    # EXCLUDES every pre-release of 0.1.0, so it would resolve to nothing.
+    "recordstream>=0.1.0a1",
     "loggair>=0.1.0",
     "datasets>=2.0.0",
     "pillow",

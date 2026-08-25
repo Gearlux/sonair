@@ -60,7 +60,7 @@ torch = [
     "torch",
     "torchmetrics",
     "timm>=1.0.0",          # the model zoo `TimmModel` wraps — shared with the lightning backend
-    "recordstream[torch]>=0.1.0",
+    "recordstream[torch]>=0.1.0a1",
     "matrainer[torch,mlflow,tensorboard]>=0.1.0",
 ]
 # Keras 3 is an API, not an engine — it needs ONE compute backend underneath (torch/TF/jax), and
@@ -73,7 +73,7 @@ keras = [
     "torch",                # the engine `sonair[keras]` runs Keras on
     # The PyDataset batching adapter (`recordstream.keras.RecordSequence`) + the KERAS_BACKEND
     # ordering this backend's keras imports depend on.
-    "recordstream[keras]>=0.1.0",
+    "recordstream[keras]>=0.1.0a1",
     # Tracking for a Keras run. Deliberately matrainer[keras], NOT matrainer[tensorflow]: the
     # callback needs the Keras API, not the TensorFlow engine.
     "matrainer[keras]>=0.1.0",
@@ -81,7 +81,7 @@ keras = [
 tensorflow = [
     "keras>=3.0",           # Keras 3 IS tf.keras in TF >= 2.16
     "tensorflow>=2.16",     # ...this extra's engine
-    "recordstream[keras]>=0.1.0",
+    "recordstream[keras]>=0.1.0a1",
     "matrainer[keras]>=0.1.0",
 ]
 # fastai is a LAYER ON TORCH, not an engine of its own — its losses are `nn.Module`s and its
@@ -107,7 +107,7 @@ fastai = [
     "fastprogress<1.1",
     "torch",
     "timm>=1.0.0",          # the model zoo `TimmModel` wraps — shared with the lightning backend
-    "recordstream[torch]>=0.1.0",
+    "recordstream[torch]>=0.1.0a1",
     # matrainer.torch carries the Lightning-checkpoint loader `TimmModel` reads; the tracker
     # backends a fastai config wires are the same ones every other backend uses.
     "matrainer[torch,mlflow,tensorboard]>=0.1.0",

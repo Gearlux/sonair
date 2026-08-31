@@ -550,6 +550,51 @@ scan + the visual-editor form-spec offer them — and any future classification
 model/loss — as task-scoped options. The dataset is the generic
 `recordstream.sources.huggingface.HuggingFaceSource`.
 
+## Folder-per-class datasets (`ImageFolderSource`, `ImageFolderSink`)
+
+The layout every image-classification tool understands — one directory per class, optionally
+under a split level:
+
+```
+mnist_png/
+  train/0/…  train/1/…  …
+  test/0/…   test/1/…   …
+```
+
+```yaml
+source: !class:sonair.image_folder.ImageFolderSource
+  root: ~/data/mnist_png
+  split: test
+```
+
+`class_names` comes back from the folder names (`['0', … '9']`), so a consumer can show a label
+as a name without being told the vocabulary separately. The reader delegates to recordstream's
+HuggingFace source, whose loader already treats a local directory as an imagefolder — so the
+caching and the schema come from one implementation. What this class adds is a name you can
+find: nothing about "HuggingFaceSource" suggests it reads a local folder.
+
+`ImageFolderSink` writes the same layout back, putting each record in the folder its **current**
+label names — which is what makes it the write half of a relabelling pass:
+
+```yaml
+sink: !class:sonair.image_folder.ImageFolderSink
+  root: ~/data/mnist_png_corrected
+  delete_original: true      # MOVE the file rather than copy it
+```
+
+`delete_original` removes a file that is not ours, so it is guarded: off by default, the
+original goes only **after** the new file exists, **never** when source and destination are the
+same file (a record whose class did not change must not vanish), and a record carrying no source
+path is written with nothing to move rather than failing the run. Records keep their original
+filename, so an image stays recognisable across a relabel.
+
+**Why here and not in recordstream:** a folder-per-class encodes exactly one categorical value
+per image — the folder *is* the label, which is a classification convention rather than a
+storage format. recordstream's own sinks (`DirectorySink`, `HDF5Sink`, `ZarrGroupSink`)
+serialize any record without interpreting it; a detection dataset's writer lives in the
+detection package for the same reason. It deliberately does not generalise to boxes or masks:
+a directory name cannot express them.
+
 ## Class count: how `num_classes` is resolved
 
 `LightningClassifier.initialize()` (run at the top of `run()`) resolves the count

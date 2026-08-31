@@ -162,6 +162,10 @@ sonair = "sonair.cli:app"
 # nothing at run time (a dotted path in YAML imports the module itself, and the CLI imports its
 # own backend) and made them invisible to every discovery surface — navigaitor's slot pickers,
 # the form-specs, the StreamStudio palette.
+# The folder-per-class dataset pair (reader + writer). Not a backend: it registers a source and
+# a sink, which is why it is here rather than beside the model modules — the entry-point rule is
+# "every module that registers a configurable", not "every backend".
+sonair-image-folder = "sonair.image_folder"
 sonair-lightning = "sonair.lightning_classifier"
 # The bare-torch runnable. It shares `sonair.torch_classification` (declared below) with
 # the lightning backend rather than bringing a set of its own — a `torch.nn` loss does not

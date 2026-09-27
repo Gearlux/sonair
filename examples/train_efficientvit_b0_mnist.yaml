@@ -64,9 +64,8 @@ run_name: efficientvit_b0_mnist
 #  2. A.Normalize     ImageNet mean/std — the statistics `pretrained: true` was
 #     trained under. A bare albumentations transform drops straight into an ops
 #     list; recordstream calls each library the way that library expects.
-#  3. ToTensor        HWC -> CHW float32. `normalize: false` because step 2 has
-#     ALREADY standardized the pixels; leaving the default true would divide the
-#     standardized values by 255 again and squash them to ~[-0.01, 0.01].
+#  3. ToTensor        HWC -> CHW, nothing else — the pixels are already float32
+#     from step 2.
 preprocess:
   - !class:recordstream.ops.image.ConvertToImage
     width: 224
@@ -74,8 +73,7 @@ preprocess:
   - !class:albumentations.Normalize
     mean: [0.485, 0.456, 0.406]
     std: [0.229, 0.224, 0.225]
-  - !class:recordstream.ops.torch.ToTensor
-    normalize: false
+  - !class:recordstream.ops.torch.ToTensor {}
 
 # Data: HuggingFace `ylecun/mnist`. It exposes `train` and `test` splits (no
 # `validation`), so the held-out split is `test`. The id is the NAMESPACED form:

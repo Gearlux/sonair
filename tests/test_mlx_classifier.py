@@ -281,7 +281,7 @@ def test_optimizers_are_CLASSES_here_not_factories() -> None:
 
     assert isinstance(made, optim.Adam)
     # a ready-made optimizer is taken as-is
-    assert _as_optimizer(made, 0.1) is made  # type: ignore[arg-type]
+    assert _as_optimizer(made, 0.1) is made
     with pytest.raises(ValueError, match="mlx.optimizers"):
         _as_optimizer("nope", 0.1)
 
@@ -348,14 +348,14 @@ def test_the_per_epoch_reshuffle_happens() -> None:
             seen.append(1)
             original()
 
-        sequence.on_epoch_end = counted  # type: ignore[method-assign]
+        sequence.on_epoch_end = counted
         return sequence
 
-    type(clf)._sequence = spy  # type: ignore[method-assign]
+    type(clf)._sequence = spy
     try:
         clf.run()
     finally:
-        type(clf)._sequence = real  # type: ignore[method-assign]
+        type(clf)._sequence = real
 
     assert len(seen) == 3
 
@@ -401,7 +401,7 @@ def test_predict_writes_one_entry_per_record_with_its_metadata() -> None:
         task="predict",
         batch_size=3,
     )
-    clf.predictions_sink = sink  # type: ignore[assignment]
+    clf.predictions_sink = sink
     clf.run()
 
     assert len(sink.rows) == 7, "a short final batch must not be dropped"

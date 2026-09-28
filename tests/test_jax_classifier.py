@@ -300,7 +300,7 @@ def test_predict_writes_one_entry_per_record_with_its_metadata() -> None:
         task="predict",
         batch_size=3,
     )
-    clf.predictions_sink = sink  # type: ignore[assignment]
+    clf.predictions_sink = sink
     clf.run()
 
     assert len(sink.rows) == 7, "a short final batch must not be dropped"

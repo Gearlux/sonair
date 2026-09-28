@@ -164,8 +164,8 @@ Three steps, no plumbing.
 
 **1. Write the runnable.** Create `sonair/<name>_classifier.py` with a class that:
 
-- is `@configurable(task="classification", role="trainer")` so navigaitor and
-  StreamStudio discover it;
+- is `@configurable(task="classification", role="trainer")` so discovery tools and
+  visual editors find it;
 - takes a `task` parameter typed as a closed `Literal`;
 - has `run()` → `initialize()` → dispatch to `@entrypoint`-tagged methods;
 - does no functional work in `__init__` (build the model in `initialize()`).

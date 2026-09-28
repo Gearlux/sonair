@@ -231,7 +231,7 @@ class TimmModel(nn.Module):
             )
             if self.checkpoint_path:
                 load_lightning_checkpoint(self, self.checkpoint_path, strict=self.checkpoint_strict)
-        return cast(nn.Module, self.classifier)
+        return self.classifier
 
     @property
     def backbone(self) -> nn.Module:

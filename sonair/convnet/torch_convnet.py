@@ -125,7 +125,7 @@ class TorchConvNet(nn.Module):
                 dropout=self.dropout,
             )
             logger.info(f"Built the shared conv spec in torch.nn ({self.num_classes} classes, widths={self.widths}).")
-        return cast(nn.Module, self.net)
+        return self.net
 
     @property
     def backbone(self) -> nn.Module:
@@ -155,4 +155,4 @@ class TorchConvNet(nn.Module):
         """Short and honest before the build — the default would print an empty module."""
         if self.net is None:
             return f"TorchConvNet(num_classes={self.num_classes}, widths={self.widths}, unbuilt)"
-        return cast(str, super().__repr__())
+        return super().__repr__()

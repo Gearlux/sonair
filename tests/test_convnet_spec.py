@@ -86,7 +86,7 @@ def _flax_params() -> int:
 
 
 def _mlx_params() -> int:
-    from sonair.convnet.mlx_convnet import MlxConvNet  # type: ignore[import-not-found]  # lands with the mlx backend
+    from sonair.convnet.mlx_convnet import MlxConvNet
 
     model = MlxConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
     model.solidify()
@@ -94,9 +94,7 @@ def _mlx_params() -> int:
 
 
 def _tensorflow_params() -> int:
-    from sonair.convnet.tensorflow_convnet import (
-        TensorFlowConvNet,  # type: ignore[import-not-found]  # lands with the TF models
-    )
+    from sonair.convnet.tensorflow_convnet import TensorFlowConvNet
 
     model = TensorFlowConvNet(num_classes=NUM_CLASSES, input_shape=INPUT)
     model.solidify()
@@ -179,11 +177,11 @@ def test_every_implementation_takes_the_same_constructor_knobs() -> None:
 
         classes.append(FlaxConvNet)
     if _usable("mlx", "mlx"):
-        from sonair.convnet.mlx_convnet import MlxConvNet  # type: ignore[import-not-found]
+        from sonair.convnet.mlx_convnet import MlxConvNet
 
         classes.append(MlxConvNet)
     if _usable("tensorflow", "tensorflow"):
-        from sonair.convnet.tensorflow_convnet import TensorFlowConvNet  # type: ignore[import-not-found]
+        from sonair.convnet.tensorflow_convnet import TensorFlowConvNet
 
         classes.append(TensorFlowConvNet)
 

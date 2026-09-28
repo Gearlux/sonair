@@ -661,7 +661,7 @@ def test_string_targets_fit_encode_and_expose_map() -> None:
     from recordstream import iter_key
 
     train_set = cast(Stream, trainer.train_set)
-    assert train_set.class_names == ["bird", "cat", "dog"]  # type: ignore[attr-defined]
+    assert train_set.class_names == ["bird", "cat", "dog"]
     assert len(cast(Sized, train_set))  # touch len for parity with the old index-walk
     encoded = set(iter_key(train_set, "class"))
     assert encoded == {0, 1, 2}

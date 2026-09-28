@@ -330,7 +330,7 @@ def test_probs_are_a_distribution() -> None:
         task="predict",
         num_classes=3,
     )
-    clf.predictions_sink = _Sink()  # type: ignore[assignment]
+    clf.predictions_sink = _Sink()
     clf.run()
 
     assert np.isclose(seen[0]["probs"].sum(), 1.0)

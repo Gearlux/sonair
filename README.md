@@ -25,15 +25,18 @@ swin, convnext, mobilenetv3, ...) and exposes its constructor knobs to YAML.
 backend you select, so a Keras install does not drag in Lightning, nor the reverse:
 
 ```bash
-pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning]'       # PyTorch Lightning
-pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[keras]'           # Keras 3
-pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[tensorflow]'      # native TensorFlow
-pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[fastai]'          # fastai Learner
-pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[huggingface]'     # transformers Trainer
-pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[jax]'             # jitted optax loop
-pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[mlx]'             # Apple-silicon MLX
-pip install 'git+https://github.com/Gearlux/sonair.git@main#egg=sonair[lightning,keras]' # any combination
+pip install "sonair[lightning]"         # PyTorch Lightning
+pip install "sonair[keras]"             # Keras 3
+pip install "sonair[tensorflow]"        # native TensorFlow
+pip install "sonair[fastai]"            # fastai Learner
+pip install "sonair[huggingface]"       # transformers Trainer
+pip install "sonair[jax]"               # jitted optax loop
+pip install "sonair[mlx]"               # Apple-silicon MLX
+pip install "sonair[lightning,keras]"   # any combination
 ```
+
+sonair is on PyPI as a pre-release; pip installs it without `--pre`, because no final release
+exists yet. Leave `--pre` off: it lets pip take pre-releases of *every* dependency too.
 
 `[lightning]` is the reference backend and what the examples assume. What each selects:
 
@@ -218,8 +221,8 @@ held-out split or dump per-record classification JSON — the verb wins over any
 
 | Page | Covers |
 | --- | --- |
-| [docs/frameworks.md](docs/frameworks.md) | Every training backend, what each one needs, and how the same config drives all of them |
-| [docs/architecture.md](docs/architecture.md) | Why the framework split is shaped the way it is — decision records |
+| [docs/frameworks.md](https://github.com/Gearlux/sonair/blob/main/docs/frameworks.md) | Every training backend, what each one needs, and how the same config drives all of them |
+| [docs/architecture.md](https://github.com/Gearlux/sonair/blob/main/docs/architecture.md) | Why the framework split is shaped the way it is — decision records |
 
 ## Training backends
 
@@ -290,7 +293,7 @@ The matrix, and why two cells are empty:
 | jax | — no Flax zoo exists | `FlaxConvNet` |
 | mlx | — no MLX image zoo exists | `MlxConvNet` |
 
-Those two gaps are the reason [`sonair/convnet/spec.py`](sonair/convnet/spec.py) exists: one
+Those two gaps are the reason [`sonair/convnet/spec.py`](https://github.com/Gearlux/sonair/blob/main/sonair/convnet/spec.py) exists: one
 architecture, written natively per framework, so the comparison is between *frameworks* rather
 than between five different networks.
 
@@ -545,8 +548,8 @@ See `timm.list_models()` for the full catalogue.
 `TimmModel` is tagged `@configurable(task="classification", role="model")` (the
 `LightningClassifier` carries `role="trainer"` — its per-task `run()` entry points
 declare `trainer`/`evaluator`/`predictor` roles — and `torch.nn.CrossEntropyLoss`
-is `register`-ed as `role="loss"`), so navigaitor's `list_classes(task=…, role=…)`
-scan + the visual-editor form-spec offer them — and any future classification
+is `register`-ed as `role="loss"`), so a discovery scan (confluid's
+`list_classes(task=…, role=…)`) and a visual editor's form-spec offer them — and any future classification
 model/loss — as task-scoped options. The dataset is the generic
 `recordstream.sources.huggingface.HuggingFaceSource`.
 
@@ -678,7 +681,7 @@ runnable: !class:sonair.LightningClassifier
 
 Wiring a `loss_fn` or `metrics` yourself always wins — the defaults only fill an **unset** slot
 (both are `None` until `initialize()` runs, which is how "not chosen" stays distinguishable from
-"chosen"; see [docs/architecture.md](docs/architecture.md) §3).
+"chosen"; see [docs/architecture.md](https://github.com/Gearlux/sonair/blob/main/docs/architecture.md) §3).
 
 The prediction sink still writes top-k entries per record; a threshold-based multi-label sink is
 open work (see `TASKS.md`).
@@ -717,14 +720,14 @@ loss is engine-bound: a `torch.nn` loss cannot be handed to `KerasClassifier`, a
 
 | Engine | Module | Registered | Tag |
 |---|---|---|---|
-| PyTorch | [`sonair/torch_classification.py`](sonair/torch_classification.py) | `torch.nn` losses + `torchmetrics.classification` `Multiclass*` / `Multilabel*` | `framework="torch"` |
-| Keras 3 | [`sonair/keras_classification.py`](sonair/keras_classification.py) | `keras.losses` + `keras.metrics` | `framework="keras"` |
-| fastai | [`sonair/fastai_classification.py`](sonair/fastai_classification.py) | the `fastai.losses` classes (`CrossEntropyLossFlat`, `FocalLossFlat`, `LabelSmoothingCrossEntropy`, …) | `framework="torch"` |
+| PyTorch | [`sonair/torch_classification.py`](https://github.com/Gearlux/sonair/blob/main/sonair/torch_classification.py) | `torch.nn` losses + `torchmetrics.classification` `Multiclass*` / `Multilabel*` | `framework="torch"` |
+| Keras 3 | [`sonair/keras_classification.py`](https://github.com/Gearlux/sonair/blob/main/sonair/keras_classification.py) | `keras.losses` + `keras.metrics` | `framework="keras"` |
+| fastai | [`sonair/fastai_classification.py`](https://github.com/Gearlux/sonair/blob/main/sonair/fastai_classification.py) | the `fastai.losses` classes (`CrossEntropyLossFlat`, `FocalLossFlat`, `LabelSmoothingCrossEntropy`, …) | `framework="torch"` |
 
 Each module is its own `confluid.configurables` entry point, so an install without a given
 backend simply has no registrations for it. A picker asked for "a classification loss" for a
 Keras trainer is offered only the Keras set (confluid 0.3.0's `framework` axis) — see
-[docs/architecture.md](docs/architecture.md) §2.
+[docs/architecture.md](https://github.com/Gearlux/sonair/blob/main/docs/architecture.md) §2.
 
 Two rows in that table are less symmetric than they look, and both are the `framework` axis
 working as intended — it names the API a class can be **wired to**, not the package that
@@ -871,7 +874,7 @@ Set `plot_metrics: true` to *also* send each matrix as a matplotlib heatmap thro
 `Tracker.log_figure` — glanceable, and the only readable form once there are many classes. It is
 off by default because it makes matplotlib (`matrainer[plot]`) a cost of every eval epoch, where
 the table costs nothing and works in a plain log. See
-[`examples/train_efficientvit_b0_mnist.yaml`](examples/train_efficientvit_b0_mnist.yaml) for the
+[`examples/train_efficientvit_b0_mnist.yaml`](https://github.com/Gearlux/sonair/blob/main/examples/train_efficientvit_b0_mnist.yaml) for the
 wiring in context — and note that a backend on another engine must override both keys, since
 torchmetrics classes are `framework="torch"`.
 
@@ -1059,8 +1062,8 @@ own `Callback` class) and on `jax` / `mlx`, whose loops are sonair's own and tak
 `LightningClassifier` declares three read-only post-run `@output`s directly —
 `trained_model` (the live trained `nn.Module`), `computed_metrics`
 (`Dict[str, float]`), and `class_names` (`List[str]`) — so a run's model, scalar
-metrics, and class names show up as wireable output sockets in StreamStudio's
-Run-node results panel automatically.
+metrics, and class names show up automatically as wireable output sockets in a visual
+editor's run results.
 
 ## Dependencies
 

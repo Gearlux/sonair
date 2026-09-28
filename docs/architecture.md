@@ -244,17 +244,17 @@ the decision was first recorded; it is what the "wire-to" framing settles.)
 - **Explicit, not inferred**, for the same reason `role` is: a `register()`-ed
   builder *function* (raidar's torchvision `fasterrcnn_*`) has no MRO to read.
   Inference exists only as a consumer-side fallback for untagged classes
-  (`generate._framework_of` / `_TYPE_FRAMEWORK_BY_BASE`), mirroring StreamStudio's
-  long-standing `_role_for_class` precedent.
+  (inferring the engine from a class's base), mirroring the long-standing consumer-side
+  inference of a class's role.
 - **Exclusion requires two claims.** A candidate that declares no framework is
   never filtered out, and a runnable that declares none filters nothing. Every
   untagged project (raidar, deltaid, waivefront) therefore behaves exactly as
   before — the axis is opt-in per class, not a flag day.
-- **Framework is enforcement, task is guidance.** navigaitor deliberately offers
+- **Framework is enforcement, task is guidance.** A discovery service deliberately offers
   cross-*task* options (a segmentation model in a classification model slot — "a
   model is a model"), ranked after the preferred tier. Cross-*framework* options
   are not offered at all, because they are not a choice: they cannot run.
-- **StreamStudio followed on 2026-07-31**, once it had its own decision — the axis
+- **A visual editor followed on 2026-07-31**, once it had its own decision — the axis
   reached the canvas without the workflow-format break this record feared. Its
   object sockets now carry the engine as a third segment inside a comma UNION
   (`RECORDSTREAM_OBJECT:loss:torch,RECORDSTREAM_OBJECT:loss`), which both
@@ -262,7 +262,7 @@ the decision was first recorded; it is what the "wire-to" framing settles.)
   keeps loading and an untagged class keeps connecting. The union carries the
   claim; the *rule* is applied by a backend `VALIDATE_INPUTS` and a canvas
   `onConnectInput` hook, because no arrangement of type strings can express
-  "exclusion requires two claims" on its own. See streamstudio's `AGENTS.md`.
+  "exclusion requires two claims" on its own.
 - **One registration module per engine** — `torch_classification.py` (2026-07-30,
   renamed from `classification.py`, which read as task-scoped in a project whose
   whole point is that the task outlives the engine) and `keras_classification.py`.
@@ -429,7 +429,7 @@ copied.
 - There is therefore **no `tensorflow_classification.py`**. A second module would
   register the same `keras.losses` classes under a second framework tag, and a
   bare `!class:SparseCategoricalCrossentropy@role=loss` would become ambiguous
-  everywhere navigaitor bootstraps every entry point — a real ergonomic
+  everywhere a discovery service bootstraps every entry point — a real ergonomic
   regression bought with nothing.
 - The constructor **restates every parameter of its parent** rather than taking
   `**kwargs`. Static introspection (`to_pydantic` → form specs, MCP schemas,

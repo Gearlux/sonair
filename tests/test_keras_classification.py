@@ -130,7 +130,7 @@ def test_registering_the_UPSTREAM_keras_set_emits_no_clobber_warning() -> None:
     try:
         importlib.reload(kc)
     finally:
-        registry_module.logger = original  # type: ignore[assignment]
+        registry_module.logger = original
     upstream = [message for message in collected if "SparseF1Score" not in str(message)]
     assert upstream == []
 

@@ -258,7 +258,7 @@ def test_the_fastai_objects_are_deferred_slots() -> None:
     clf = FastaiClassifier(model=_NO_MODEL, learning_rate=0.02, weight_decay=0.01)
 
     assert isinstance(clf.dataloaders, Fluid) and isinstance(clf.learner, Fluid)
-    assert cast(Fluid, clf.learner).kwargs == {"lr": 0.02, "wd": 0.01}
+    assert clf.learner.kwargs == {"lr": 0.02, "wd": 0.01}
 
 
 def test_a_wired_dataloaders_knob_reaches_the_built_object() -> None:
@@ -502,7 +502,7 @@ def test_a_model_without_num_classes_is_a_clear_error_on_the_eval_path() -> None
 def test_predict_writes_one_entry_per_record_with_its_metadata() -> None:
     sink = _CaptureSink()
     clf = FastaiClassifier(model=_Tiny(), test_set=_stream(_records(7)), task="predict", batch_size=3)
-    clf.predictions_sink = sink  # type: ignore[assignment]
+    clf.predictions_sink = sink
     clf.run()
 
     assert len(sink.rows) == 7, "a short final batch must not be dropped"

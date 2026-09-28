@@ -1,23 +1,28 @@
 # Sonair
 
-Image-classification models and a self-contained Lightning classifier, wired with
-[Confluid](https://github.com/Gearlux/confluid) and configured from YAML.
+**Image classification across eight training backends, driven by one config.**
 
-Sonair provides a thin, Confluid-configurable wrapper around
-[`timm`](https://github.com/huggingface/pytorch-image-models)
-so any of timm's ~1000 pretrained backbones drop into **`sonair.LightningClassifier`** —
-ONE standard `pytorch_lightning.LightningModule` with its own
-`training_step` / `validation_step` / `test_step` / `predict_step` /
-`configure_optimizers`, and a `run()` that dispatches on a `task` knob
-(`fit` / `evaluate` / `test` / `predict`). Its standard
-`preds = self(batch_tensor(batch, self.input_key)); loss = self.loss_fn(preds, _batch_target(batch, self.target_key))`
-flow — reading the primary input and target-`Label` fields off the batched typed
-record — a plain dict of typed values — fits classification natively. Matrainer is now used only for OPTIONAL experiment
-tracking plus a couple of torch utilities.
+One YAML file trains, evaluates and predicts with the backend you pick — **PyTorch Lightning**, a
+**hand-written torch loop**, **Keras 3**, a native **TensorFlow** `tf.data` + `GradientTape` loop,
+a **fastai** `Learner`, the **Hugging Face** `Trainer`, a jitted **JAX/optax** loop or Apple's
+**MLX** — and swapping between them is `--framework <name>`, not a second config:
 
-The first-class model is **TimmModel**, a generic wrapper that
-takes any `model_name` from timm's catalogue (efficientvit, resnet, vit,
-swin, convnext, mobilenetv3, ...) and exposes its constructor knobs to YAML.
+```bash
+sonair train examples/train_efficientvit_b0_mnist.yaml                     # Lightning (the default)
+sonair train examples/train_efficientvit_b0_mnist.yaml --framework keras   # same config, Keras 3
+sonair evaluate examples/train_efficientvit_b0_mnist.yaml
+```
+
+The config is [Confluid](https://github.com/Gearlux/confluid) YAML, the data flows as
+[RecordStream](https://github.com/Gearlux/recordstream) records (plain dicts of typed values), and
+experiment tracking — CSV, MLflow, TensorBoard, W&B — is optional, through
+[matrainer](https://pypi.org/project/matrainer/).
+
+The first-class model is **`TimmModel`**, which takes any `model_name` from
+[`timm`](https://github.com/huggingface/pytorch-image-models)'s catalogue (efficientvit, resnet, vit,
+swin, convnext, mobilenetv3, …) and exposes its constructor knobs to YAML. Keras applications, Hugging
+Face Hub checkpoints and one small ConvNet written natively for five frameworks fill the same `model:`
+slot on the other backends.
 
 ## Installation
 

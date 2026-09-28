@@ -118,15 +118,36 @@ def test_the_changelog_is_shipped_in_the_sdist() -> None:
     assert not missing, f"MANIFEST.in does not include: {missing}"
 
 
+def _released_versions(changelog: str) -> List[str]:
+    """The `## [<version>]` headings, newest first, leaving out `## [Unreleased]`.
+
+    Keep a Changelog collects changes under `## [Unreleased]` between releases. That
+    section names no version, so it is not the entry the declared version must match —
+    the first check of this rule failed on exactly that, the day after the first release,
+    when a follow-up change was written up under `Unreleased` as the format asks.
+    """
+    headings = re.findall(r"^## \[([^\]]+)\]", changelog, flags=re.MULTILINE)
+    return [heading for heading in headings if heading.lower() != "unreleased"]
+
+
+def test_an_unreleased_section_is_not_a_version() -> None:
+    """Guard the helper: `Unreleased` is skipped, a real version is not."""
+    assert _released_versions("## [Unreleased]\n\n- a change\n\n## [0.1.0a1] — 2026-09-28\n") == ["0.1.0a1"]
+    assert _released_versions("## [0.2.0] — 2026-10-01\n\n## [0.1.0] — 2026-09-01\n") == ["0.2.0", "0.1.0"]
+    assert _released_versions("## [Unreleased]\n\n- a change\n") == []
+
+
 def test_the_newest_changelog_entry_is_the_declared_version() -> None:
-    """The version being released has its CHANGELOG entry, and it is the top one.
+    """The version being released has its CHANGELOG entry, and it is the newest one.
 
     The version in `pyproject.toml` is bumped in one edit and the CHANGELOG in
     another; the release workflow checks the tag against the first and nothing
     checks the second, so a release whose notes describe the previous version
-    would publish without complaint.
+    would publish without complaint. An `## [Unreleased]` section above it is
+    allowed: bumping the version still fails here until the new version's own
+    heading is written.
     """
-    versions = re.findall(r"^## \[([^\]]+)\]", (_REPO / "CHANGELOG.md").read_text(), flags=re.MULTILINE)
+    versions = _released_versions((_REPO / "CHANGELOG.md").read_text())
 
     assert versions, "CHANGELOG.md has no `## [<version>]` entry"
     assert (

@@ -10,8 +10,9 @@ first-party one: with the batching adapter living in ``recordstream.keras``, a
 ``from sonair._keras import keras`` and would have imported keras first.
 
 So :mod:`recordstream.keras` owns the ordering (and the ``_first_installed_backend`` probe that
-picks it), and this module stays as sonair's import point so every sonair module keeps one
-spelling. Never ``import keras`` directly in a sonair module.
+picks it), and this module re-exports its handles. A sonair module reaches keras through either
+``sonair._keras`` or ``recordstream.keras`` — the same objects, the same ordering — and never
+``import keras`` directly.
 """
 
 from recordstream.keras import keras, keras_backend

@@ -70,9 +70,9 @@ Changelog = "https://github.com/Gearlux/sonair/blob/main/CHANGELOG.md"
 #   uv pip install -e './sonair[keras]'
 #   uv pip install -e './sonair[lightning,keras]'
 #
-# `lightning` and `keras` are IMPLEMENTED; the rest are templates whose verbs name the work.
-# An extra exists for each so the not-implemented guidance can print a real install command,
-# and so wiring a backend later is a dependency change rather than a packaging one.
+# All eight backends are implemented, one extra each: `lightning`, `torch`, `keras`, `tensorflow`,
+# `fastai`, `huggingface`, `jax`, `mlx`. Choosing a backend is a dependency change, not a
+# packaging one.
 lightning = [
     "torch",
     "torchmetrics",
@@ -253,9 +253,7 @@ sonair-fastai-classification = "sonair.fastai_classification"
 # Which of this project's extras are ML FRAMEWORKS, for `aisland framework`. Selecting a name
 # here is what makes `aisland setup` add the matching extra to this project's install.
 #
-# Only the IMPLEMENTED backends are declared. The `jax` / `mlx` / `huggingface` extras above
-# exist so the CLI's not-implemented templates can print a real install command; declaring them
-# here would install three frameworks nothing can run yet.
+# All eight backends are declared, one per extra above.
 #
 # Declaring a name here only puts it on the MENU — what gets installed is the separate
 # selection in the workspace `config.toml` (`aisland framework set …`), so listing a name costs

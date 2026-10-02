@@ -276,11 +276,18 @@ result.
 backbone and once on the shared conv spec), and reports the lot from one tracker:
 
 ```bash
-examples/sweep/run_sweep.sh                     # every installed backend, into MLflow
-examples/sweep/run_sweep.sh --tracker csv       # ...into the always-available CSV backend
-examples/sweep/run_sweep.sh --only jax,mlx      # just those two
-examples/sweep/run_sweep.sh --dry-run           # print the matrix and the commands, run nothing
+matrainer sweep backends examples/sweep/sweep.yaml                                  # every installed backend, into MLflow
+matrainer sweep backends examples/sweep/sweep.yaml --tracker csv --save-dir ./runs  # ...into the always-available CSV backend
+matrainer sweep backends examples/sweep/sweep.yaml --only jax,mlx                   # just those two
+matrainer sweep backends examples/sweep/sweep.yaml --dry-run                        # print the matrix and the commands, run nothing
 ```
+
+`examples/sweep/sweep.yaml` is the matrix (which backends, which model variants, which
+trackers); the machinery that walks it ships with [matrainer](https://pypi.org/project/matrainer/) (`matrainer sweep`).
+`--save-dir` is where the per-run `.log` files land (`<save-dir>/<experiment>/<run>.log`,
+default `./sweep_logs`) and where the file-backed trackers' reports are read from
+(`<save-dir>/csv/`), so a sweep into the `csv` tracker passes `--save-dir ./runs` — the
+directory the overlay's `csv` block writes under.
 
 Every run is the same `examples/sweep/all_backends.yaml` with two flags changed. That file is
 an **overlay**: it `include:`s the example above and adds only what a sweep needs — the five
@@ -302,14 +309,14 @@ Those two gaps are the reason [`sonair/convnet/spec.py`](https://github.com/Gear
 architecture, written natively per framework, so the comparison is between *frameworks* rather
 than between five different networks.
 
-The script builds its matrix by **probing** which frameworks import, not by reading
+The sweep builds its matrix by **probing** which frameworks import, not by reading
 `sonair frameworks` (which advertises all eight regardless), so a machine with three extras
 runs three backends and says which it skipped. Each run is its own process — not a style
 choice: Keras 3 binds its compute engine at import, so `keras` and `tensorflow` cannot share an
 interpreter. A backend that fails does not abort the others; its log is named in the summary.
 
 The experiment is named `<Day>_<Mon>_<D>_<YYYY>_<N>`, N counted from the tracker itself, so a
-wiped tracker restarts at 1. At the end the script prints one row per run, validation columns
+wiped tracker restarts at 1. At the end the sweep prints one row per run, validation columns
 first — one column per quantity, because every backend records the same three names:
 
 ```
@@ -347,7 +354,7 @@ Both stay in the tracker, and neither is dropped silently — the footer names w
 reason, and the command that brings it back:
 
 ```bash
-python -m matrainer.sweep report csv Tue_Aug_4_2026_1 --all
+matrainer sweep report csv Tue_Aug_4_2026_1 --save-dir ./runs --all
 ```
 
 MLflow and CSV can be read back from here; the others are write surfaces from this machine and
@@ -476,7 +483,8 @@ runnable: !class:sonair.TensorFlowClassifier
 ```
 
 Everything else — the label handling, the batch shape, the losses and metrics, the
-prediction contract — is *inherited* from `KerasClassifier`, not re-implemented.
+prediction contract — is *shared* with `KerasClassifier` through `ClassificationKerasHooks`
+(both classes are built on it), not re-implemented.
 
 > **One engine per process.** Keras 3 binds its compute backend at first import, and
 > `recordstream.keras` defaults it to the first engine actually installed — `torch`, on a
@@ -980,14 +988,15 @@ equivalents — and the one knob they need against a logits head — are in
 
 ## Optional tracking via matrainer
 
-`LightningClassifier` is a standard `pytorch_lightning.LightningModule` that builds
-its own `pytorch_lightning.Trainer` from the `lightning` slot / ergonomic knobs. It
-uses matrainer ONLY for OPTIONAL experiment tracking: when `trackers` are wired it
-attaches a `matrainer.lightning.TrackingCallback` (git/config/log-file provenance),
-and `log_system_metrics: true` activates framework-free system-metric logging.
-Removing matrainer would take only a few line changes. There is no separate `logger:`
-knob of `pytorch_lightning.loggers.*` — the trackers ARE this run's metric sinks, adapted
-to Lightning's logger interface, so one key drives every backend.
+`LightningClassifier` is a standard `pytorch_lightning.LightningModule` built on matrainer's
+`LightningRunnable` — as is every other backend on its own matrainer runnable base. matrainer
+supplies the loaders, the deferred `pytorch_lightning.Trainer` (built from the `lightning`
+slot / ergonomic knobs), the step functions and the tracking; sonair supplies the
+classification task on top. Tracking is the optional part: when `trackers` are wired the run
+attaches a `matrainer.lightning.TrackingCallback` (git/config/log-file provenance), and
+framework-free system-metric logging is on unless `log_system_metrics: false` turns it off.
+There is no separate `logger:` knob of `pytorch_lightning.loggers.*` — the trackers ARE this
+run's metric sinks, adapted to Lightning's logger interface, so one key drives every backend.
 
 ### Pointing a tracker at a running service
 

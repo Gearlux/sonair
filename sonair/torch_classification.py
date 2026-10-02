@@ -12,7 +12,7 @@ Classification is the simplest fit for the classifier: it takes ``[N, 3, H, W]``
 images and emits ``[N, C]`` logits, and the loss / metric pair both consume
 ``(logits, target_class_ids)`` directly. No step-output dict, no per-mode forward
 divergence — the classifier recovers the input tensor + target tensor from the
-batched record dict (via ``recordstream.batch_tensor`` / ``_batch_target``)
+batched record dict (via ``recordstream.batch_tensor`` / ``ClassificationTorchHooks._targets``)
 and its standard ``preds = self(x)`` / ``loss = self.loss_fn(preds, y)`` flow runs.
 
 Loss: the default classification loss is :class:`torch.nn.CrossEntropyLoss`
@@ -44,7 +44,7 @@ record's input key is already a ``[3, H, W]`` :class:`~recordstream.Image`;
 ``collate_records`` stacks it to ``[N, 3, H, W]`` and gathers the remaining
 keys as per-record lists. The classifier's model boundary reads it back with the generic
 :func:`recordstream.batch_tensor` and shapes the target with
-:func:`sonair.lightning_classifier._batch_target` (an ``[N]`` int64 tensor, or an ``[N, C]``
+:meth:`sonair.classification_torch.ClassificationTorchHooks._targets` (an ``[N]`` int64 tensor, or an ``[N, C]``
 float multi-hot for a :class:`~recordstream.MultiLabel`).
 
 Metrics: the useful ``torchmetrics.classification`` metrics — BOTH families,

@@ -139,7 +139,7 @@ def test_run_executes_test_loop(tmp_path: Any) -> None:
     ev = _make_evaluator(model=_FlattenTinyClassifier(input_size=3 * 8 * 8), dataset=_make_stream())
     # _make_stream yields records with BARE-tensor "image" values, so collate them with the test-only
     # pre-stacking collate; the classifier's step functions read the batch dict through the same
-    # batch_tensor / _batch_target accessors.
+    # batch_tensor / _targets accessors.
     ev.test_loader = Target(DataLoader, batch_size=8, collate_fn=_stack_collate)
     ev.lightning = Target(
         L.Trainer,

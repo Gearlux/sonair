@@ -972,19 +972,20 @@ transformers` that this backend defers to the methods that need it.
 **Example.**
 
 ```python
-# tensorflow_classifier.py — the one slot where two frameworks meet
+# matrainer/tensorflow/loop.py — the one slot where two frameworks meet
 TensorFlowNetwork = Union[keras.Model, tf.Module]
 
-class TensorFlowClassifier(ProgressReporting):
-    def __init__(self, model: Mandatory[Partial[TensorFlowNetwork]], ...) -> None:
+# sonair/tensorflow_classifier.py — the classification hooks and the TensorFlow loop are the two bases
+class TensorFlowClassifier(ClassificationKerasHooks, TensorFlowRunnable):
+    def __init__(self, model: Optional[Mandatory[Partial[TensorFlowNetwork]]] = None, ...) -> None:
         # PARAM declares the deferral (machine-read by `partial_param_names`);
-        # ATTRIBUTE declares what it holds once flowed — see §7.
-        self.model: TensorFlowNetwork = model
+        # the runnable base stores it as the ATTRIBUTE — see §7.
+        super().__init__(model=model, ...)
 
 # ...and everywhere else the type is simply the framework's own base:
-class TorchClassifier(TorchRunner, ProgressReporting):
-    def __init__(self, model: Mandatory[Partial[nn.Module]], ...) -> None:
-        self.model: nn.Module = cast(nn.Module, model)
+class TorchClassifier(ClassificationTorchHooks, TorchLoopRunnable):
+    def __init__(self, model: Optional[Mandatory[Partial[nn.Module]]] = None, ...) -> None:
+        super().__init__(model=model, ...)
 ```
 
 **What you may change.** A new backend picks the type its loop actually requires
@@ -1112,7 +1113,7 @@ reach back into `tf.initializers` for brevity.
 
 ## 11. One name per quantity, chosen where the name is chosen (2026-08-04)
 
-**Context.** `examples/sweep/run_sweep.sh` trains ONE config on every installed
+**Context.** `matrainer sweep backends examples/sweep/sweep.yaml` trains ONE config on every installed
 backend so the runs can be compared in a single table. They could not be. Every
 tracker records the key it is handed, so each run landed its engine's own spelling —
 measured from the header line of each `metrics.csv` in a real 13-run sweep:

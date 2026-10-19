@@ -248,7 +248,7 @@ the decision was first recorded; it is what the "wire-to" framing settles.)
   inference of a class's role.
 - **Exclusion requires two claims.** A candidate that declares no framework is
   never filtered out, and a runnable that declares none filters nothing. Every
-  untagged project (raidar, deltaid, waivefront) therefore behaves exactly as
+  untagged project (raidar, deltaid) therefore behaves exactly as
   before — the axis is opt-in per class, not a flag day.
 - **Framework is enforcement, task is guidance.** A discovery service deliberately offers
   cross-*task* options (a segmentation model in a classification model slot — "a

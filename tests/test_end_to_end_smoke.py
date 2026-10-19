@@ -2,8 +2,8 @@
 ``recordstream.collate_records`` + a fake record dataset threaded through one full
 forward+backward step.
 
-This proves the wiring contract that the YAML configs in
-``waivefront/config/`` exercise — the actual RFUAV training flow
+This proves the wiring contract that a signal project's RFUAV training
+configs exercise — the actual RFUAV training flow
 just adds the HF Hub fetch in front. The fake dataset yields the tensorized
 record dict that ``HuggingFaceSource`` produces (a ``[3, H, W]`` float
 ``Image`` under ``"image"`` + a ``Label`` under ``"class"`` + plain metadata

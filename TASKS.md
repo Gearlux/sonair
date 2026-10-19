@@ -16,5 +16,5 @@ workspace root `TASKS.md`. Completed items are not archived here — git history
   heads: a prototype head (one learned prototype per class, logits a fixed scale times the cosine, cross-entropy with
   label smoothing) and a family head (a linear layer over a coarser vocabulary, each class mapped to one family by a
   table in the config). The prediction carries the best cosine and the family probabilities, so a consumer's verdict
-  rule can refuse a crop as unknown by distance, not by softmax. The consumer and its measurement are waivefront's
-  `docs/two-stage-detection.md`; scope as code first (root rule). @2026-10-18
+  rule can refuse a crop as unknown by distance, not by softmax. The consumer and its measurement are a signal
+  project's two-stage detection design; scope as code first (root rule). @2026-10-18

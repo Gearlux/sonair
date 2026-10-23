@@ -250,13 +250,13 @@ sonair-keras-classification = "sonair.keras_classification"
 # TensorFlow backend's loss/metric set IS the Keras one, already registered above.
 sonair-fastai-classification = "sonair.fastai_classification"
 
-# Which of this project's extras are ML FRAMEWORKS, for `aisland framework`. Selecting a name
-# here is what makes `aisland setup` add the matching extra to this project's install.
+# Which of this project's extras are ML FRAMEWORKS, for aisland's `framework` selection. Choosing a name
+# is what makes `aisland setup` add the matching extra to this project's install.
 #
 # All eight backends are declared, one per extra above.
 #
 # Declaring a name here only puts it on the MENU — what gets installed is the separate
-# selection in the workspace `config.toml` (`aisland framework set …`), so listing a name costs
+# choice in the workspace's `workspace.toml` (`aisland workspace configure framework set …`), so listing a name costs
 # nothing until someone selects it.
 #
 # NO protobuf conflict, contrary to what this comment claimed until 2026-07-30. A clean
@@ -267,8 +267,8 @@ sonair-fastai-classification = "sonair.fastai_classification"
 # while wandb (0.25.0, `<7`), grpcio-status (1.80.0, `<7`) and opentelemetry-proto (1.27.0,
 # `<5`) stayed put. All three relaxed to `<8` in releases that are already out. Let them move
 # too — or recreate the venv — and TensorFlow resolves like any other extra.
-[tool.aisland]
-frameworks = ["lightning", "torch", "keras", "tensorflow", "fastai", "huggingface", "jax", "mlx"]
+[tool.aisland.selection.framework]
+choices = ["lightning", "torch", "keras", "tensorflow", "fastai", "huggingface", "jax", "mlx"]
 
 [tool.setuptools.packages.find]
 where = ["."]

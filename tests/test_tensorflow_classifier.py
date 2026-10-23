@@ -24,7 +24,7 @@ anything else can claim the engine.
 
 TensorFlow is also not part of the workspace's *selected* frameworks by default (it is a large
 download, and nothing else needs it), so this group skips entirely on a default checkout and
-runs on one that opted in with ``aisland framework set … tensorflow``.
+runs on one that opted in with ``aisland workspace configure framework set … tensorflow``.
 """
 
 import ast

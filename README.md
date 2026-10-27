@@ -1079,6 +1079,15 @@ own `Callback` class) and on `jax` / `mlx`, whose loops are sonair's own and tak
 metrics, and class names show up automatically as wireable output sockets in a visual
 editor's run results.
 
+## Environment variables
+
+Listed with defaults in [`env.complete`](https://github.com/Gearlux/sonair/blob/main/env.complete).
+
+| variable | meaning |
+| --- | --- |
+| `KERAS_BACKEND` | `torch`, `tensorflow` or `jax` — the engine Keras runs on (see *Choosing the Keras compute backend*) |
+| `AIM_REPO` | folder of the Aim repository a tracker config writes to via `save_dir: $AIM_REPO` |
+
 ## Dependencies
 
 | Package | Purpose |

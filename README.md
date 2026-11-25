@@ -1123,3 +1123,7 @@ already in the manifest's `params`.
 Reading the identity is free and never builds the model: the properties consult stored
 configuration only. Adding one to your own wrapper is a single `model_refs` property — see
 [matrainer's `uri` module](https://github.com/Gearlux/matrainer).
+
+## License
+
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) (the `LICENSE` file): free for personal, academic and other noncommercial use. Commercial use needs a separate licence from the author.

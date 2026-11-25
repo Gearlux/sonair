@@ -9,7 +9,7 @@ version = "0.1.0a1"
 description = "Image classification across training backends, driven by one config (timm models)."
 readme = "README.md"
 authors = [{name = "Gert Behiels"}]
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -70,9 +70,9 @@ Changelog = "https://github.com/Gearlux/sonair/blob/main/CHANGELOG.md"
 #   uv pip install -e './sonair[keras]'
 #   uv pip install -e './sonair[lightning,keras]'
 #
-# `lightning` and `keras` are IMPLEMENTED; the rest are templates whose verbs name the work.
-# An extra exists for each so the not-implemented guidance can print a real install command,
-# and so wiring a backend later is a dependency change rather than a packaging one.
+# All eight backends are implemented, one extra each: `lightning`, `torch`, `keras`, `tensorflow`,
+# `fastai`, `huggingface`, `jax`, `mlx`. Choosing a backend is a dependency change, not a
+# packaging one.
 lightning = [
     "torch",
     "torchmetrics",
@@ -250,15 +250,13 @@ sonair-keras-classification = "sonair.keras_classification"
 # TensorFlow backend's loss/metric set IS the Keras one, already registered above.
 sonair-fastai-classification = "sonair.fastai_classification"
 
-# Which of this project's extras are ML FRAMEWORKS, for `aisland framework`. Selecting a name
-# here is what makes `aisland setup` add the matching extra to this project's install.
+# Which of this project's extras are ML FRAMEWORKS, for aisland's `framework` selection. Choosing a name
+# is what makes `aisland setup` add the matching extra to this project's install.
 #
-# Only the IMPLEMENTED backends are declared. The `jax` / `mlx` / `huggingface` extras above
-# exist so the CLI's not-implemented templates can print a real install command; declaring them
-# here would install three frameworks nothing can run yet.
+# All eight backends are declared, one per extra above.
 #
 # Declaring a name here only puts it on the MENU — what gets installed is the separate
-# selection in the workspace `config.toml` (`aisland framework set …`), so listing a name costs
+# choice in the workspace's `workspace.toml` (`aisland workspace configure framework set …`), so listing a name costs
 # nothing until someone selects it.
 #
 # NO protobuf conflict, contrary to what this comment claimed until 2026-07-30. A clean
@@ -269,8 +267,8 @@ sonair-fastai-classification = "sonair.fastai_classification"
 # while wandb (0.25.0, `<7`), grpcio-status (1.80.0, `<7`) and opentelemetry-proto (1.27.0,
 # `<5`) stayed put. All three relaxed to `<8` in releases that are already out. Let them move
 # too — or recreate the venv — and TensorFlow resolves like any other extra.
-[tool.aisland]
-frameworks = ["lightning", "torch", "keras", "tensorflow", "fastai", "huggingface", "jax", "mlx"]
+[tool.aisland.selection.framework]
+choices = ["lightning", "torch", "keras", "tensorflow", "fastai", "huggingface", "jax", "mlx"]
 
 [tool.setuptools.packages.find]
 where = ["."]

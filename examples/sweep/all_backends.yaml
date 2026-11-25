@@ -1,6 +1,6 @@
 # The sweep overlay: EVERY backend live, EVERY convnet reachable, EVERY tracker selectable.
 #
-#   ../../examples/sweep/run_sweep.sh                   # the driver — see that script
+#   matrainer sweep backends examples/sweep/sweep.yaml  # the driver — see that file's header
 #   sonair train examples/sweep/all_backends.yaml --framework jax --model convnet --tracker mlflow
 #
 # ---------------------------------------------------------------------------

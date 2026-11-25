@@ -248,7 +248,7 @@ the decision was first recorded; it is what the "wire-to" framing settles.)
   inference of a class's role.
 - **Exclusion requires two claims.** A candidate that declares no framework is
   never filtered out, and a runnable that declares none filters nothing. Every
-  untagged project (raidar, deltaid, waivefront) therefore behaves exactly as
+  untagged project (raidar, deltaid) therefore behaves exactly as
   before — the axis is opt-in per class, not a flag day.
 - **Framework is enforcement, task is guidance.** A discovery service deliberately offers
   cross-*task* options (a segmentation model in a classification model slot — "a
@@ -972,19 +972,20 @@ transformers` that this backend defers to the methods that need it.
 **Example.**
 
 ```python
-# tensorflow_classifier.py — the one slot where two frameworks meet
+# matrainer/tensorflow/loop.py — the one slot where two frameworks meet
 TensorFlowNetwork = Union[keras.Model, tf.Module]
 
-class TensorFlowClassifier(ProgressReporting):
-    def __init__(self, model: Mandatory[Partial[TensorFlowNetwork]], ...) -> None:
+# sonair/tensorflow_classifier.py — the classification hooks and the TensorFlow loop are the two bases
+class TensorFlowClassifier(ClassificationKerasHooks, TensorFlowRunnable):
+    def __init__(self, model: Optional[Mandatory[Partial[TensorFlowNetwork]]] = None, ...) -> None:
         # PARAM declares the deferral (machine-read by `partial_param_names`);
-        # ATTRIBUTE declares what it holds once flowed — see §7.
-        self.model: TensorFlowNetwork = model
+        # the runnable base stores it as the ATTRIBUTE — see §7.
+        super().__init__(model=model, ...)
 
 # ...and everywhere else the type is simply the framework's own base:
-class TorchClassifier(TorchRunner, ProgressReporting):
-    def __init__(self, model: Mandatory[Partial[nn.Module]], ...) -> None:
-        self.model: nn.Module = cast(nn.Module, model)
+class TorchClassifier(ClassificationTorchHooks, TorchLoopRunnable):
+    def __init__(self, model: Optional[Mandatory[Partial[nn.Module]]] = None, ...) -> None:
+        super().__init__(model=model, ...)
 ```
 
 **What you may change.** A new backend picks the type its loop actually requires
@@ -1112,7 +1113,7 @@ reach back into `tf.initializers` for brevity.
 
 ## 11. One name per quantity, chosen where the name is chosen (2026-08-04)
 
-**Context.** `examples/sweep/run_sweep.sh` trains ONE config on every installed
+**Context.** `matrainer sweep backends examples/sweep/sweep.yaml` trains ONE config on every installed
 backend so the runs can be compared in a single table. They could not be. Every
 tracker records the key it is handed, so each run landed its engine's own spelling —
 measured from the header line of each `metrics.csv` in a real 13-run sweep:
@@ -1262,7 +1263,7 @@ and put the arithmetic that is genuinely shared upstream.
   backend and its own eval splits. Only `huggingface` still has no training metrics, and that one
   IS the engine: `compute_metrics` is its evaluation hook.
 - A training metric therefore measures the network as it trained, so a gap against validation is
-  expected. The bare-torch backend's BatchNorm note in `AGENTS.md` is the same observation.
+  expected. The BatchNorm note in record 14 is the same observation.
 
 **Example.**
 
@@ -1344,3 +1345,198 @@ class-names artifact.
 (`_build_trainer` / `_live_trackers` / `_run_eval` / `_report_epoch_metrics`) — extend through
 the hooks, or change the base in matrainer with every consumer updated in the same workspace
 change.
+
+---
+
+## 14. The bare-torch backend is the control experiment (2026-08-01)
+
+**Context.** Each of the other seven backends shows the same thing: swap the runnable, keep
+the config. None of them shows the opposite. If a knob only works because a training framework
+implements it, a Lightning run, a fastai run and a `transformers.Trainer` run all hide that.
+
+**Decision.** `TorchClassifier` runs with no training framework underneath. It calls
+`zero_grad`/`backward`/`step` itself, picks the device explicitly, switches
+`model.train()`/`model.eval()` explicitly, and wraps the eval pass in `torch.no_grad()`. It
+uses the same `TimmModel`, the same `preprocess` chain, the same `torch.nn` losses
+(`FRAMEWORKS["torch"]` points at `sonair.torch_classification`, like `lightning`) and the same
+torchmetrics. Since 2026-08-07 the loop is `matrainer.torch.TorchLoopRunnable` (record 13), so
+lightning and torch share the task hooks by construction.
+
+**Consequences.**
+
+- **It deliberately has no callback protocol, no distributed strategy and no multi-GPU.**
+  That is Lightning's job; a partial Trainer here would just be a worse Trainer. It tracks
+  through `trackers:` using matrainer's plain functions, the same as every other backend.
+- **It has three knobs the other backends do not:**
+  - `device` is `Literal["auto", "cpu", "cuda", "mps"]`. `auto` tries CUDA, then MPS, then
+    CPU. An explicit value is used as given, so a CPU-vs-GPU benchmark cannot fall back
+    silently.
+  - `checkpoint_dir` holds a plain `state_dict`, since there is no framework format.
+  - `grad_clip`.
+
+  The device choice is `matrainer.torch.resolve_device`: any hand-written torch loop picks
+  the same way.
+- **It forced a helper out of `matrainer.lightning`.** `build_metric_collection` and
+  `scalar_metrics` lived there, and importing that package requires `pytorch_lightning`. They
+  moved to `matrainer.torch.metrics` (matrainer record 5).
+  `tests/test_torch_classifier.py::test_it_needs_no_training_framework` scans this module's
+  imports so that a Lightning import cannot come back.
+- **It exposed a gap in confluid.** `flow()` called `solidify()` only on a deferred spec, so a
+  model that was already live reached the optimizer unbuilt: *"optimizer got an empty
+  parameter list"*. confluid now builds live models too. That fixed all eight backends, and
+  it means `solidify()` runs more than once in a run, so every wrapper must build once and
+  cache. Both ends are pinned:
+  - `tests/test_timm_classifier.py::test_flowing_a_LIVE_model_builds_it`
+  - `tests/test_torch_classifier.py::test_a_LIVE_lazy_model_is_built_before_the_optimizer_reads_it`
+- **On a short run, validation scores far below training, and that is BatchNorm, not a bug.**
+  Same weights, same data, after 16 optimizer steps:
+
+  | BatchNorm statistics | accuracy |
+  |---|---|
+  | eval mode (running statistics, still mostly ImageNet's) | 0.314 |
+  | batch statistics | 0.871 |
+
+  Every torch backend behaves like this on a short run. Do not "fix" the eval pass.
+
+**Example.**
+
+```yaml
+torch: !scope:framework=torch
+  import: sonair.torch_classification   # the same set lightning uses
+  runnable: !class:sonair.TorchClassifier
+  #   device: auto            # auto | cpu | cuda | mps
+  #   checkpoint_dir: ./runs/torch/mnist
+  #   grad_clip: 1.0
+```
+
+The block names a runnable and nothing else: the model, data, metrics and trackers are all
+inherited. It is the smallest block in the example.
+
+**What you may change.** You may add a knob that a hand-written loop genuinely needs. Do not
+add a callback protocol, a distributed strategy or anything else Lightning already provides,
+and do not import a training framework into this module.
+
+---
+
+## 15. Every model wrapper with a random build is seeded at build time (2026-08-09)
+
+**Context.** The convnets were seeded on 2026-08-08. The zoo-backed sweep rows still took
+their head initialization from whatever state the global RNG was in. Two sweeps of the
+identical config on the same day gave:
+
+| row | metric | sweep 1 | sweep 2 |
+|---|---|---|---|
+| `keras_zoo` | val/accuracy | 0.76 | 0.70 |
+| `torch_zoo` | val/accuracy | 0.938 | 0.958 |
+
+Even a pretrained load initializes a fresh `num_classes` head randomly.
+
+**Decision.** Each wrapper with a random build takes `seed` and applies it in its build's own
+idiom, at BUILD time, without restoring the RNG afterwards:
+
+| class | how it seeds | when |
+|---|---|---|
+| `TimmModel` | `torch.manual_seed` | before `timm.create_model` |
+| `KerasModel` | `keras.utils.set_random_seed` | before the factory |
+| `HuggingFaceClassifier` | `transformers.set_seed`, default `seed: int = 42` (the transformers default) | before the model is built |
+
+The seed sits on the huggingface classifier rather than its model wrapper, because the
+machinery base builds the model. It also goes into `_argument_floor()`, so the head's
+initialization and the Trainer's data order use the same value.
+
+The restoration project measured a version that saved and restored the RNG state. It
+reproduced the model inside a run that still did not reproduce. Seeding at build time is a
+run-level seed applied at the earliest useful moment.
+
+**Consequences.**
+
+- **`TensorFlowModel` has NO seed, deliberately.** Its build only deserializes
+  (`tf.saved_model.load`): every weight comes from the artifact and nothing random is drawn.
+  A `seed` knob there would seed nothing.
+- **Reruns now match exactly.** Verified 2026-08-09:
+  - `keras_zoo` train/loss was 0.03230628743767738 both times.
+  - `huggingface_zoo` train/loss was 0.49055663744608563 both times.
+  - The MLflow sweep matched the CSV runs byte for byte.
+- **One residual remains on MPS.** Under the sweep's sequential load, a torch-family convnet
+  cell sometimes drifts slightly (train/loss 2.1762 against 2.1759). Direct reruns reproduce,
+  on both trackers, so this is not a tracker effect.
+- **Adding the knob made navigaitor's generated examples stale**, the AGENTS rule on new
+  constructor knobs. They were regenerated in the same change.
+
+**Example.**
+
+```yaml
+model: !partial:sonair.TimmModel
+  model_name: efficientvit_b0
+  pretrained: true
+  seed: 0          # applied before timm.create_model; the fresh head is reproducible
+```
+
+**What you may change.** You may add `seed` to a new wrapper whose build draws random
+numbers, applied at build time in that framework's own idiom. Do not restore the RNG after
+the build, and do not add a seed to a wrapper that only deserializes. Pins:
+- `tests/test_timm_classifier.py::test_the_seed_actually_reproduces_the_weights`
+- `tests/test_keras_classifier.py::test_the_model_seed_actually_reproduces_the_weights`
+- `tests/test_huggingface_classifier.py::TestTheSeedCoversTheModelBuild`
+
+---
+
+## 16. A run's output wiring is one constructor slot; engine callbacks are a second (2026-08-01)
+
+**Context.** Every backend had a `logger:` knob, and it meant two different things.
+Lightning's held `pytorch_lightning.loggers.*`. The other backends held framework callbacks
+under that misleading name.
+
+Meanwhile `trackers` was a post-construction attribute typed `Optional[List[Tracker]]`. A
+`trackers: [...]` key did nothing, silently, because confluid only broadcasts a list onto a
+slot whose ANNOTATION accepts a list. The whole tracking chain (manifest, provenance,
+per-epoch metrics) could not be reached from YAML. Every unit test still passed, because the
+tests set `.trackers` in Python.
+
+**Decision.**
+
+- **`logger` is deleted.** `trackers:` is the only output wiring, on every backend. Lightning
+  adapts trackers through `matrainer.lightning.TrackerLogger`.
+- **`trackers` is a constructor param** annotated
+  `Optional[Union[Partial[Tracker], Iterable[Partial[Tracker]]]]`, stored VERBATIM. Normalizing
+  it in `__init__` would iterate the value, and a deferred `Fluid` is not iterable.
+  `_live_trackers()` (matrainer) normalizes and flows it once, then writes the result back to
+  the same slot. A `Fluid` flowed twice would start two MLflow runs for one training run.
+- **Framework callbacks get their own, honestly named `callbacks` param** on the six backends
+  that have a callback protocol:
+
+  | backends | element type |
+  |---|---|
+  | keras, tensorflow, fastai | the engine's own `Callback` class |
+  | huggingface | `HuggingFaceCallback`, which is `Any` (see below) |
+  | jax, mlx | `EpochCallback`, a plain `Callable[[int, Dict[str, float]], None]` |
+
+  `lightning` reaches callbacks through its Trainer slot, and `torch` has none (record 14).
+
+**Consequences.**
+
+- **`callbacks` is typed `List[...]`, not `Iterable[...]`.** Both pass confluid's list
+  broadcast. But `to_pydantic` turns an `Iterable[X]` field into a bare `Any`, while
+  `List[X]` keeps `X`. The keras field went from `Optional[Any]` to
+  `Optional[List[Union[keras.callbacks.Callback, Fluid, FluidConfig]]]`. `trackers` keeps
+  `Iterable`, because its single-tracker arm already carries the type.
+- **The huggingface element stays `Any`.** The honest type is
+  `transformers.TrainerCallback`. Naming it would force a module-level `import transformers`,
+  and a `TrainerCallback` inherits nothing lighter that could stand in for it.
+
+**Example.**
+
+```yaml
+trackers:                                      # every backend
+  - !class:matrainer.CsvTracker { save_dir: ./runs }
+keras: !scope:framework=keras
+  callbacks:                                   # this engine only
+    - !class:keras.callbacks.EarlyStopping(patience=3)
+```
+
+**What you may change.** You may add a tracker kind or a callback element type. Do not
+move `trackers` off the constructor, narrow it to a bare `List`, normalize it in `__init__`,
+or bring back a `logger:` slot. Pins:
+- `tests/test_tracking_parity.py::test_no_backend_keeps_a_logger_slot`
+- `tests/test_tracking_parity.py::test_a_list_valued_callbacks_key_reaches_the_slot`
+- `tests/test_classification_trainer.py::test_flowing_twice_does_not_rebuild_a_deferred_tracker`

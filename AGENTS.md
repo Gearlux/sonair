@@ -8,7 +8,7 @@ and usage is in the [README](README.md) and [`docs/frameworks.md`](docs/framewor
 
 Image classification on eight backends, all driven by one config: `lightning`, `torch` (a
 hand-written loop), `keras`, `tensorflow`, `fastai`, `huggingface`, `jax`, `mlx`. On PyPI as
-pre-release `0.1.0a1`; the repo is private.
+pre-release `0.1.0aN` (the version in `pyproject.toml`); the repo is public.
 
 Each runnable `<backend>_classifier.py` = task hooks (here) + a matrainer machinery base + its
 own full flat `__init__`:
@@ -200,7 +200,7 @@ first ask which package owns its vocabulary.
   `tests/test_cli_frameworks.py::test_every_framework_names_a_declared_pip_extra`)
 - `fastcore<2` and `fastprogress<1.1` are upstream breaks, not hardcoded versions; see
   `pyproject.toml` and TASKS.md.
-- Releases go through the hand-written `release.yml` from a private repo.
+- Releases go through the hand-written `release.yml` from the public repo.
   - Each release raises every workspace floor, core and extras, to the newest release and runs the suite there,
     and a dependent's next release raises its `sonair>=` the same way (user choice 2026-11-26; aisland
     `tests/test_workspace_dependency_specs.py` checks each is satisfiable).

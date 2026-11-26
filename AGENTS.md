@@ -201,8 +201,9 @@ first ask which package owns its vocabulary.
 - `fastcore<2` and `fastprogress<1.1` are upstream breaks, not hardcoded versions; see
   `pyproject.toml` and TASKS.md.
 - Releases go through the hand-written `release.yml` from a private repo.
-  - Workspace specs on sonair read `>=0.1.0a1` (aisland
-    `tests/test_workspace_dependency_specs.py`).
+  - Each release raises every workspace floor, core and extras, to the newest release and runs the suite there,
+    and a dependent's next release raises its `sonair>=` the same way (user choice 2026-11-26; aisland
+    `tests/test_workspace_dependency_specs.py` checks each is satisfiable).
   - README links are absolute GitHub URLs (`tests/test_docs_links.py`).
   - The newest CHANGELOG entry is the declared version (`tests/test_packaging.py`).
 - CI runs `mypy .` here with only its own extras. List every extra-gated import in

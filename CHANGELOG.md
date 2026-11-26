@@ -6,7 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0a2] — 2026-11-26
+
 ### Changed
+- **sonair requires the newest workspace releases** — confluid 0.5.0 (was `>=0.3.1`), loggair 0.3.0 (was
+  `>=0.2.0`), recordstream 0.1.0a4 (was `>=0.1.0a2`) and matrainer 0.1.0a3 (was `>=0.1.0a1`), in the core and in
+  every extra; the suite is tested against them.
 - **The licence is now the PolyForm Noncommercial License 1.0.0** (`LICENSE`, `pyproject.toml`): free for personal, academic and other noncommercial use; commercial use needs a separate licence from the author. It was MIT; the versions released under MIT keep that licence.
 
 ## [0.1.0a1] — 2026-09-28

@@ -23,10 +23,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Image Recognition",
     "Typing :: Typed",
 ]
-# Floors are what the suite runs against in a clean venv resolving from PyPI alone (measured
-# 2026-09-28, before the first release). matrainer 0.1.0a1 itself requires confluid>=0.3.1,
-# liquifai>=0.3.0 and loggair>=0.2.0, so the older floors here named combinations nobody
-# could install.
+# Floors are what the suite runs against in a clean venv resolving from PyPI alone, and each release
+# raises every workspace floor to the newest release (user choice 2026-11-26). Measured 2026-11-26 at
+# confluid 0.5.0, liquifai 0.4.0, loggair 0.3.0, recordstream 0.1.0a4 and matrainer 0.1.0a3:
+# the suite passed (648, 38 skipped).
 dependencies = [
     # CORE IS BACKEND-FREE (2026-07-30). What stays here is what EVERY backend needs: the
     # config/CLI surface, the record engine, and the task-shaped pieces that are engine-neutral.
@@ -41,16 +41,13 @@ dependencies = [
     #
     # matrainer is core because it is a TRACKING library, not a framework: its own torch and
     # framework helpers sit behind ITS extras, which the backend extras below select.
-    "matrainer>=0.1.0a1",
-    # 0.3.0 is the floor for the `framework=` discovery tag, passed at registration
-    # time in sonair/torch_classification.py + sonair/keras_classification.py —
-    # against 0.2.0 every registration raises TypeError at import.
-    "confluid>=0.3.1",
-    # recordstream ships as a pre-release. Under PEP 440 a plain `>=0.1.0` EXCLUDES every
-    # pre-release of 0.1.0, so it would resolve to nothing. 0.1.0a2 is the first release where
-    # `ToTensor` only converts — its example relies on `ToTensor` not rescaling already-standardized pixels.
-    "recordstream>=0.1.0a2",
-    "loggair>=0.2.0",
+    #
+    # recordstream and matrainer ship as pre-releases: under PEP 440 a plain `>=0.1.0` EXCLUDES
+    # every pre-release of 0.1.0.
+    "matrainer>=0.1.0a3",
+    "confluid>=0.5.0",
+    "recordstream>=0.1.0a4",
+    "loggair>=0.3.0",
     "datasets>=2.0.0",
     "pillow",
     "tqdm",  # progress bar while the trainer walks train targets to fit the label encoder
@@ -79,7 +76,7 @@ lightning = [
     "pytorch-lightning",
     "timm>=1.0.0",          # the model zoo TimmModel wraps
     # matrainer's pl-side tracking helpers + the tracker backends this backend's configs wire.
-    "matrainer[lightning,mlflow,tensorboard]>=0.1.0a1",
+    "matrainer[lightning,mlflow,tensorboard]>=0.1.0a3",
 ]
 # The `lightning` extra MINUS pytorch-lightning — a hand-written training loop and nothing
 # under it. `matrainer[torch]` rather than `[lightning]` is the whole point: the metric helpers
@@ -90,8 +87,8 @@ torch = [
     "torch",
     "torchmetrics",
     "timm>=1.0.0",          # the model zoo `TimmModel` wraps — shared with the lightning backend
-    "recordstream[torch]>=0.1.0a2",
-    "matrainer[torch,mlflow,tensorboard]>=0.1.0a1",
+    "recordstream[torch]>=0.1.0a4",
+    "matrainer[torch,mlflow,tensorboard]>=0.1.0a3",
 ]
 # Keras 3 is an API, not an engine — it needs ONE compute backend underneath (torch/TF/jax), and
 # `recordstream.keras` (which `sonair/_keras.py` imports through) selects whichever is installed.
@@ -103,16 +100,16 @@ keras = [
     "torch",                # the engine `sonair[keras]` runs Keras on
     # The PyDataset batching adapter (`recordstream.keras.RecordSequence`) + the KERAS_BACKEND
     # ordering this backend's keras imports depend on.
-    "recordstream[keras]>=0.1.0a2",
+    "recordstream[keras]>=0.1.0a4",
     # Tracking for a Keras run. Deliberately matrainer[keras], NOT matrainer[tensorflow]: the
     # callback needs the Keras API, not the TensorFlow engine.
-    "matrainer[keras]>=0.1.0a1",
+    "matrainer[keras]>=0.1.0a3",
 ]
 tensorflow = [
     "keras>=3.0",           # Keras 3 IS tf.keras in TF >= 2.16
     "tensorflow>=2.16",     # ...this extra's engine
-    "recordstream[keras]>=0.1.0a2",
-    "matrainer[keras]>=0.1.0a1",
+    "recordstream[keras]>=0.1.0a4",
+    "matrainer[keras]>=0.1.0a3",
 ]
 # fastai is a LAYER ON TORCH, not an engine of its own — its losses are `nn.Module`s and its
 # `Learner` consumes plain `torch.utils.data.DataLoader`s. So this extra names torch's stack
@@ -137,10 +134,10 @@ fastai = [
     "fastprogress<1.1",
     "torch",
     "timm>=1.0.0",          # the model zoo `TimmModel` wraps — shared with the lightning backend
-    "recordstream[torch]>=0.1.0a2",
+    "recordstream[torch]>=0.1.0a4",
     # matrainer.torch carries the Lightning-checkpoint loader `TimmModel` reads; the tracker
     # backends a fastai config wires are the same ones every other backend uses.
-    "matrainer[torch,mlflow,tensorboard]>=0.1.0a1",
+    "matrainer[torch,mlflow,tensorboard]>=0.1.0a3",
 ]
 jax = [
     "jax>=0.4",

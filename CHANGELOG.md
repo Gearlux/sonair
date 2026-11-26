@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0a2] — 2026-11-26
+
 ### Changed
 - **sonair requires the newest workspace releases** — confluid 0.5.0 (was `>=0.3.1`), loggair 0.3.0 (was
   `>=0.2.0`), recordstream 0.1.0a4 (was `>=0.1.0a2`) and matrainer 0.1.0a3 (was `>=0.1.0a1`), in the core and in

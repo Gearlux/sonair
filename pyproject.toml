@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sonair"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Image classification across training backends, driven by one config (timm models)."
 readme = "README.md"
 authors = [{name = "Gert Behiels"}]
